@@ -1,0 +1,71 @@
+/* Reset and base styles */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background-color: #1a1b26;
+  color: #a9b1d6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #292e42;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3b4261;
+}
+
+/* Selection */
+::selection {
+  background: #33467c;
+  color: #c0caf5;
+}
+
+/* Terminal container overrides */
+.terminal-container .xterm {
+  padding: 4px;
+}
+
+.terminal-container .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: #292e42 transparent;
+}
+
+/* Focus styles */
+:focus-visible {
+  outline: 2px solid #7aa2f7;
+  outline-offset: 2px;
+}
+
+button:focus-visible {
+  outline: 2px solid #7aa2f7;
+  outline-offset: 2px;
+}
+
+input:focus-visible {
+  outline: none;
+  border-color: #7aa2f7 !important;
+}

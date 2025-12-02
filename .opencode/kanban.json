@@ -1,0 +1,48 @@
+{
+  "columns": [
+    {
+      "id": "ideas",
+      "title": "Backlog",
+      "subtitle": "Signals + research",
+      "accent": "info",
+      "wip": {
+        "current": 0,
+        "limit": 6
+      },
+      "cards": []
+    },
+    {
+      "id": "doing",
+      "title": "In Flight",
+      "subtitle": "Active focus streams",
+      "accent": "warning",
+      "wip": {
+        "current": 0,
+        "limit": 4
+      },
+      "cards": []
+    },
+    {
+      "id": "verify",
+      "title": "Review",
+      "subtitle": "QA + polish",
+      "accent": "accent",
+      "wip": {
+        "current": 0,
+        "limit": 3
+      },
+      "cards": []
+    },
+    {
+      "id": "done",
+      "title": "Shipped",
+      "subtitle": "Celebrations + learnings",
+      "accent": "success",
+      "wip": {
+        "current": 0,
+        "limit": 99
+      },
+      "cards": []
+    }
+  ]
+}

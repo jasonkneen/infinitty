@@ -1,0 +1,215 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Quick Start Guide
+description: Get started with Infinitty Terminal in 5 minutes
+---
+
+## Your First Command
+
+After installing Infinitty, open the app and you'll see the main interface:
+
+1. **Terminal on the left** - Your native shell
+2. **AI Panel on the right** - Chat with Claude
+3. **Command bar at the bottom** - Execute commands or ask AI
+
+Type your first command:
+
+```bash
+echo "Hello from Infinitty!"
+```
+
+Press Enter to execute. You'll see output appear in the terminal.
+
+## Ask AI for Help
+
+Click the AI panel or press `Cmd+I` and ask:
+
+```
+How do I list all files in the current directory?
+```
+
+Claude will:
+- Explain the command
+- Show you the shell command
+- Let you execute it directly
+
+Click the blue "Execute" button to run the suggested command.
+
+## Terminal Mode vs Block Mode
+
+### Ghostty Mode (Default)
+
+Classic terminal with AI alongside. Press `Cmd+,` to toggle between:
+- Full terminal
+- Split view with AI panel
+
+### OpenWarp Mode
+
+Commands shown as editable "blocks":
+
+```
+[Cmd] ls -la
+[Output] Showing 15 items...
+
+[Cmd] cd projects
+[Cmd] █  (new command)
+```
+
+Edit previous commands by clicking them. Ask AI without typing.
+
+## Basic Navigation
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+,` | Open Settings |
+| `Cmd+I` | Focus AI input |
+| `Cmd+K` | Command palette |
+| `Cmd+T` | New tab |
+| `Cmd+W` | Close tab |
+| `Cmd+1-9` | Switch tabs |
+
+## Creating Your First Widget
+
+Widgets let you visualize data or automate tasks.
+
+### 1. Open Widget Creator
+
+```
+Press Cmd+K → "Create Widget"
+```
+
+### 2. Choose Template
+
+- **Workflow** - Visual DAG editor
+- **Chart** - Data visualization
+- **Custom** - React component
+
+### 3. Design Your Workflow
+
+In the Workflow widget:
+
+1. Click "+" to add nodes
+2. Choose node type (input, process, output)
+3. Connect nodes by dragging
+4. Click "Run" to execute
+
+### 4. Save Your Work
+
+```
+Cmd+S to save
+Give it a name: "My First Workflow"
+```
+
+Later, run it with:
+
+```
+ai "Run workflow: My First Workflow"
+```
+
+## Working with Files
+
+### File Explorer
+
+- **Sidebar** shows your current directory tree
+- **Double-click** to open in editor
+- **Right-click** for context menu (rename, delete, etc.)
+
+### Opening Files in Terminal
+
+```bash
+# From AI panel:
+ai "Show me the contents of package.json"
+# Claude will display the file
+
+# From terminal:
+cat package.json
+```
+
+## Using AI Effectively
+
+### Good Prompts
+
+```
+"Generate a bash script to backup all .txt files"
+ai "Show me the top 10 largest files in this directory"
+"Create a workflow that processes CSV files"
+```
+
+### AI Responds With
+
+- **Code snippets** (copy with one click)
+- **Executable commands** (run directly)
+- **Explanations** (understand what's happening)
+- **Widgets** (visualizations and tools)
+
+## Settings
+
+Press `Cmd+,` to customize:
+
+- **Theme** - Light/dark/auto
+- **Font** - JetBrains Mono, Fira Code, etc.
+- **Font Size** - 10-24px
+- **Model** - Claude 3.5 Sonnet, GPT-4, etc.
+- **Keybindings** - Customize shortcuts
+
+## Next Steps
+
+- [Features & Usage Guide](/docs/features)
+- [Widgets Documentation](/docs/widgets)
+- [MCP Integration](/docs/mcp)
+- [API Reference](/docs/api)
+
+## Common Tasks
+
+### Run a Python script with AI feedback
+
+```bash
+# Type in terminal:
+python script.py
+
+# If there's an error, ask AI:
+ai "Why did my Python script fail? Here's the output: [paste]"
+```
+
+### Generate and visualize data
+
+```bash
+ai "Create a workflow that generates 100 random numbers and shows a histogram"
+```
+
+The AI will:
+1. Create a workflow
+2. Add nodes to generate data
+3. Visualize with a chart widget
+4. Let you run it
+
+### Save commands for later
+
+Click the bookmark icon on any command to save it. Access from:
+
+```
+Cmd+K → "Saved Commands"
+```
+
+### Create a custom widget
+
+See [Building Custom Widgets](/docs/widgets#custom-widgets)
+
+## Tips & Tricks
+
+1. **Use Cmd+Shift+P** to search previous commands
+2. **Hold Alt** and click to open files in external editor
+3. **Drag widgets** to resize and reposition
+4. **Type `@` in AI input** to reference files
+5. **Use Shift+Enter** for multiline input
+
+## Getting Help
+
+If you get stuck:
+
+1. **Settings Help** - Press `?` in any dialog
+2. **AI Assistant** - Ask "How do I...?"
+3. **GitHub Issues** - [Report bugs](https://github.com/flows-ai/hybrid-terminal/issues)
+4. **Documentation** - [Full docs](/docs)
+
+Enjoy your Infinitty Terminal!

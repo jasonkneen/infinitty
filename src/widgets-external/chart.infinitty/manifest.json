@@ -1,0 +1,86 @@
+{
+  "id": "com.infinitty.chart-widget",
+  "name": "Chart Widget",
+  "version": "1.0.0",
+  "description": "Interactive charts and data visualization",
+  "author": {
+    "name": "Infinitty",
+    "email": "hello@example.com"
+  },
+  "license": "MIT",
+  "icon": "data:image/svg+xml,...",
+
+  "main": "./index.tsx",
+  "styles": "./styles.css",
+
+  "activationEvents": [
+    "onWidget:chart"
+  ],
+
+  "contributes": {
+    "tools": [
+      {
+        "name": "chart_create",
+        "description": "Create a new chart with data",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["line", "bar", "pie", "scatter"] },
+            "data": { "type": "array" },
+            "title": { "type": "string" }
+          },
+          "required": ["type", "data"]
+        }
+      },
+      {
+        "name": "chart_update",
+        "description": "Update chart data",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "data": { "type": "array" }
+          },
+          "required": ["data"]
+        }
+      }
+    ],
+    "commands": [
+      {
+        "id": "chart.create",
+        "title": "Create Chart",
+        "category": "Chart"
+      },
+      {
+        "id": "chart.export",
+        "title": "Export Chart as PNG",
+        "category": "Chart"
+      }
+    ],
+    "configuration": {
+      "title": "Chart Widget",
+      "properties": {
+        "chart.defaultType": {
+          "type": "string",
+          "default": "line",
+          "enum": ["line", "bar", "pie", "scatter"],
+          "description": "Default chart type"
+        },
+        "chart.animate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable animations"
+        },
+        "chart.theme": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "light", "dark"],
+          "description": "Chart color theme"
+        }
+      }
+    }
+  },
+
+  "engines": {
+    "infinitty": ">=0.1.0"
+  }
+}

@@ -1,0 +1,347 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Features & Usage
+description: Complete guide to Infinitty Terminal features
+---
+
+## Terminal Modes
+
+### Ghostty Mode
+
+Native terminal emulation with full xterm compatibility.
+
+**Features:**
+- Native performance (no JavaScript overhead)
+- True color support (16 million colors)
+- Real emoji rendering
+- Sixel image protocol support
+- GPT key bindings support
+- True mouse support
+- Split panes with tmux-style navigation
+
+**Enable:**
+```bash
+# Set in ~/.infinitty/config.json
+{
+  "terminalMode": "ghostty"
+}
+```
+
+### OpenWarp Mode
+
+Block-based interface where commands are shown as editable blocks.
+
+**Features:**
+- Edit previous commands
+- Re-execute with modifications
+- Block-level AI feedback
+- Natural language prompts as first-class objects
+- References between blocks (use `#1` to reference block 1)
+
+**Enable:**
+```bash
+# Set in ~/.infinitty/config.json
+{
+  "terminalMode": "openwarp"
+}
+```
+
+## AI Assistant
+
+### Basic Interaction
+
+1. Press `Cmd+I` to focus AI input
+2. Type your question or request
+3. Press Enter to send
+4. Claude responds with explanation and/or code
+
+### Special Syntax
+
+**Reference current directory:**
+```
+ai "List all .ts files in this directory"
+# AI understands current context
+```
+
+**Reference files:**
+```
+ai "Review my code: @src/App.tsx"
+# @ prefix references a file
+```
+
+**Reference terminal output:**
+```
+ai "Why did this fail? @last-output"
+# @last-output is the previous terminal output
+```
+
+### AI Capabilities
+
+Claude in Infinitty can:
+
+- **Generate code** in any language
+- **Explain concepts** (how does async/await work?)
+- **Debug problems** (why is my code failing?)
+- **Create workflows** (visual automation)
+- **Generate visualizations** (charts, diagrams)
+- **Teach you** (explanation + code + execution)
+
+### Continuous Conversation
+
+Maintain context across multiple messages:
+
+```
+User: "Create a workflow for data processing"
+AI: [Creates workflow widget]
+
+User: "Add a step to validate the data"
+AI: [Adds validation node, maintains context]
+
+User: "Show me the output as a chart"
+AI: [Adds visualization, references workflow]
+```
+
+## Block Interface (OpenWarp Mode)
+
+### Command Blocks
+
+```
+[Cmd] npm install
+[Output] added 42 packages...
+```
+
+**Interactions:**
+- Click to focus
+- Edit by typing
+- `↑↓` arrow keys to navigate
+- `Cmd+Enter` to re-execute
+- Click ↪ icon to copy to new block
+
+### Interactive Blocks
+
+Some blocks support rich interaction:
+
+**Code blocks:**
+- Copy code to clipboard
+- Execute with single click
+- Syntax highlighting
+
+**Result blocks:**
+- Expandable/collapsible
+- Copy output
+- Export as file
+
+## Sidebar & Navigation
+
+### File Explorer
+
+- **Browse** your file system
+- **Open files** by double-clicking
+- **Right-click** for context menu
+  - Open in external editor
+  - Copy path
+  - Reveal in Finder
+  - Delete/rename
+
+### Command History
+
+- **Search** previous commands: `Cmd+Shift+P`
+- **Keyboard navigation** through history: `↑↓`
+- **Re-execute** with `Cmd+Enter`
+- **Edit** before re-running
+
+### Bookmarks
+
+Save favorite commands and locations:
+
+```
+# In terminal, run once:
+alias bookmark="infinitty --bookmark"
+
+# Then use:
+infinitty --jump myalias
+```
+
+## Settings & Customization
+
+### Appearance
+
+Press `Cmd+,` → "Appearance"
+
+- **Theme** - Light/Dark/Auto
+- **Font** - Choose installed fonts
+- **Font Size** - 10-24px
+- **Line Height** - 1-2
+- **Color Scheme** - Multiple presets
+- **Opacity** - 0-100%
+
+### Terminal Settings
+
+- **Bell Sound** - On/off
+- **Scrollback Lines** - How many to keep
+- **Auto-scroll** - Scroll on new output
+- **Cursor Style** - Block/underline/bar
+- **Cursor Blink** - On/off
+
+### Keybindings
+
+Fully customizable keyboard shortcuts:
+
+```json
+{
+  "keybindings": {
+    "cmd+I": "focus-ai",
+    "cmd+T": "new-tab",
+    "cmd+W": "close-tab",
+    "cmd+K": "command-palette",
+    "cmd+,": "open-settings",
+    "cmd+]": "next-pane",
+    "cmd+[": "prev-pane"
+  }
+}
+```
+
+Edit at: `~/.infinitty/keybindings.json`
+
+### Models
+
+Configure AI models in Settings → Models:
+
+**Claude API:**
+- Claude 3.5 Sonnet (recommended)
+- Claude 3 Opus
+- Claude 3 Haiku
+
+**OpenAI:**
+- GPT-4
+- GPT-4 Turbo
+- GPT-3.5 Turbo
+
+**Other:**
+- Azure OpenAI
+- Custom endpoints
+
+## Panes & Tabs
+
+### Split View
+
+Create split panes:
+
+```
+Cmd+] - Split vertically
+Cmd+[ - Split horizontally
+Cmd+W - Close active pane
+```
+
+### Tabs
+
+Multiple workspaces:
+
+```
+Cmd+T - New tab
+Cmd+W - Close tab
+Cmd+1-9 - Jump to tab
+Cmd+Shift+N - Rename tab
+```
+
+### Window Management
+
+```
+Cmd+N - New window
+Cmd+M - Minimize
+Cmd+F - Toggle fullscreen
+```
+
+## Built-in Commands
+
+### Navigation
+
+```bash
+cd path/to/dir           # Change directory
+pwd                      # Print working directory
+ls / ll                  # List files
+tree                     # Show directory tree
+```
+
+### File Operations
+
+```bash
+cat file.txt             # Show file contents
+cp source dest           # Copy file
+mv source dest           # Move file
+rm file                  # Delete file
+touch file.txt           # Create file
+```
+
+### System
+
+```bash
+ps aux                   # Show processes
+kill PID                 # Kill process
+top / htop              # Resource monitor
+which command           # Find command location
+```
+
+### Git Integration
+
+```bash
+git status              # Show git status
+git log --oneline       # Show commits
+git diff                # Show changes
+# Full git support
+```
+
+## Performance
+
+Infinitty is optimized for speed:
+
+- **Fast startup** - Opens in less than 1 second
+- **Native terminal** - Ghostty gives native performance
+- **Low memory** - ~150MB on idle
+- **Responsive UI** - 60fps rendering
+- **Widget isolation** - Widgets run in separate processes
+
+### Monitor Performance
+
+Settings → Debug → Performance Stats
+
+Shows:
+- Frame rate
+- Memory usage
+- CPU usage
+- Widget process status
+
+## Accessibility
+
+### Keyboard Navigation
+
+- Tab through UI elements
+- Arrow keys for navigation
+- Enter to activate
+- Escape to close modals
+
+### Screen Reader Support
+
+- Semantic HTML
+- ARIA labels
+- Text descriptions for icons
+
+### Font Scaling
+
+Settings → Appearance → Font Size (10-24px)
+
+## Tips & Tricks
+
+1. **Search commands** - `Cmd+Shift+P` filters history
+2. **Copy terminal output** - Select text and `Cmd+C`
+3. **Paste to AI** - `Cmd+Shift+V` pastes with context
+4. **New window same dir** - `Cmd+N` opens in current directory
+5. **Quick reference** - `Cmd+?` shows shortcuts
+6. **AI in context** - Just drag-select text and ask AI
+
+## Next Steps
+
+- [Widgets Documentation](/docs/widgets)
+- [MCP Integration](/docs/mcp)
+- [Workflows](/docs/workflows)
+- [API Reference](/docs/api)

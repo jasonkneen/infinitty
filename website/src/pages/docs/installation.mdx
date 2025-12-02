@@ -1,0 +1,173 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Installation & Setup
+description: Get Infinitty Terminal installed and configured for your system
+---
+
+## System Requirements
+
+- **macOS 11+** or **Linux** (Ubuntu 20.04+)
+- **8GB RAM** minimum (16GB recommended)
+- **2GB disk space**
+- Ghostty terminal emulator
+- Node.js 18+ (for widget development)
+
+## Installation
+
+### macOS (Homebrew)
+
+```bash
+brew tap flows-ai/infinitty
+brew install infinitty
+infinitty
+```
+
+### macOS (Direct Download)
+
+1. Download the latest `.dmg` from [GitHub Releases](https://github.com/flows-ai/hybrid-terminal/releases)
+2. Open the `.dmg` file
+3. Drag Infinitty to Applications folder
+4. Open from Applications
+
+### Linux (Ubuntu/Debian)
+
+```bash
+# Download the latest .deb
+wget https://github.com/flows-ai/hybrid-terminal/releases/download/v1.0.0/infinitty_1.0.0_amd64.deb
+sudo dpkg -i infinitty_1.0.0_amd64.deb
+infinitty
+```
+
+### From Source
+
+```bash
+git clone https://github.com/flows-ai/hybrid-terminal.git
+cd hybrid-terminal
+pnpm install
+pnpm build
+npm run tauri dev
+```
+
+## Configuration
+
+### Initial Setup
+
+When Infinitty starts for the first time, it will prompt you to:
+
+1. **Select Terminal Mode**
+   - `Ghostty` - Native terminal emulation (recommended)
+   - `OpenWarp` - Block-based interface with AI
+
+2. **Configure AI Model**
+   - Add your Claude API key
+   - Or configure GPT-4 / other models
+   - Test connection
+
+3. **Customize Appearance**
+   - Select theme (dark/light)
+   - Choose font and size
+   - Set color scheme
+
+### Configuration Files
+
+Infinitty stores configuration in:
+
+```
+~/.infinitty/config.json        # Main settings
+~/.infinitty/keybindings.json   # Custom keybindings
+~/.infinitty/workflows/         # Saved workflows
+~/.infinitty/widgets/           # Widget data
+```
+
+### Adding Your API Key
+
+1. Open Settings (Cmd+,)
+2. Navigate to "Models"
+3. Paste your Claude API key
+4. Click "Test Connection"
+
+For environment-based configuration:
+
+```bash
+export INFINITTY_API_KEY=sk-ant-...
+export INFINITTY_MODEL=claude-3-5-sonnet
+infinitty
+```
+
+## Verification
+
+Verify installation with:
+
+```bash
+infinitty --version
+# Output: Infinitty Terminal v1.0.0
+
+infinitty --help
+# Shows all available commands
+```
+
+## Updating
+
+To update Infinitty to the latest version:
+
+### macOS (Homebrew)
+
+```bash
+brew upgrade infinitty
+```
+
+### macOS (Manual)
+
+Download the latest version from [Releases](https://github.com/flows-ai/hybrid-terminal/releases) and install as above.
+
+### Linux
+
+```bash
+wget https://github.com/flows-ai/hybrid-terminal/releases/download/latest/infinitty_amd64.deb
+sudo dpkg -i infinitty_amd64.deb
+```
+
+## Troubleshooting
+
+### "Command not found: infinitty"
+
+Make sure the installation completed and the app is in your PATH.
+
+```bash
+# Check if installed
+which infinitty
+
+# If not found, add to PATH
+export PATH="/Applications/Infinitty.app/Contents/MacOS:$PATH"
+```
+
+### Terminal emulation issues
+
+If text rendering looks wrong:
+
+1. Open Settings (Cmd+,)
+2. Go to "Terminal"
+3. Try different fonts (JetBrains Mono, Fira Code, Menlo)
+4. Adjust font size
+
+### API connection fails
+
+1. Verify your API key is correct
+2. Check internet connection
+3. Try a different model
+4. Check Settings > Models for error messages
+
+### Widgets not loading
+
+Ensure you have the latest version:
+
+```bash
+infinitty --version
+infinitty --update-widgets
+```
+
+## Next Steps
+
+- [Quick Start Guide](/docs/quick-start)
+- [Features & Usage](/docs/features)
+- [Configuration Guide](/docs/configuration)

@@ -1,0 +1,405 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Widgets & Extensions
+description: Build and use custom widgets with Infinitty
+---
+
+## Widget System Overview
+
+Infinitty includes an extensible widget system for building custom UI components and tools.
+
+**Widget Architecture:**
+- Isolated React components
+- Process-based execution (own Node.js process)
+- MCP server integration
+- WebSocket + HTTP communication
+- Hot-reload development
+
+## Built-in Widgets
+
+### Workflow Widget
+
+Visual DAG (Directed Acyclic Graph) editor for creating workflows.
+
+**Features:**
+- Drag-and-drop node creation
+- Multiple node types (input, process, output, condition)
+- Connection visualization
+- Execution engine with adapters
+- Save/load workflows to disk
+
+**Launch:**
+```bash
+ai "Create a new workflow"
+# Or: Cmd+K → "Create Workflow"
+```
+
+**Node Types:**
+
+| Type | Description | Inputs |
+|------|-------------|--------|
+| Input | Receive data | Text, file, API call |
+| Process | Transform data | JavaScript, Python, API |
+| Condition | Branch logic | If/else, switch |
+| Output | Return result | Display, save, send |
+
+**Example Workflow:**
+
+1. Input node: "Generate 100 random numbers"
+2. Process node: "Calculate statistics (mean, std)"
+3. Output node: "Display as chart"
+
+### Chart Widget
+
+Data visualization with multiple chart types.
+
+**Supported Charts:**
+- Line charts
+- Bar charts
+- Pie charts
+- Scatter plots
+- Histograms
+- Heatmaps
+
+**Example:**
+```bash
+ai "Create a chart showing CPU usage over time"
+# AI generates data and visualizes it
+```
+
+## Creating Custom Widgets
+
+### Quick Create
+
+```bash
+# Via command palette
+Cmd+K → "Create Custom Widget"
+
+# Via AI
+ai "Create a widget that shows the current weather"
+```
+
+### Widget Structure
+
+```
+my-widget/
+├── package.json
+├── tsconfig.json
+├── manifest.json
+├── src/
+│   ├── index.ts          # Server entry point
+│   ├── server.ts         # MCP + WebSocket server
+│   ├── Component.tsx     # React UI (optional)
+│   └── types.ts          # Shared types
+└── dist/                 # Compiled output
+```
+
+### manifest.json
+
+```json
+{
+  "id": "com.example.my-widget",
+  "name": "My Widget",
+  "version": "1.0.0",
+  "description": "Does something useful",
+  "main": "./dist/index.js",
+  "ui": "./dist/Component.js",
+  "executionModel": "process",
+  "port": 3031,
+  "activationEvents": ["onStartup"],
+  "contributes": {
+    "tools": [
+      {
+        "name": "my_tool",
+        "description": "What the tool does"
+      }
+    ]
+  }
+}
+```
+
+### Basic Server (server.ts)
+
+```typescript
+import express from 'express'
+import cors from 'cors'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { z } from 'zod'
+
+export async function startServer(port = 3031) {
+  const app = express()
+  app.use(express.json())
+  app.use(cors({ origin: '*' }))
+
+  // Create MCP server
+  const server = new McpServer({
+    name: 'com.example.my-widget',
+    version: '1.0.0',
+  })
+
+  // Register a tool
+  server.registerTool(
+    'greet',
+    {
+      description: 'Greet someone',
+      inputSchema: z.object({
+        name: z.string(),
+      }),
+    },
+    async (input) => ({
+      content: [
+        {
+          type: 'text',
+          text: `Hello, ${input.name}!`,
+        },
+      ],
+    })
+  )
+
+  // Health check endpoint
+  app.get('/', (_req, res) => {
+    res.json({ ok: true, widget: 'com.example.my-widget' })
+  })
+
+  app.listen(port, () => {
+    console.log(`Widget running on http://localhost:${port}`)
+  })
+}
+```
+
+### React Component (Component.tsx)
+
+```typescript
+import React, { useState } from 'react'
+
+export default function MyWidget() {
+  const [value, setValue] = useState('')
+
+  return (
+    <div className="p-4 bg-slate-900 text-slate-100">
+      <h2 className="text-xl font-bold mb-4">My Widget</h2>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="Enter text..."
+        className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded"
+      />
+      <p className="mt-4 text-cyan-400">You entered: {value}</p>
+    </div>
+  )
+}
+```
+
+### Entry Point (index.ts)
+
+```typescript
+import { startServer } from './server.js'
+
+const port = Number(process.env.PORT) || 3031
+console.log(`Starting widget on port ${port}...`)
+startServer(port)
+```
+
+### Build & Deploy
+
+```bash
+# Build
+npm run build
+
+# Test locally
+npm start
+# Open http://localhost:3031
+
+# Deploy
+# Copy to ~/.infinitty/widgets/com.example.my-widget/
+# Infinitty auto-discovers and loads it
+```
+
+## MCP Tools
+
+Widgets expose MCP tools for use by the main app and Claude.
+
+### Tool Definition
+
+```typescript
+server.registerTool(
+  'list_todos',           // Tool name
+  {
+    title: 'List TODOs',
+    description: 'Get all TODO items',
+    inputSchema: z.object({
+      completed: z.boolean().optional(),
+    }),
+  },
+  async (input) => {
+    // Implementation
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify([
+            { id: 1, title: 'Task 1' },
+            { id: 2, title: 'Task 2' },
+          ]),
+        },
+      ],
+    }
+  }
+)
+```
+
+### Tool Naming
+
+Tools are namespaced by widget:
+
+```
+{widget-id}:{tool-name}
+
+Example: com.flows.workflow:run_workflow
+```
+
+### Calling Tools from AI
+
+```
+ai "Run workflow:list_todos with completed=true"
+# Claude calls the tool via MCP
+```
+
+## Data Persistence
+
+Widgets can store data:
+
+```typescript
+const dataDir = `~/.infinitty/widgets/${widgetId}/data`
+// Create directories and store files
+```
+
+**Example - Save workflow:**
+
+```typescript
+import { writeFile } from 'fs/promises'
+import { homedir } from 'os'
+import { join } from 'path'
+
+async function saveWorkflow(workflow: any) {
+  const dir = join(homedir(), '.infinitty', 'workflows')
+  await writeFile(
+    join(dir, `${workflow.id}.json`),
+    JSON.stringify(workflow, null, 2)
+  )
+}
+```
+
+## Widget Discovery
+
+Infinitty automatically discovers widgets in:
+
+```
+~/.infinitty/widgets/
+├── com.example.widget1/manifest.json
+├── com.example.widget2/manifest.json
+└── ...
+```
+
+Or during development:
+
+```
+src/widgets-external/
+├── com.flows.workflow/
+├── example-chart/
+└── ...
+```
+
+## Performance
+
+### Optimization Tips
+
+1. **Use Web Workers** for heavy computation
+2. **Lazy load dependencies** in React
+3. **Memoize expensive calculations**
+4. **Cache API responses** where appropriate
+5. **Minimize initial bundle size**
+
+### Widget Isolation Benefits
+
+- Widgets run in separate processes
+- Memory isolated (no impact on main app)
+- Can restart without affecting terminal
+- Independent versioning
+
+## Examples
+
+### 1. Weather Widget
+
+```typescript
+// Tool: get_weather(location: string)
+server.registerTool('get_weather', {...}, async (input) => {
+  const { location } = input
+  const weather = await fetch(`/api/weather?location=${location}`)
+  return { content: [{ type: 'text', text: JSON.stringify(weather) }] }
+})
+```
+
+### 2. TODO List Widget
+
+```typescript
+// Tools: add_todo, list_todos, complete_todo
+server.registerTool('add_todo', {...}, async (input) => {
+  const todos = await loadTodos()
+  todos.push(input.title)
+  await saveTodos(todos)
+  return success()
+})
+```
+
+### 3. Calculator Widget
+
+```typescript
+// Tool: evaluate(expression: string)
+server.registerTool('evaluate', {...}, async (input) => {
+  const result = eval(input.expression) // In safe context
+  return { content: [{ type: 'text', text: result.toString() }] }
+})
+```
+
+## Distribution
+
+Share your widgets with the community:
+
+1. Create GitHub repository
+2. Add proper README and examples
+3. Tag with `infinitty-widget` and `npm` keywords
+4. Publish to npm
+5. Add to [Widget Registry](https://github.com/flows-ai/widget-registry)
+
+## Debugging
+
+### Console Logging
+
+Logs appear in Infinitty debug output:
+
+```typescript
+console.log('[MyWidget]', 'Debug message')
+```
+
+### Enable Debug Mode
+
+```bash
+INFINITTY_DEBUG=true infinitty
+```
+
+### Test Widget Locally
+
+```bash
+npm start
+# In another terminal:
+curl http://localhost:3031/
+```
+
+## Next Steps
+
+- [MCP Integration](/docs/mcp)
+- [Workflow Examples](/docs/workflows)
+- [API Reference](/docs/api)
+- [Widget Registry](https://github.com/flows-ai/widget-registry)

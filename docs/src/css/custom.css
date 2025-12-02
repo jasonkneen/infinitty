@@ -1,0 +1,259 @@
+/**
+ * Any CSS included here will be applied to all pages throughout the website.
+ */
+
+:root {
+  --ifm-color-primary: #25c2a0;
+  --ifm-color-primary-dark: #21af90;
+  --ifm-color-primary-darker: #1fa588;
+  --ifm-color-primary-darkest: #1a8870;
+  --ifm-color-primary-light: #29d5b0;
+  --ifm-color-primary-lighter: #32d8b7;
+  --ifm-color-primary-lightest: #4fddbf;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+/* For readability concerns, you should choose a lighter palette in dark mode. */
+[data-theme='dark'] {
+  --ifm-color-primary: #25c2a0;
+  --ifm-color-primary-dark: #21af90;
+  --ifm-color-primary-darker: #1fa588;
+  --ifm-color-primary-darkest: #1a8870;
+  --ifm-color-primary-light: #29d5b0;
+  --ifm-color-primary-lighter: #32d8b7;
+  --ifm-color-primary-lightest: #4fddbf;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Terminal-specific styling */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+}
+
+/* Code blocks for widget examples */
+.docusaurus-highlight-code-line {
+  background-color: rgba(0, 0, 0, 0.1);
+  display: block;
+  margin: 0 calc(-1 * var(--ifm-pre-padding));
+  padding: 0 var(--ifm-pre-padding);
+}
+
+[data-theme='dark'] .docusaurus-highlight-code-line {
+  background-color: rgba(0, 0, 0, 0.3);
+}
+
+/* Terminal-themed code blocks */
+pre {
+  background-color: #1a1a2e !important;
+  border: 1px solid rgba(100, 200, 255, 0.1);
+  border-radius: 6px;
+}
+
+code {
+  background-color: rgba(100, 200, 255, 0.05);
+  border-radius: 3px;
+  padding: 0.2em 0.4em;
+}
+
+[data-theme='dark'] code {
+  color: #4ecdc4;
+}
+
+/* Sidebar styling */
+.sidebar-inner {
+  padding-top: 1rem;
+}
+
+.menu__link:hover {
+  background-color: rgba(37, 194, 160, 0.1);
+}
+
+.menu__link.active {
+  border-left: 3px solid var(--ifm-color-primary);
+  padding-left: calc(var(--ifm-menu-link-padding-horizontal) - 3px);
+}
+
+/* Admonitions */
+.admonition {
+  border-left: 4px solid var(--ifm-color-primary);
+  border-radius: 6px;
+}
+
+/* Tables */
+table {
+  border-collapse: collapse;
+}
+
+[data-theme='dark'] table {
+  color: inherit;
+}
+
+[data-theme='dark'] table tbody tr:nth-child(2n) {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* Links */
+a {
+  color: var(--ifm-color-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Headings */
+h1, h2, h3, h4, h5, h6 {
+  color: inherit;
+}
+
+/* API reference tables */
+.api-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.api-table th {
+  background-color: rgba(37, 194, 160, 0.1);
+  padding: 12px;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid var(--ifm-color-primary);
+}
+
+.api-table td {
+  padding: 12px;
+  border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+}
+
+.api-table tr:hover {
+  background-color: rgba(37, 194, 160, 0.05);
+}
+
+/* Type signatures */
+.type-signature {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  background-color: rgba(100, 200, 255, 0.05);
+  padding: 8px 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+/* Examples */
+.example-block {
+  background-color: rgba(37, 194, 160, 0.05);
+  border-left: 4px solid var(--ifm-color-primary);
+  padding: 16px;
+  margin: 16px 0;
+  border-radius: 4px;
+}
+
+/* Feature boxes */
+.feature-box {
+  display: flex;
+  gap: 1rem;
+  padding: 1.5rem;
+  border-radius: 8px;
+  background-color: rgba(37, 194, 160, 0.05);
+  border: 1px solid rgba(37, 194, 160, 0.2);
+  margin: 1rem 0;
+}
+
+.feature-box svg {
+  width: 2rem;
+  height: 2rem;
+  color: var(--ifm-color-primary);
+  flex-shrink: 0;
+}
+
+/* Installation instructions */
+.install-tabs {
+  margin: 1rem 0;
+}
+
+/* Navbar customization */
+.navbar {
+  box-shadow: none;
+  border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+}
+
+/* Footer */
+.footer {
+  border-top: 1px solid rgba(100, 200, 255, 0.1);
+}
+
+/* Responsive tables */
+@media (max-width: 768px) {
+  .api-table {
+    font-size: 0.85rem;
+  }
+
+  .api-table th,
+  .api-table td {
+    padding: 8px;
+  }
+}
+
+/* Dark mode specific */
+[data-theme='dark'] .docusaurus-highlight-code-line {
+  background-color: rgba(0, 0, 0, 0.3);
+}
+
+[data-theme='dark'] pre {
+  background-color: #0a0e27 !important;
+}
+
+[data-theme='dark'] .feature-box {
+  background-color: rgba(37, 194, 160, 0.03);
+  border-color: rgba(37, 194, 160, 0.1);
+}
+
+/* Syntax highlighting improvements */
+code.language-typescript,
+code.language-tsx,
+code.language-javascript,
+code.language-jsx {
+  color: #d4d4d4;
+}
+
+[data-theme='dark'] code.language-typescript,
+[data-theme='dark'] code.language-tsx,
+[data-theme='dark'] code.language-javascript,
+[data-theme='dark'] code.language-jsx {
+  color: #d4d4d4;
+}
+
+/* Inline code */
+:not(pre) > code {
+  color: var(--ifm-color-primary);
+}
+
+[data-theme='dark'] :not(pre) > code {
+  color: #4ecdc4;
+  background-color: rgba(78, 205, 196, 0.1);
+}
+
+/* Badge styling */
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.6rem;
+  border-radius: 1rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  background-color: rgba(37, 194, 160, 0.1);
+  color: var(--ifm-color-primary);
+  margin: 0 0.25rem;
+}
+
+/* Version info */
+.version-badge {
+  font-size: 0.85rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  background-color: rgba(100, 200, 255, 0.1);
+  color: var(--ifm-color-primary);
+  margin-left: 0.5rem;
+}

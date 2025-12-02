@@ -1,0 +1,34 @@
+{
+  "id": "{{WIDGET_ID}}",
+  "name": "{{WIDGET_NAME}}",
+  "version": "1.0.0",
+  "description": "{{WIDGET_DESCRIPTION}}",
+  "author": {
+    "name": "{{AUTHOR_NAME}}",
+    "email": "{{AUTHOR_EMAIL}}"
+  },
+  "license": "MIT",
+
+  "main": "./dist/index.js",
+  "ui": "./dist/Component.js",
+  "styles": "./dist/styles.css",
+
+  "executionModel": "inline",
+
+  "activationEvents": [
+    "onWidget:{{WIDGET_TYPE}}"
+  ],
+
+  "contributes": {
+    "tools": [],
+    "commands": [],
+    "configuration": {
+      "title": "{{WIDGET_NAME}}",
+      "properties": {}
+    }
+  },
+
+  "engines": {
+    "infinitty": ">=0.1.0"
+  }
+}
