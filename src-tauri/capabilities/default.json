@@ -1,0 +1,59 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:path:default",
+    "opener:default",
+    "pty:default",
+    "fs:default",
+    "fs:allow-home-read",
+    "fs:allow-home-read-recursive",
+    "fs:allow-home-write",
+    "fs:allow-home-write-recursive",
+    "shell:default",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        { "name": "zsh", "cmd": "/bin/zsh", "args": true, "sidecar": false },
+        { "name": "bash", "cmd": "/bin/bash", "args": true, "sidecar": false },
+        { "name": "test", "cmd": "/bin/test", "args": true, "sidecar": false },
+        { "name": "kill", "cmd": "kill", "args": true, "sidecar": false },
+        { "name": "npx", "cmd": "npx", "args": true, "sidecar": false },
+        { "name": "node", "cmd": "node", "args": true, "sidecar": false },
+        { "name": "python", "cmd": "python", "args": true, "sidecar": false },
+        { "name": "python3", "cmd": "python3", "args": true, "sidecar": false },
+        { "name": "uvx", "cmd": "uvx", "args": true, "sidecar": false },
+        { "name": "claude", "cmd": "claude", "args": true, "sidecar": false },
+        { "name": "claude-path", "cmd": "/usr/local/bin/claude", "args": true, "sidecar": false },
+        { "name": "codex", "cmd": "codex", "args": true, "sidecar": false },
+        { "name": "opencode", "cmd": "opencode", "args": true, "sidecar": false },
+        { "name": "script", "cmd": "script", "args": true, "sidecar": false }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "zsh", "cmd": "/bin/zsh", "args": true, "sidecar": false },
+        { "name": "bash", "cmd": "/bin/bash", "args": true, "sidecar": false },
+        { "name": "test", "cmd": "/bin/test", "args": true, "sidecar": false },
+        { "name": "kill", "cmd": "kill", "args": true, "sidecar": false },
+        { "name": "npx", "cmd": "npx", "args": true, "sidecar": false },
+        { "name": "node", "cmd": "node", "args": true, "sidecar": false },
+        { "name": "python", "cmd": "python", "args": true, "sidecar": false },
+        { "name": "python3", "cmd": "python3", "args": true, "sidecar": false },
+        { "name": "uvx", "cmd": "uvx", "args": true, "sidecar": false },
+        { "name": "claude", "cmd": "claude", "args": true, "sidecar": false },
+        { "name": "claude-path", "cmd": "/usr/local/bin/claude", "args": true, "sidecar": false },
+        { "name": "codex", "cmd": "codex", "args": true, "sidecar": false },
+        { "name": "opencode", "cmd": "opencode", "args": true, "sidecar": false },
+        { "name": "script", "cmd": "script", "args": true, "sidecar": false }
+      ]
+    },
+    "shell:allow-open",
+    "shell:allow-stdin-write",
+    "shell:allow-kill"
+  ]
+}

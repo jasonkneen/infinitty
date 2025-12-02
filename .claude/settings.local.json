@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_compound-engineering_context7__get-library-docs"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

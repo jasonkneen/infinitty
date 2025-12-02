@@ -1,0 +1,520 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Workflows & Automation
+description: Create visual workflows and automate complex tasks
+---
+
+## Workflow Overview
+
+Workflows are visual representations of automated tasks. They consist of:
+
+- **Nodes** - Individual steps (input, process, output, condition)
+- **Connections** - Flow of data between nodes
+- **Adapters** - Execution engines (local, cloud, external)
+
+## Creating a Workflow
+
+### Via UI
+
+1. Open Infinitty Terminal
+2. Press `Cmd+K` → "Create Workflow"
+3. Drag nodes from the palette
+4. Connect nodes together
+5. Configure each node
+6. Save with a name
+
+### Via Claude
+
+```
+ai "Create a workflow that reads a CSV file, filters by column X > 100, and outputs as JSON"
+```
+
+Claude will:
+1. Generate the workflow structure
+2. Add appropriate nodes
+3. Configure connections
+4. Display in the workflow widget
+5. Let you run or edit it
+
+## Node Types
+
+### Input Node
+
+Receives data into the workflow.
+
+**Types:**
+- Text input
+- File input
+- API call
+- Database query
+- Stream input
+
+**Config:**
+```json
+{
+  "type": "input",
+  "id": "input-1",
+  "data": {
+    "label": "Upload CSV",
+    "inputType": "file",
+    "accept": ".csv"
+  }
+}
+```
+
+### Process Node
+
+Transforms data.
+
+**Types:**
+- JavaScript code
+- Python script
+- Shell command
+- API transformation
+- ML model inference
+
+**Config:**
+```json
+{
+  "type": "process",
+  "id": "process-1",
+  "data": {
+    "label": "Parse CSV",
+    "language": "javascript",
+    "code": "const parsed = Papa.parse(input); return parsed.data;"
+  }
+}
+```
+
+### Condition Node
+
+Branches based on logic.
+
+**Types:**
+- If/else condition
+- Switch statement
+- Regex match
+- Value comparison
+
+**Config:**
+```json
+{
+  "type": "condition",
+  "id": "condition-1",
+  "data": {
+    "label": "Check count",
+    "condition": "input.length > 0"
+  }
+}
+```
+
+### Output Node
+
+Returns results.
+
+**Types:**
+- Display result
+- Save to file
+- Send API request
+- Write to database
+- Stream output
+
+**Config:**
+```json
+{
+  "type": "output",
+  "id": "output-1",
+  "data": {
+    "label": "Save JSON",
+    "outputType": "file",
+    "format": "json"
+  }
+}
+```
+
+## Building a Complex Workflow
+
+### Example: Data Processing Pipeline
+
+**Scenario:** Read CSV, filter, aggregate, and visualize
+
+**Steps:**
+
+1. **Input Node** (Upload CSV)
+   - Type: File input
+   - Accept: `.csv` files
+
+2. **Process Node** (Parse CSV)
+   ```javascript
+   const Papa = require('papaparse');
+   return Papa.parse(input, { header: true }).data;
+   ```
+
+3. **Process Node** (Filter data)
+   ```javascript
+   return input.filter(row => row.value > 100);
+   ```
+
+4. **Process Node** (Aggregate)
+   ```javascript
+   return {
+     count: input.length,
+     sum: input.reduce((a, b) => a + b.value, 0),
+     mean: input.reduce((a, b) => a + b.value, 0) / input.length
+   };
+   ```
+
+5. **Output Node** (Visualization)
+   - Type: Display
+   - Format: Chart (bar chart)
+
+### Running the Workflow
+
+```
+ai "Run workflow: Data Processing Pipeline with my-data.csv"
+```
+
+Or manually:
+
+1. Click "Run" in workflow editor
+2. Upload CSV file
+3. Watch execution
+4. View results
+
+## Adapters
+
+Different execution engines for different scenarios.
+
+### Local Browser
+
+Default adapter. Runs entirely in browser.
+
+**Features:**
+- Instant execution
+- No server required
+- Works offline
+- Limited to browser capabilities
+
+**Use for:**
+- Data transformation
+- Visualization
+- Local file processing
+- Quick testing
+
+**Config:**
+```json
+{
+  "executionConfig": {
+    "adapter": "local-browser"
+  }
+}
+```
+
+### Vercel Workflow
+
+Execute on Vercel serverless functions.
+
+**Features:**
+- Scalable
+- External API access
+- Long-running tasks
+- Environment variables
+
+**Config:**
+```json
+{
+  "executionConfig": {
+    "adapter": "vercel-workflow",
+    "apiKey": "your-vercel-token"
+  }
+}
+```
+
+### CrewAI Multi-Agent
+
+Multi-agent execution with CrewAI.
+
+**Features:**
+- Agent collaboration
+- Complex reasoning
+- Tool usage
+- Agent-to-agent communication
+
+**Config:**
+```json
+{
+  "executionConfig": {
+    "adapter": "crewai",
+    "agents": [
+      {
+        "role": "Researcher",
+        "goal": "Research the topic",
+        "backstory": "Expert researcher"
+      }
+    ]
+  }
+}
+```
+
+### External Platforms
+
+- **LangFlow** - LangFlow visual editor
+- **FlowiseAI** - Drag-and-drop LLM workflows
+- **OpenAI Assistants** - OpenAI's assistant API
+- **Custom Endpoints** - Your own execution engine
+
+## Data Flow
+
+### Connections
+
+Connect nodes to pass data:
+
+```
+input → process → condition
+                    ├→ output-1
+                    └→ output-2
+```
+
+Each connection can have a label:
+
+```json
+{
+  "source": "process-1",
+  "target": "condition-1",
+  "label": "filtered results"
+}
+```
+
+### Data Types
+
+Nodes infer data types:
+
+- **String** - Text data
+- **Number** - Numeric values
+- **Array** - Lists/collections
+- **Object** - Structured data
+- **File** - File references
+- **Stream** - Streaming data
+
+Type mismatches are caught before execution.
+
+## Error Handling
+
+### Try-Catch Blocks
+
+Wrap risky operations:
+
+```javascript
+try {
+  return JSON.parse(input);
+} catch (error) {
+  return { error: 'Invalid JSON', details: error.message };
+}
+```
+
+### Condition Fallthrough
+
+Condition nodes can have default paths:
+
+```json
+{
+  "type": "condition",
+  "data": {
+    "condition": "value > 100",
+    "trueTarget": "output-1",
+    "falseTarget": "output-2",
+    "defaultTarget": "output-error"
+  }
+}
+```
+
+## Reusable Subworkflows
+
+Build complex workflows from simpler ones.
+
+### Saving as Template
+
+1. Create and test workflow
+2. Click "Save as Template"
+3. Give it a name and description
+4. Use as node in other workflows
+
+### Workflow Node
+
+```json
+{
+  "type": "workflow",
+  "id": "sub-1",
+  "data": {
+    "label": "Process Data",
+    "workflowId": "data-processor-v1"
+  }
+}
+```
+
+## Variables & Secrets
+
+### Environment Variables
+
+```json
+{
+  "env": {
+    "API_KEY": "sk-...",
+    "DB_URL": "postgresql://..."
+  }
+}
+```
+
+Access in code:
+
+```javascript
+const apiKey = process.env.API_KEY;
+const result = await fetch('https://api.example.com', {
+  headers: { 'Authorization': `Bearer ${apiKey}` }
+});
+```
+
+### Workflow Variables
+
+Define at workflow level:
+
+```json
+{
+  "variables": {
+    "batchSize": 100,
+    "timeout": 5000,
+    "retryCount": 3
+  }
+}
+```
+
+Use in nodes:
+
+```javascript
+for (let i = 0; i < input.length; i += workflow.batchSize) {
+  // Process batch
+}
+```
+
+## Performance Optimization
+
+### Best Practices
+
+1. **Minimize node count** - Combine operations when possible
+2. **Filter early** - Filter data before expensive operations
+3. **Parallel execution** - Use multiple outputs for parallel processing
+4. **Caching** - Cache API responses when possible
+5. **Streaming** - Use streams for large datasets
+
+### Large Data Handling
+
+For files > 100MB:
+
+1. Use streaming nodes
+2. Process in chunks
+3. Consider external adapter (Vercel, Cloud)
+4. Monitor memory usage
+
+## Testing & Debugging
+
+### Test Data
+
+1. Create test inputs
+2. Click "Run with test data"
+3. See execution flow
+4. Check intermediate results
+
+### Debug Mode
+
+Click debug icon to:
+- See each node execution
+- View data between nodes
+- Track execution time
+- Monitor errors
+
+### Logs
+
+```javascript
+console.log('Processing started');
+console.log('Data:', input);
+console.log('Result:', output);
+```
+
+Logs visible in debug panel.
+
+## Sharing Workflows
+
+### Export
+
+```bash
+# Export as JSON
+infinitty --export-workflow my-workflow > workflow.json
+
+# Export as template
+infinitty --export-template my-workflow
+```
+
+### Share with Team
+
+1. Click "Share" in workflow editor
+2. Get shareable link
+3. Others can view/clone
+4. Edit permissions available
+
+### Version Control
+
+```bash
+# Save to git
+git add ~/.infinitty/workflows/
+git commit -m "Add data processing workflow"
+git push
+```
+
+## Examples
+
+### Example 1: Email Automation
+
+```
+Input: Email list
+→ Validate emails (Process)
+→ Check deliverability (API)
+→ Group by domain (Process)
+→ Send campaigns (Process)
+→ Track results (Output)
+```
+
+### Example 2: Data Analysis
+
+```
+Input: Dataset
+→ Parse data (Process)
+→ Filter outliers (Condition)
+→ Calculate stats (Process)
+→ Create visualization (Output)
+```
+
+### Example 3: API Integration
+
+```
+Input: User list
+→ For each user (Loop)
+  → Fetch from API (Process)
+  → Transform data (Process)
+  → Save to database (Process)
+→ Summary report (Output)
+```
+
+## Limitations
+
+- **Timeout** - 30 seconds per execution (configurable)
+- **Memory** - 512MB per workflow (configurable)
+- **External APIs** - Rate limits apply
+- **File size** - 1GB max (configurable)
+- **Complexity** - Keep under 100 nodes for performance
+
+## Next Steps
+
+- [Widget Development](/docs/widgets)
+- [MCP Integration](/docs/mcp)
+- [API Reference](/docs/api)
+- [Examples](/docs/examples)

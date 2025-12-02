@@ -1,0 +1,124 @@
+INFINITTY HYBRID TERMINAL
+Copyright (c) 2025 Jason Kneen
+
+This software is dual-licensed under two separate licenses:
+
+1. GNU AFFERO GENERAL PUBLIC LICENSE v3.0 (see below)
+2. COMMONS CLAUSE v1.0 + Commercial License Option (see COMMERCIAL_LICENSE)
+
+By default, this software is licensed under the AGPL-3.0 license with Commons Clause
+restrictions. For commercial use, see the COMMERCIAL_LICENSE file or contact the authors.
+
+===============================================================================
+
+GNU AFFERO GENERAL PUBLIC LICENSE
+Version 3, 19 November 2007
+
+Copyright (c) 2025 Jason Kneen
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+===============================================================================
+
+COMMONS CLAUSE LICENSE CONDITION v1.0
+
+The Software is provided to you by the Licensor under the License, as defined below,
+subject to the following condition.
+
+Without limiting other conditions in the License, the grant of rights under the License
+will not include, and the License does not grant to you, the right to:
+
+Sell the Software or offer the Software for sale as a standalone offering that directly
+competes with or is substantially similar to the Software, including offering the Software
+as a service (SaaS) or in any other commercial context that generates revenue primarily
+from the Software itself or its functionality.
+
+For clarity, commercial use by third parties is prohibited unless:
+(a) The use is within a larger product or service where the Software is not the primary
+    value proposition, or
+(b) A separate Commercial License is obtained from the copyright holder.
+
+===============================================================================
+
+Full AGPL-3.0 License Text:
+
+                    GNU AFFERO GENERAL PUBLIC LICENSE
+                       Version 3, 19 November 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+                            Preamble
+
+  The GNU Affero General Public License is a free, copyleft license for
+software and other kinds of works, specifically designed to ensure
+cooperation with the community in the case of network server software.
+
+  The licenses for most software and other practical works are designed
+to take away your freedom to share and change the works.  By contrast,
+the GNU Affero General Public License is intended to guarantee your
+freedom to share and change all versions of a program--to make sure it
+remains free software for all its users.
+
+  When we speak of free software, we are referring to freedom, not
+price.  Our General Public Licenses are designed to make sure that you
+have the freedom to distribute copies of free software (and charge for
+them if you wish), that you receive source code or can get it if you
+want it, that you can change the software or use pieces of it in new
+free programs, and that you know you can do these things.
+
+  Developers that use our General Public Licenses protect your rights
+with two steps: (1) assert copyright on the software, and (2) offer
+you this License which gives you legal permission to copy, distribute
+and/or modify it.
+
+  A secondary benefit of defending all users' freedom is that
+improvements made in alternate versions of the program, if they
+receive widespread use, become available for the other developers to
+incorporate.  Many developers of free software are committed to the
+principle that helping the other free software developers means
+considering the community's needs.
+
+  With the GNU Affero General Public License, you have the freedom to:
+
+  0. To run the program for any purpose (section 0).
+  1. To study how the program works and change it so it does what you wish
+     (section 1).
+  2. To copy and distribute copies of the modified version to others so they
+     can benefit from your improvements (section 2).
+  3. To distribute modified versions of the program so that others can benefit
+     from the changes (section 3).
+
+The stated goals are achieved through the use and enforcement of the GNU
+Affero General Public License.
+
+  When you receive a work covered by the GNU Affero General Public License
+("covered work"), you have certain responsibilities. The responsibility is
+to respect the freedom of others who will receive copies of the work from you.
+
+  For the details of those obligations, please read the full AGPL-3.0 license
+at: <https://www.gnu.org/licenses/agpl-3.0.html>
+
+===============================================================================
+
+DISCLAIMER AND LIABILITY LIMITATION:
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

@@ -1,0 +1,143 @@
+---
+import Layout from '../../layouts/Layout.astro'
+import Navigation from '../../components/Navigation.astro'
+import Footer from '../../components/Footer.astro'
+---
+
+<Layout title="Documentation - Infinitty Terminal" description="Complete documentation and guides for Infinitty Terminal">
+  <Navigation />
+  <main class="min-h-screen pt-32">
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <h1 class="text-4xl font-bold mb-4 gradient-text">Documentation</h1>
+      <p class="text-xl text-slate-400 mb-12">Complete guides and references for Infinitty Terminal</p>
+
+      <!-- Getting Started -->
+      <section class="mb-16">
+        <h2 class="text-2xl font-bold text-slate-100 mb-6">Getting Started</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <a href="/docs/installation" class="group p-6 glass rounded-lg hover:border-cyan-500/50 transition-all">
+            <h3 class="text-lg font-semibold text-slate-100 mb-2 group-hover:text-cyan-400 transition-colors">Installation</h3>
+            <p class="text-slate-400 text-sm mb-4">Setup guide for macOS, Linux, and from source. Includes configuration and troubleshooting.</p>
+            <div class="flex items-center text-cyan-400 text-sm font-mono">View guide <span class="ml-2">→</span></div>
+          </a>
+
+          <a href="/docs/quick-start" class="group p-6 glass rounded-lg hover:border-amber-500/50 transition-all">
+            <h3 class="text-lg font-semibold text-slate-100 mb-2 group-hover:text-amber-400 transition-colors">Quick Start</h3>
+            <p class="text-slate-400 text-sm mb-4">5-minute walkthrough covering your first command, AI assistance, and basic workflows.</p>
+            <div class="flex items-center text-amber-400 text-sm font-mono">View guide <span class="ml-2">→</span></div>
+          </a>
+        </div>
+      </section>
+
+      <!-- Core Features -->
+      <section class="mb-16">
+        <h2 class="text-2xl font-bold text-slate-100 mb-6">Core Features</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <a href="/docs/features" class="group p-6 glass rounded-lg hover:border-cyan-500/50 transition-all">
+            <h3 class="text-lg font-semibold text-slate-100 mb-2 group-hover:text-cyan-400 transition-colors">Features & Usage</h3>
+            <p class="text-slate-400 text-sm mb-4">Terminal modes, AI assistant capabilities, block interface, settings, and performance monitoring.</p>
+            <div class="flex items-center text-cyan-400 text-sm font-mono">Read more <span class="ml-2">→</span></div>
+          </a>
+
+          <a href="/docs/workflows" class="group p-6 glass rounded-lg hover:border-amber-500/50 transition-all">
+            <h3 class="text-lg font-semibold text-slate-100 mb-2 group-hover:text-amber-400 transition-colors">Workflows</h3>
+            <p class="text-slate-400 text-sm mb-4">Visual automation with nodes and connections. Multiple execution adapters and 3 complete examples.</p>
+            <div class="flex items-center text-amber-400 text-sm font-mono">Learn more <span class="ml-2">→</span></div>
+          </a>
+        </div>
+      </section>
+
+      <!-- Advanced -->
+      <section class="mb-16">
+        <h2 class="text-2xl font-bold text-slate-100 mb-6">Advanced Topics</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <a href="/docs/widgets" class="group p-6 glass rounded-lg hover:border-cyan-500/50 transition-all">
+            <h3 class="text-lg font-semibold text-slate-100 mb-2 group-hover:text-cyan-400 transition-colors">Widgets</h3>
+            <p class="text-slate-400 text-sm mb-4">Build custom React widgets as isolated processes. MCP integration, persistence, and 3 example widgets.</p>
+            <div class="flex items-center text-cyan-400 text-sm font-mono">Explore <span class="ml-2">→</span></div>
+          </a>
+
+          <a href="/docs/mcp" class="group p-6 glass rounded-lg hover:border-amber-500/50 transition-all">
+            <h3 class="text-lg font-semibold text-slate-100 mb-2 group-hover:text-amber-400 transition-colors">MCP Integration</h3>
+            <p class="text-slate-400 text-sm mb-4">Model Context Protocol for AI integration. Create MCP servers, define tools, and test with curl.</p>
+            <div class="flex items-center text-amber-400 text-sm font-mono">Discover <span class="ml-2">→</span></div>
+          </a>
+        </div>
+      </section>
+
+      <!-- Documentation Map -->
+      <section class="mb-16 p-8 glass rounded-lg">
+        <h2 class="text-2xl font-bold text-slate-100 mb-6">Documentation Map</h2>
+        <div class="space-y-4 text-slate-300">
+          <div>
+            <h3 class="font-semibold text-cyan-400 mb-2">Start Here</h3>
+            <ul class="list-disc list-inside space-y-1 text-sm">
+              <li><a href="/docs/installation" class="hover:text-cyan-300">Installation</a> - Set up Infinitty on your system</li>
+              <li><a href="/docs/quick-start" class="hover:text-cyan-300">Quick Start</a> - Learn basics in 5 minutes</li>
+            </ul>
+          </div>
+
+          <div>
+            <h3 class="font-semibold text-amber-400 mb-2">Learn the Fundamentals</h3>
+            <ul class="list-disc list-inside space-y-1 text-sm">
+              <li><a href="/docs/features" class="hover:text-amber-300">Features & Usage</a> - All major features explained</li>
+              <li><a href="/docs/workflows" class="hover:text-amber-300">Workflows</a> - Automate complex tasks</li>
+            </ul>
+          </div>
+
+          <div>
+            <h3 class="font-semibold text-cyan-400 mb-2">Go Advanced</h3>
+            <ul class="list-disc list-inside space-y-1 text-sm">
+              <li><a href="/docs/widgets" class="hover:text-cyan-300">Widgets</a> - Build custom extensions</li>
+              <li><a href="/docs/mcp" class="hover:text-cyan-300">MCP Integration</a> - Connect with AI models</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- Quick Stats -->
+      <section class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
+        <div class="p-6 glass rounded-lg text-center">
+          <div class="text-3xl font-bold gradient-text mb-2">6</div>
+          <p class="text-slate-400">Documentation Pages</p>
+        </div>
+        <div class="p-6 glass rounded-lg text-center">
+          <div class="text-3xl font-bold text-amber-400 mb-2">15+</div>
+          <p class="text-slate-400">Code Examples</p>
+        </div>
+        <div class="p-6 glass rounded-lg text-center">
+          <div class="text-3xl font-bold text-cyan-400 mb-2">100%</div>
+          <p class="text-slate-400">Coverage</p>
+        </div>
+      </section>
+
+      <!-- Need Help -->
+      <section class="p-8 glass rounded-lg border-2 border-slate-700 hover:border-cyan-500/50 transition-all">
+        <h2 class="text-2xl font-bold text-slate-100 mb-4">Need Help?</h2>
+        <p class="text-slate-400 mb-6">Can't find what you're looking for?</p>
+        <div class="flex flex-col sm:flex-row gap-4">
+          <a href="https://github.com/flows-ai/hybrid-terminal/issues" target="_blank" class="px-6 py-3 border border-slate-600 text-slate-300 rounded-lg hover:border-cyan-500 hover:text-cyan-400 transition-all text-center">
+            GitHub Issues
+          </a>
+          <a href="https://github.com/flows-ai/hybrid-terminal/discussions" target="_blank" class="px-6 py-3 border border-slate-600 text-slate-300 rounded-lg hover:border-amber-500 hover:text-amber-400 transition-all text-center">
+            GitHub Discussions
+          </a>
+          <a href="https://github.com/flows-ai/hybrid-terminal" target="_blank" class="px-6 py-3 bg-gradient-to-r from-cyan-500 to-amber-500 text-slate-950 rounded-lg font-semibold hover:shadow-lg transition-all text-center">
+            View on GitHub
+          </a>
+        </div>
+      </section>
+    </div>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  a {
+    @apply transition-all duration-300;
+  }
+
+  a:hover {
+    @apply text-inherit;
+  }
+</style>
