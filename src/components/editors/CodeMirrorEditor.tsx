@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { EditorState, Extension } from '@codemirror/state'
-import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, hoverTooltip } from '@codemirror/view'
+import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, hoverTooltip, type KeyBinding } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, indentOnInput } from '@codemirror/language'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
@@ -208,7 +208,7 @@ export function CodeMirrorEditor({
         ...defaultKeymap,
         ...historyKeymap,
         ...completionKeymap,
-      ]),
+      ] as readonly KeyBinding[]),
       getThemeExtension(syntaxTheme),
       getLanguageExtension(language),
       EditorView.updateListener.of((update) => {

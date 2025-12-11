@@ -37,6 +37,15 @@ vi.mock('@tauri-apps/plugin-shell', () => ({
   })),
 }))
 
+// Mock tauri-pty so terminal hooks can spawn in tests
+vi.mock('tauri-pty', async () => {
+  const actual = await import('./tauriPtyMock')
+  return {
+    spawn: actual.spawn,
+    exitHandlers: actual.exitHandlers,
+  }
+})
+
 
 // Mock @tauri-apps/api/app module
 vi.mock('@tauri-apps/api/app', () => ({
@@ -57,6 +66,14 @@ Object.defineProperty(window, 'matchMedia', {
     removeEventListener: vi.fn(),
     dispatchEvent: vi.fn(),
   })),
+})
+
+// Mock document.fonts for FontLoader usage
+Object.defineProperty(document, 'fonts', {
+  writable: true,
+  value: {
+    ready: Promise.resolve(),
+  },
 })
 
 // Mock localStorage
@@ -101,4 +118,17 @@ beforeAll(() => {
 
 afterAll(() => {
   console.error = originalError
+})
+
+// Default fetch mock (prevents network calls in tests)
+if (!('fetch' in globalThis)) {
+  // jsdom should provide fetch, but guard just in case
+  ;(globalThis as any).fetch = vi.fn()
+}
+
+vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+  return new Response(JSON.stringify({ providers: [] }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
 })

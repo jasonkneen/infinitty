@@ -42,6 +42,47 @@ export interface StreamingResponse {
   }
 }
 
+interface MCPToolSpec {
+  serverId: string
+  name: string
+  description?: string
+  inputSchema?: Record<string, unknown>
+}
+
+function getMcpManager(): any | null {
+  return (globalThis as any).__infinittyMcpManager ?? null
+}
+
+async function buildMcpToolsPrompt(): Promise<{ system: string; tools: MCPToolSpec[] }> {
+  const manager = getMcpManager()
+  if (!manager) {
+    return { system: '', tools: [] }
+  }
+
+  const all = manager.getAllTools?.() as Array<{ tool: any; serverId: string }> | undefined
+  if (!all || all.length === 0) {
+    return { system: '', tools: [] }
+  }
+
+  const tools: MCPToolSpec[] = all.map(({ tool, serverId }) => ({
+    serverId,
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+  }))
+
+  const system = [
+    'You have access to Model Context Protocol (MCP) tools from local servers.',
+    'To use an MCP tool, emit a tool_use block with:',
+    '{"name": "mcp.call_tool", "input": {"serverId": "<server>", "toolName": "<tool>", "args": { ... }}}',
+    'Only call tools when needed, and prefer the most relevant tool.',
+    'Available MCP tools:',
+    ...tools.map(t => `- ${t.name} (server: ${t.serverId})${t.description ? `: ${t.description}` : ''}`),
+  ].join('\n')
+
+  return { system, tools }
+}
+
 // Get the Claude CLI command name for Tauri shell allowlist
 function getClaudeCommand(): string {
   return 'claude'
@@ -49,18 +90,32 @@ function getClaudeCommand(): string {
 
 // Check if Claude CLI is available
 export async function isClaudeCodeAvailable(): Promise<boolean> {
-  try {
-    const claudeCmd = getClaudeCommand()
-    const env = await getEnvWithPath()
-    const cmd = Command.create(claudeCmd, ['--version'], { env })
-    const output = await cmd.execute()
-    console.log('[ClaudeCode] Version check result:', output.code, output.stdout)
-    return output.code === 0
-  } catch (e) {
-    console.error('[ClaudeCode] CLI availability check failed:', e)
-    return false
-  }
+  if (cachedAvailability !== null) return cachedAvailability
+  if (availabilityPromise) return availabilityPromise
+
+  availabilityPromise = (async () => {
+    try {
+      const claudeCmd = getClaudeCommand()
+      const env = await getEnvWithPath()
+      const cmd = Command.create(claudeCmd, ['--version'], { env })
+      const output = await cmd.execute()
+      console.log('[ClaudeCode] Version check result:', output.code, output.stdout)
+      cachedAvailability = output.code === 0
+      return cachedAvailability
+    } catch (e) {
+      console.error('[ClaudeCode] CLI availability check failed:', e)
+      cachedAvailability = false
+      return false
+    } finally {
+      availabilityPromise = null
+    }
+  })()
+
+  return availabilityPromise
 }
+
+let cachedAvailability: boolean | null = null
+let availabilityPromise: Promise<boolean> | null = null
 
 // Persistent Claude Code Session Manager
 // Maintains a single long-running process with bidirectional JSON streaming
@@ -68,7 +123,7 @@ class ClaudeCodeSessionManager {
   private process: Child | null = null
   private command: ReturnType<typeof Command.create> | null = null
   private sessionId: string | null = null
-  private model: string = 'sonnet'
+  private model: string = 'haiku'
   private thinkingLevel: ThinkingLevel = 'none'
   private cwd: string | undefined = undefined
   private buffer: string = ''
@@ -76,8 +131,45 @@ class ClaudeCodeSessionManager {
   private waitingResolvers: ((response: StreamingResponse | null) => void)[] = []
   private isConnected: boolean = false
   private currentMessageId: number = 0
+  // Track whether we received text deltas for current message.
+  // If so, skip emitting full assistant text blocks to avoid duplication.
+  private sawTextDeltaForMessage: boolean = false
 
-  async connect(model: string = 'sonnet', cwd?: string, thinkingLevel: ThinkingLevel = 'none'): Promise<string> {
+  private async executeMcpTool(toolId: string, input: any) {
+    const manager = getMcpManager()
+    if (!manager) {
+      await this.sendToolResult(toolId, 'MCP manager not available', true)
+      return
+    }
+    try {
+      const { serverId, toolName, args } = input as { serverId: string; toolName: string; args: Record<string, unknown> }
+      if (!serverId || !toolName) {
+        await this.sendToolResult(toolId, 'Invalid MCP tool input', true)
+        return
+      }
+      const result = await manager.callTool(serverId, toolName, args ?? {})
+      await this.sendToolResult(toolId, typeof result === 'string' ? result : JSON.stringify(result))
+    } catch (e) {
+      await this.sendToolResult(toolId, e instanceof Error ? e.message : 'MCP tool error', true)
+    }
+  }
+
+  private async sendToolResult(toolId: string, content: string, isError: boolean = false) {
+    if (!this.process) return
+    const message = {
+      type: 'tool_result',
+      tool_use_id: toolId,
+      content,
+      is_error: isError,
+    }
+    try {
+      await this.process.write(JSON.stringify(message) + '\n')
+    } catch (e) {
+      console.error('[ClaudeCode] Failed to send tool_result:', e)
+    }
+  }
+
+  async connect(model: string = 'haiku', cwd?: string, thinkingLevel: ThinkingLevel = 'none'): Promise<string> {
     // Check if settings changed - need to reconnect
     const settingsChanged = this.isConnected && this.process && (
       this.model !== model ||
@@ -103,16 +195,30 @@ class ClaudeCodeSessionManager {
     const claudeCmd = getClaudeCommand()
     const env = await getEnvWithPath()
 
+    // Build MCP tools prompt from connected servers.
+    const { system: mcpSystem } = await buildMcpToolsPrompt()
+
     // Bidirectional streaming mode - keeps process alive for multiple messages
     const args = [
+      '--print',
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
+      '--include-partial-messages',
       '--verbose', // Required for stream-json output
       '--model', model,
       '--permission-mode', 'acceptEdits',
       '--session-id', this.sessionId,
       '--replay-user-messages', // Echo back user messages for acknowledgment
+      // Avoid Claude Code scanning user/project MCP configs.
+      // We manage MCP tools in-app and expose them via our proxy prompt.
+     // '--strict-mcp-config',
+     // '--mcp-config', '{"version":1,"mcpServers":{}}',
     ]
+
+    // If we have MCP tools, pass their description via system prompt.
+    if (mcpSystem) {
+      args.push('--system-prompt', mcpSystem)
+    }
 
     // Add thinking budget if enabled
     const thinkingBudget = THINKING_BUDGETS[thinkingLevel]
@@ -179,19 +285,56 @@ class ClaudeCodeSessionManager {
       console.log('[ClaudeCode] Event:', data.type, data.subtype || '')
 
       // Handle different event types
-      if (data.type === 'assistant' && data.message?.content) {
+      if (data.type === 'stream_event' && data.event) {
+        const ev = data.event
+        // Mirror Anthropic streaming schema for faster token-level updates.
+        if (ev.type === 'content_block_delta') {
+          const delta = ev.delta
+          if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+            this.sawTextDeltaForMessage = true
+            this.pushResponse({ type: 'text', content: delta.text })
+          } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+            this.pushResponse({ type: 'thinking', content: delta.thinking })
+          }
+        } else if (ev.type === 'content_block_start') {
+          const block = ev.content_block
+          if (block?.type === 'tool_use') {
+            if (block.name === 'mcp.call_tool' && block.input) {
+              const toolId = block.id
+              this.pushResponse({ type: 'tool-call', toolId, toolName: 'mcp.call_tool', toolInput: block.input })
+              void this.executeMcpTool(toolId, block.input)
+            } else {
+              this.pushResponse({
+                type: 'tool-call',
+                toolId: block.id,
+                toolName: block.name,
+                toolInput: block.input,
+              })
+            }
+          }
+        }
+      } else if (data.type === 'assistant' && data.message?.content) {
         for (const block of data.message.content) {
           if (block.type === 'text' && block.text) {
-            this.pushResponse({ type: 'text', content: block.text })
+            if (!this.sawTextDeltaForMessage) {
+              this.pushResponse({ type: 'text', content: block.text })
+            }
           } else if (block.type === 'thinking' && block.thinking) {
             this.pushResponse({ type: 'thinking', content: block.thinking })
           } else if (block.type === 'tool_use') {
-            this.pushResponse({
-              type: 'tool-call',
-              toolId: block.id,
-              toolName: block.name,
-              toolInput: block.input,
-            })
+            // If this is an MCP tool call, execute it locally and stream result back.
+            if (block.name === 'mcp.call_tool' && block.input) {
+              const toolId = block.id
+              this.pushResponse({ type: 'tool-call', toolId, toolName: 'mcp.call_tool', toolInput: block.input })
+              void this.executeMcpTool(toolId, block.input)
+            } else {
+              this.pushResponse({
+                type: 'tool-call',
+                toolId: block.id,
+                toolName: block.name,
+                toolInput: block.input,
+              })
+            }
           }
         }
       } else if (data.type === 'tool_result') {
@@ -252,6 +395,7 @@ class ClaudeCodeSessionManager {
 
     this.currentMessageId++
     const messageId = this.currentMessageId
+    this.sawTextDeltaForMessage = false
 
     // Send message as JSON to stdin
     const message = {
@@ -334,7 +478,7 @@ function getSessionManager(): ClaudeCodeSessionManager {
 // Public API - maintains persistent connection
 
 export async function createSession(
-  model: string = 'sonnet',
+  model: string = 'haiku',
   cwd?: string,
   thinkingLevel: ThinkingLevel = 'none'
 ): Promise<ClaudeCodeSession> {
@@ -348,7 +492,7 @@ export async function createSession(
 
 export async function* streamPrompt(
   prompt: string,
-  model: string = 'sonnet',
+  model: string = 'haiku',
   cwd?: string,
   thinkingLevel: ThinkingLevel = 'none'
 ): AsyncGenerator<StreamingResponse> {

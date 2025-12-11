@@ -201,6 +201,8 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
     // WebLinksAddon with custom click handler
     const webLinksAddon = new WebLinksAddon((event, uri) => {
       event.preventDefault()
+      // Defensive protocol allowlist.
+      if (!/^https?:\/\//i.test(uri)) return
       if (optionsRef.current.onLinkClick) {
         optionsRef.current.onLinkClick(uri)
       } else {
@@ -311,9 +313,13 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
         if (optionsRef.current.onPwdChange) {
           let match
           while ((match = osc7Regex.exec(data)) !== null) {
-            const path = decodeURIComponent(match[1])
-            console.log('[Terminal] OSC 7 detected, path:', path)
-            optionsRef.current.onPwdChange(path)
+            try {
+              const path = decodeURIComponent(match[1])
+              console.log('[Terminal] OSC 7 detected, path:', path)
+              optionsRef.current.onPwdChange(path)
+            } catch {
+              // Ignore malformed OSC-7 payloads.
+            }
           }
           osc7Regex.lastIndex = 0
         }

@@ -31,8 +31,8 @@ describe('useBlockTerminal cwd propagation', () => {
 
     await waitFor(() => expect(result.current.cwd).toBe('/home/test-user'))
 
-    act(() => {
-      result.current.executeCommand('cd /tmp')
+    await act(async () => {
+      await result.current.executeCommand('cd /tmp')
     })
 
     expect(spawn).toHaveBeenCalledWith(expect.any(String), expect.any(Array), expect.objectContaining({ cwd: '/home/test-user' }))

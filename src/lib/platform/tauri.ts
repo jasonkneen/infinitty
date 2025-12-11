@@ -16,6 +16,9 @@ import type {
   UnlistenFn,
 } from './types'
 
+// Tauri APIs expose a global `__TAURI__` object in desktop builds.
+declare const __TAURI__: unknown
+
 // Lazy imports to avoid loading Tauri APIs when not in Tauri environment
 async function getTauriCore() {
   return await import('@tauri-apps/api/core')
@@ -209,9 +212,12 @@ export const tauriPlatform: PlatformAPI = {
       // Synchronous wrapper - tauri-pty spawn is synchronous
       let ptyInstance: ReturnType<typeof import('tauri-pty').spawn> | null = null
 
-      // We need to load this synchronously since spawn is used synchronously
-      // This relies on tauri-pty being pre-loaded
-      const tauriPty = require('tauri-pty')
+      // Tauri desktop builds preload tauri-pty on the global.
+      // Use that instead of `require` to keep this file ESM-safe.
+      const tauriPty = (__TAURI__ as any)?.pty
+      if (!tauriPty?.spawn) {
+        throw new Error('tauri-pty not available')
+      }
       ptyInstance = tauriPty.spawn(shell, args, {
         cols: options?.cols ?? 80,
         rows: options?.rows ?? 24,

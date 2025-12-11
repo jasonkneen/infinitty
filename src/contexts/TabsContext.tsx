@@ -576,12 +576,9 @@ export function TabsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const splitPaneWithWebview = useCallback((paneId: string, direction: SplitDirection, url: string, title?: string) => {
-    console.log('[TabsContext] splitPaneWithWebview called:', { paneId, direction, url, title })
-
     // Validate URL before creating the webview
     try {
       validateWebViewUrl(url)
-      console.log('[TabsContext] URL validation passed')
     } catch (err) {
       console.error('[TabsContext] Invalid URL for webview:', err)
       alert(`Cannot open webview: ${err instanceof Error ? err.message : 'Invalid URL'}`)
@@ -589,18 +586,12 @@ export function TabsProvider({ children }: { children: ReactNode }) {
     }
 
     setTabs((prev) => {
-      console.log('[TabsContext] setTabs callback, prev tabs:', prev.length)
       return prev.map((tab) => {
-        if (!tab.isActive) {
-          console.log('[TabsContext] Skipping inactive tab:', tab.id)
-          return tab
-        }
+        if (!tab.isActive) return tab
 
         // Find the pane to split (can be any content pane, not just terminal)
         const paneToSplit = findPane(tab.root, paneId)
-        console.log('[TabsContext] Found pane to split:', paneToSplit)
         if (!paneToSplit || !isContentPane(paneToSplit)) {
-          console.log('[TabsContext] Pane not found or not content pane')
           return tab
         }
 
@@ -609,7 +600,6 @@ export function TabsProvider({ children }: { children: ReactNode }) {
           title ?? new URL(url).hostname,
           url
         )
-        console.log('[TabsContext] Created new webview pane:', newPane)
 
         const newSplit = createSplitPane(
           generatePaneId(),
@@ -618,10 +608,8 @@ export function TabsProvider({ children }: { children: ReactNode }) {
           newPane,
           0.5
         )
-        console.log('[TabsContext] Created new split:', newSplit)
 
         const newRoot = replacePane(tab.root, paneId, newSplit)
-        console.log('[TabsContext] New root:', newRoot)
         setActivePaneId(newPane.id)
 
         return { ...tab, root: newRoot }

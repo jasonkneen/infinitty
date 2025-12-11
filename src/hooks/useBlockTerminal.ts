@@ -5,8 +5,9 @@ import type { Block } from '../types/blocks'
 import { createCommandBlock, createAIResponseBlock, createInteractiveBlock, isInteractiveCommand } from '../types/blocks'
 import { cleanTerminalOutput } from '../lib/ansi'
 import type { ProviderType } from '../types/providers'
-import { createSession, streamPrompt, isOpenCodeAvailable } from '../services/opencode'
-import { streamPrompt as streamClaudeCode, isClaudeCodeAvailable, type ThinkingLevel } from '../services/claudecode'
+import { createSession, streamPrompt, getSessionMessages } from '../services/opencode'
+import { streamPrompt as streamClaudeCode, createSession as createClaudeCodeSession, isClaudeCodeAvailable, type ThinkingLevel } from '../services/claudecode'
+import { streamPrompt as streamCodex } from '../services/codex'
 import { CHANGE_TERMINAL_CWD_EVENT, emitPwdChanged } from './useFileExplorer'
 import { getEnvWithPath } from '../lib/shellEnv'
 
@@ -103,6 +104,26 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
       .catch(() => setCwd('~'))
   }, [cwd])
 
+  // Pre-warm Claude Code session once we have a cwd.
+  useEffect(() => {
+    if (!cwd) return
+    let cancelled = false
+    // Fire and forget; warm-up cost happens off the first user prompt.
+    void (async () => {
+      try {
+        const available = await isClaudeCodeAvailable()
+        if (!available || cancelled) return
+        await createClaudeCodeSession('haiku', cwd, 'none')
+      } catch (e) {
+        // Ignore warm-up errors; actual prompt will surface failures.
+        if (!cancelled) console.debug('[BlockTerminal] Claude Code prewarm skipped:', e)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [cwd])
+
   // Listen for CWD change requests from file explorer
   useEffect(() => {
     const handleCwdChange = (event: CustomEvent<{ path: string }>) => {
@@ -161,6 +182,7 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
     // Spawn a new PTY for this command specifically
     const shell = getDefaultShell()
     let outputBuffer = ''
+    let cleanedOutput = ''
     let updateTimeout: ReturnType<typeof setTimeout> | null = null
 
     try {
@@ -169,14 +191,15 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
       // Heuristic: detect simple `cd <path>` commands so we can persist cwd for the next block
       const cdMatch = command.match(/^\\s*cd\\s+([^;&|]+)\\s*$/)
       const nextCwdTarget = cdMatch?.[1]?.trim()
-      if (nextCwdTarget) {
-        const nextPath = resolvePath(nextCwdTarget, cwd)
-        setCwd(nextPath)
-        emitPwdChanged(nextPath)
-      }
 
       // Get shell environment with proper PATH (fixes GUI app not inheriting shell env)
-      const env = await getEnvWithPath()
+      // If this fails (e.g. in tests or restricted environments), fall back to default env.
+      let env: Record<string, string> | undefined
+      try {
+        env = await getEnvWithPath()
+      } catch (error) {
+        console.warn('[BlockTerminal] Failed to capture shell env, using default:', error)
+      }
 
       const pty = spawn(shell, ['-l', '-c', command], {
         cols: 120,
@@ -194,13 +217,13 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
         if (completedBlocksRef.current.has(block.id)) return
 
         outputBuffer += data
+        cleanedOutput += cleanTerminalOutput(data, command)
 
         // Batch updates to reduce re-renders
         if (!updateTimeout) {
           updateTimeout = setTimeout(() => {
             updateTimeout = null
             if (completedBlocksRef.current.has(block.id)) return
-            const cleanedOutput = cleanTerminalOutput(outputBuffer, command)
             setBlocks((prev) =>
               prev.map((b) =>
                 b.id === block.id ? { ...b, output: cleanedOutput } : b
@@ -221,7 +244,7 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
           updateTimeout = null
         }
 
-        const cleanedOutput = cleanTerminalOutput(outputBuffer, command)
+        cleanedOutput = cleanTerminalOutput(outputBuffer, command)
         setBlocks((prev) =>
           prev.map((b) =>
             b.id === block.id
@@ -286,49 +309,216 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
   // OpenCode session reference
   const openCodeSessionRef = useRef<string | null>(null)
 
+  // Set/switch the OpenCode session
+  const setOpenCodeSession = useCallback((sessionId: string | null) => {
+    console.log('[BlockTerminal] Setting OpenCode session to:', sessionId)
+    openCodeSessionRef.current = sessionId
+  }, [])
+
+  // Get current OpenCode session ID
+  const getOpenCodeSessionId = useCallback(() => {
+    return openCodeSessionRef.current
+  }, [])
+
+  // Track pagination state for session loading
+  const sessionPaginationRef = useRef<{
+    sessionId: string
+    loadedCount: number
+    total: number
+    hasMore: boolean
+  } | null>(null)
+
+  // Convert messages to blocks (helper function)
+  const messagesToBlocks = useCallback((messages: Awaited<ReturnType<typeof getSessionMessages>>['messages']): Block[] => {
+    const rawBlocks: Block[] = []
+    const usedUserMsgIds = new Set<string>()
+    
+    // Messages are sorted by time, so iterate and pair user -> assistant
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]
+      
+      if (msg.role === 'assistant') {
+        // Find the most recent unpaired user message before this assistant message
+        let userMsg = null
+        for (let j = i - 1; j >= 0; j--) {
+          const candidate = messages[j]
+          if (candidate.role === 'user' && !usedUserMsgIds.has(candidate.id)) {
+            userMsg = candidate
+            usedUserMsgIds.add(candidate.id)
+            break
+          }
+        }
+        
+        const hasContent = msg.content && msg.content.trim().length > 0
+        const hasToolCalls = msg.toolCalls && msg.toolCalls.length > 0
+        
+        // Skip if no user prompt AND no content AND no tool calls
+        if (!userMsg && !hasContent && !hasToolCalls) {
+          continue
+        }
+        
+        const prompt = userMsg?.content || ''
+        
+        const block: Block = {
+          id: msg.id,
+          type: 'ai-response',
+          prompt,
+          response: msg.content,
+          model: msg.model || 'unknown',
+          startTime: userMsg?.createdAt || msg.createdAt,
+          endTime: msg.createdAt,
+          isStreaming: false,
+          provider: msg.provider,
+          tokens: msg.tokens,
+          toolCalls: msg.toolCalls?.map((tc: { id: string; name: string; input?: Record<string, unknown>; output?: string; status: 'completed' | 'error' }) => ({
+            id: tc.id,
+            name: tc.name,
+            input: tc.input,
+            output: tc.output,
+            status: tc.status,
+          })),
+        }
+        rawBlocks.push(block)
+      }
+    }
+    
+    // Merge tool-only blocks into previous block (same model)
+    const mergedBlocks: Block[] = []
+    for (const block of rawBlocks) {
+      if (block.type !== 'ai-response') {
+        mergedBlocks.push(block)
+        continue
+      }
+      
+      const hasPrompt = block.prompt && block.prompt.trim().length > 0
+      const hasResponse = block.response && block.response.trim().length > 0
+      const isToolOnly = !hasPrompt && !hasResponse && block.toolCalls && block.toolCalls.length > 0
+      
+      // Check if we can merge tool-only block into previous block
+      const prevBlock = mergedBlocks[mergedBlocks.length - 1]
+      if (isToolOnly && prevBlock && prevBlock.type === 'ai-response') {
+        const sameModel = prevBlock.model === block.model && prevBlock.provider === block.provider
+        
+        // Merge tool calls into previous block if same model
+        if (sameModel) {
+          prevBlock.toolCalls = [...(prevBlock.toolCalls || []), ...(block.toolCalls || [])]
+          // Accumulate tokens
+          if (block.tokens) {
+            prevBlock.tokens = {
+              input: (prevBlock.tokens?.input || 0) + (block.tokens.input || 0),
+              output: (prevBlock.tokens?.output || 0) + (block.tokens.output || 0),
+            }
+          }
+          prevBlock.endTime = block.endTime
+          continue
+        }
+      }
+      
+      mergedBlocks.push(block)
+    }
+    
+    console.log('[BlockTerminal] Created', mergedBlocks.length, 'blocks from', messages.length, 'messages (merged from', rawBlocks.length, ')')
+    return mergedBlocks
+  }, [])
+
+  // Load a session's messages as blocks (initial load - last 20 messages)
+  const loadOpenCodeSession = useCallback(async (sessionId: string, limit = 20) => {
+    console.log('[BlockTerminal] Loading OpenCode session:', sessionId, 'limit:', limit)
+    
+    // Set the session ID
+    openCodeSessionRef.current = sessionId
+    
+    // Fetch last N messages from the session
+    const result = await getSessionMessages(sessionId, { limit, fromEnd: true })
+    console.log('[BlockTerminal] Loaded', result.messages.length, 'of', result.total, 'messages, hasMore:', result.hasMore)
+    
+    // Track pagination state
+    sessionPaginationRef.current = {
+      sessionId,
+      loadedCount: result.messages.length,
+      total: result.total,
+      hasMore: result.hasMore,
+    }
+    
+    // Convert to blocks
+    console.log('[BlockTerminal] Converting', result.messages.length, 'messages to blocks')
+    const newBlocks = messagesToBlocks(result.messages)
+    console.log('[BlockTerminal] Converted to', newBlocks.length, 'blocks')
+    
+    // Replace current blocks with loaded ones
+    setBlocks(newBlocks)
+    
+    return { loaded: newBlocks.length, total: result.total, hasMore: result.hasMore }
+  }, [messagesToBlocks])
+
+  // Load older messages (backfill when scrolling up)
+  const loadMoreMessages = useCallback(async (count = 20) => {
+    const pagination = sessionPaginationRef.current
+    if (!pagination || !pagination.hasMore) {
+      console.log('[BlockTerminal] No more messages to load')
+      return { loaded: 0, hasMore: false }
+    }
+    
+    console.log('[BlockTerminal] Loading more messages, offset:', pagination.loadedCount)
+    
+    // Fetch older messages
+    const result = await getSessionMessages(pagination.sessionId, {
+      limit: count,
+      offset: pagination.loadedCount,
+      fromEnd: true,
+    })
+    
+    console.log('[BlockTerminal] Loaded', result.messages.length, 'more messages, hasMore:', result.hasMore)
+    
+    // Update pagination state
+    sessionPaginationRef.current = {
+      ...pagination,
+      loadedCount: pagination.loadedCount + result.messages.length,
+      hasMore: result.hasMore,
+    }
+    
+    // Convert to blocks
+    const olderBlocks = messagesToBlocks(result.messages)
+    
+    // Prepend older blocks to existing ones
+    if (olderBlocks.length > 0) {
+      setBlocks(prev => [...olderBlocks, ...prev])
+    }
+    
+    return { loaded: olderBlocks.length, hasMore: result.hasMore }
+  }, [messagesToBlocks])
+
+  // Check if more messages can be loaded
+  const canLoadMoreMessages = useCallback(() => {
+    return sessionPaginationRef.current?.hasMore ?? false
+  }, [])
+
   // Note: Claude Code session is managed internally by the service (persistent connection)
 
   const executeAIQuery = useCallback(async (prompt: string, model: string, provider?: ProviderType, thinkingLevel?: ThinkingLevel) => {
-    console.log('[BlockTerminal] executeAIQuery called with provider:', provider, 'model:', model, 'thinkingLevel:', thinkingLevel)
+    const debug = import.meta.env.DEV
+    if (debug) {
+      console.log('[BlockTerminal] executeAIQuery called with provider:', provider, 'model:', model, 'thinkingLevel:', thinkingLevel)
+    }
     const block = createAIResponseBlock(prompt, model)
     setBlocks((prev) => addBlockWithEviction(prev, block))
 
     // Handle OpenCode provider
     if (provider === 'opencode') {
-      console.log('[BlockTerminal] Using OpenCode provider')
+      if (debug) console.log('[BlockTerminal] Using OpenCode SDK')
       try {
-        // Check if OpenCode is available
-        console.log('[BlockTerminal] Checking OpenCode availability...')
-        const available = await isOpenCodeAvailable()
-        console.log('[BlockTerminal] OpenCode available:', available)
-        if (!available) {
-          setBlocks((prev) =>
-            prev.map((b) =>
-              b.id === block.id
-                ? {
-                    ...b,
-                    response: '⚠️ OpenCode is not running.\n\nStart OpenCode with `opencode` in your terminal, then try again.',
-                    isStreaming: false,
-                    endTime: new Date(),
-                  }
-                : b
-            )
-          )
-          return block.id
-        }
-
         // Create session if needed
         if (!openCodeSessionRef.current) {
-          console.log('[BlockTerminal] Creating new OpenCode session...')
+          if (debug) console.log('[BlockTerminal] Creating new OpenCode session...')
           const session = await createSession()
           openCodeSessionRef.current = session.id
-          console.log('[BlockTerminal] Session created:', session.id)
+          if (debug) console.log('[BlockTerminal] Session created:', session.id)
         } else {
-          console.log('[BlockTerminal] Reusing existing session:', openCodeSessionRef.current)
+          if (debug) console.log('[BlockTerminal] Reusing existing session:', openCodeSessionRef.current)
         }
 
         // Stream the response
-        console.log('[BlockTerminal] Starting to stream response...')
+        if (debug) console.log('[BlockTerminal] Starting to stream response...')
         let fullResponse = ''
         let chunkCount = 0
         let stats: { provider?: string; model?: string; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }; cost?: number; duration?: number } | undefined
@@ -337,7 +527,7 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
 
         for await (const chunk of streamPrompt(openCodeSessionRef.current, prompt, model)) {
           chunkCount++
-          console.log('[BlockTerminal] Received chunk', chunkCount, ':', chunk.type)
+          if (debug) console.log('[BlockTerminal] Received chunk', chunkCount, ':', chunk.type)
           if (chunk.type === 'text' && chunk.content) {
             fullResponse += chunk.content
             setBlocks((prev) =>
@@ -349,7 +539,7 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
             )
           } else if (chunk.type === 'tool-call' && chunk.toolName) {
             // Track tool call
-            console.log('[BlockTerminal] 🔧 TOOL CALL:', chunk.toolName, chunk.toolInput)
+            if (debug) console.log('[BlockTerminal] TOOL CALL:', chunk.toolName, chunk.toolInput)
             const toolId = crypto.randomUUID()
             currentToolId = toolId
             toolCalls.push({
@@ -359,7 +549,7 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
               status: 'running',
               startTime: new Date(),
             })
-            console.log('[BlockTerminal] Tool calls array now:', toolCalls.length, 'items')
+            if (debug) console.log('[BlockTerminal] Tool calls array now:', toolCalls.length, 'items')
             // Update block with tool calls
             setBlocks((prev) =>
               prev.map((b) =>
@@ -392,7 +582,7 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
             )
           } else if (chunk.type === 'stats' && chunk.stats) {
             stats = chunk.stats
-            console.log('[BlockTerminal] Received stats:', stats)
+            if (debug) console.log('[BlockTerminal] Received stats:', stats)
           } else if (chunk.type === 'error') {
             fullResponse += `\n❌ Error: ${chunk.error}\n`
             break
@@ -435,48 +625,48 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
       }
     } else if (provider === 'claude-code') {
       // Handle Claude Code provider
-      console.log('[BlockTerminal] Using Claude Code provider')
+      if (debug) console.log('[BlockTerminal] Using Claude Code provider')
       try {
-        // Check if Claude CLI is available
-        const available = await isClaudeCodeAvailable()
-        console.log('[BlockTerminal] Claude Code available:', available)
-        if (!available) {
-          setBlocks((prev) =>
-            prev.map((b) =>
-              b.id === block.id
-                ? {
-                    ...b,
-                    response: '⚠️ Claude Code CLI is not available.\n\nInstall with `npm install -g @anthropic-ai/claude-code` or check your PATH.',
-                    isStreaming: false,
-                    endTime: new Date(),
-                  }
-                : b
-            )
-          )
-          return block.id
-        }
-
         // Stream the response (session is managed by the service - persistent connection)
         let fullResponse = ''
         let thinkingContent = ''
         let stats: { provider?: string; model?: string; tokens?: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number }; cost?: number; duration?: number } | undefined
         const toolCalls: { id: string; name: string; input?: Record<string, unknown>; output?: string; status: 'pending' | 'running' | 'completed' | 'error'; startTime?: Date; endTime?: Date }[] = []
 
-        for await (const chunk of streamClaudeCode(prompt, model, cwd, thinkingLevel)) {
-          console.log('[BlockTerminal] 📥 Claude Code chunk received:', chunk.type, chunk.content?.slice(0, 50) || '')
-          if (chunk.type === 'text' && chunk.content) {
-            fullResponse += chunk.content
-            setBlocks((prev) =>
-              prev.map((b) =>
-                b.id === block.id
-                  ? { ...b, response: fullResponse }
-                  : b
-              )
+        // Smooth streaming: batch text updates to avoid React render per token.
+        let pendingText = ''
+        let flushScheduled = false
+        const flushText = () => {
+          if (!pendingText) {
+            flushScheduled = false
+            return
+          }
+          fullResponse += pendingText
+          pendingText = ''
+          flushScheduled = false
+          setBlocks((prev) =>
+            prev.map((b) =>
+              b.id === block.id
+                ? { ...b, response: fullResponse }
+                : b
             )
+          )
+        }
+        const scheduleFlush = () => {
+          if (flushScheduled) return
+          flushScheduled = true
+          setTimeout(flushText, 50)
+        }
+
+        for await (const chunk of streamClaudeCode(prompt, model, cwd, thinkingLevel)) {
+          if (debug) console.log('[BlockTerminal] Claude Code chunk received:', chunk.type)
+          if (chunk.type === 'text' && chunk.content) {
+            pendingText += chunk.content
+            scheduleFlush()
           } else if (chunk.type === 'thinking' && chunk.content) {
             // Extended thinking content
             thinkingContent += chunk.content
-            console.log('[BlockTerminal] 🧠 Thinking:', chunk.content.slice(0, 100))
+            if (debug) console.log('[BlockTerminal] Thinking chunk')
             setBlocks((prev) =>
               prev.map((b) =>
                 b.id === block.id && b.type === 'ai-response'
@@ -485,7 +675,7 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
               )
             )
           } else if (chunk.type === 'tool-call' && chunk.toolName) {
-            console.log('[BlockTerminal] 🔧 Claude Code tool call:', chunk.toolName)
+            if (debug) console.log('[BlockTerminal] Claude Code tool call:', chunk.toolName)
             const toolId = chunk.toolId || crypto.randomUUID()
             toolCalls.push({
               id: toolId,
@@ -521,12 +711,17 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
             )
           } else if (chunk.type === 'stats' && chunk.stats) {
             stats = chunk.stats
-            console.log('[BlockTerminal] Claude Code stats:', stats)
+            if (debug) console.log('[BlockTerminal] Claude Code stats')
           } else if (chunk.type === 'error') {
+            // Ensure any pending text is flushed before final error.
+            flushText()
             fullResponse += `\n❌ Error: ${chunk.error}\n`
             break
           }
         }
+
+        // Flush remaining pending text.
+        flushText()
 
         // Mark all remaining running tools as completed (fallback if tool-result wasn't received)
         for (const tool of toolCalls) {
@@ -570,6 +765,135 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
               ? {
                   ...b,
                   response: `❌ Claude Code error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                  isStreaming: false,
+                  endTime: new Date(),
+                }
+              : b
+          )
+        )
+      }
+    } else if (provider === 'codex') {
+      // Handle Codex provider via CLI
+      if (debug) console.log('[BlockTerminal] Using Codex CLI')
+      try {
+        let fullResponse = ''
+        let reasoningContent = ''
+        let stats: { provider?: string; model?: string; tokens?: { input?: number; output?: number; cached?: number }; cost?: number; duration?: number } | undefined
+        const toolCalls: { id: string; name: string; input?: Record<string, unknown>; output?: string; status: 'pending' | 'running' | 'completed' | 'error'; startTime?: Date; endTime?: Date }[] = []
+        let currentToolId: string | null = null
+
+        for await (const chunk of streamCodex('', prompt, model, cwd)) {
+          if (debug) console.log('[BlockTerminal] Codex chunk:', chunk.type)
+          if (chunk.type === 'text' && chunk.content) {
+            fullResponse += chunk.content
+            setBlocks((prev) =>
+              prev.map((b) =>
+                b.id === block.id
+                  ? { ...b, response: fullResponse }
+                  : b
+              )
+            )
+          } else if (chunk.type === 'reasoning' && chunk.content) {
+            reasoningContent += chunk.content
+            setBlocks((prev) =>
+              prev.map((b) =>
+                b.id === block.id && b.type === 'ai-response'
+                  ? { ...b, thinking: reasoningContent }
+                  : b
+              )
+            )
+          } else if (chunk.type === 'tool-call' && chunk.toolName) {
+            const toolId = chunk.toolId || crypto.randomUUID()
+            currentToolId = toolId
+            toolCalls.push({
+              id: toolId,
+              name: chunk.toolName,
+              input: chunk.toolInput,
+              status: 'running',
+              startTime: new Date(),
+            })
+            setBlocks((prev) =>
+              prev.map((b) =>
+                b.id === block.id && b.type === 'ai-response'
+                  ? { ...b, toolCalls: [...toolCalls.map(t => ({...t}))] }
+                  : b
+              )
+            )
+          } else if (chunk.type === 'tool-result') {
+            const toolIndex = toolCalls.findIndex(t => t.id === currentToolId || t.status === 'running')
+            if (toolIndex !== -1) {
+              toolCalls[toolIndex] = {
+                ...toolCalls[toolIndex],
+                status: chunk.isError ? 'error' : 'completed',
+                output: chunk.toolResult,
+                endTime: new Date(),
+              }
+            }
+            currentToolId = null
+            setBlocks((prev) =>
+              prev.map((b) =>
+                b.id === block.id && b.type === 'ai-response'
+                  ? { ...b, toolCalls: [...toolCalls.map(t => ({...t}))] }
+                  : b
+              )
+            )
+          } else if (chunk.type === 'file-change' && chunk.changes) {
+            const fileToolId = crypto.randomUUID()
+            toolCalls.push({
+              id: fileToolId,
+              name: 'file_change',
+              input: { changes: chunk.changes },
+              status: 'completed',
+              output: chunk.changes.map(c => `${c.kind}: ${c.path}`).join('\n'),
+              startTime: new Date(),
+              endTime: new Date(),
+            })
+            setBlocks((prev) =>
+              prev.map((b) =>
+                b.id === block.id && b.type === 'ai-response'
+                  ? { ...b, toolCalls: [...toolCalls.map(t => ({...t}))] }
+                  : b
+              )
+            )
+          } else if (chunk.type === 'stats' && chunk.stats) {
+            stats = chunk.stats
+          } else if (chunk.type === 'error') {
+            fullResponse += `\n❌ Error: ${chunk.error}\n`
+            break
+          }
+        }
+
+        // Mark complete with stats
+        const endTime = new Date()
+        const duration = stats?.duration || (endTime.getTime() - block.startTime.getTime())
+        setBlocks((prev) =>
+          prev.map((b) =>
+            b.id === block.id && b.type === 'ai-response'
+              ? {
+                  ...b,
+                  isStreaming: false,
+                  endTime,
+                  provider: stats?.provider || 'openai',
+                  model: stats?.model || b.model,
+                  tokens: stats?.tokens ? {
+                    input: stats.tokens.input,
+                    output: stats.tokens.output,
+                    cache: { read: stats.tokens.cached },
+                  } : undefined,
+                  cost: stats?.cost,
+                  duration,
+                  toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+                }
+              : b
+          )
+        )
+      } catch (error) {
+        setBlocks((prev) =>
+          prev.map((b) =>
+            b.id === block.id
+              ? {
+                  ...b,
+                  response: `❌ Codex error: ${error instanceof Error ? error.message : 'Unknown error'}`,
                   isStreaming: false,
                   endTime: new Date(),
                 }
@@ -665,5 +989,10 @@ export function useBlockTerminal(options: UseBlockTerminalOptions = {}) {
     completeInteractiveBlock,
     dismissBlock,
     changeDirectory,
+    setOpenCodeSession,
+    getOpenCodeSessionId,
+    loadOpenCodeSession,
+    loadMoreMessages,
+    canLoadMoreMessages,
   }
 }

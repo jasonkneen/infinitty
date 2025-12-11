@@ -5,10 +5,27 @@ use tauri::webview::WebviewBuilder;
 use tauri::menu::{ContextMenu, MenuBuilder, MenuItemBuilder, SubmenuBuilder, Menu, AboutMetadataBuilder};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use sysinfo::{System, CpuRefreshKind, MemoryRefreshKind, RefreshKind, Disks};
+use serde::Serialize;
 
 // Store for tracking embedded webviews
 struct WebviewStore {
-    webviews: HashMap<String, ()>,
+    webviews: HashMap<String, StoredWebview>,
+}
+
+struct StoredWebview {
+    url: url::Url,
+    trusted: bool,
+}
+
+// System metrics snapshot returned to frontend
+#[derive(Serialize)]
+struct SystemMetrics {
+    cpu_usage: f32,
+    memory_used_mb: u64,
+    memory_total_mb: u64,
+    disk_used_mb: u64,
+    disk_total_mb: u64,
 }
 
 impl Default for WebviewStore {
@@ -41,12 +58,14 @@ async fn create_embedded_webview(
     println!("[WebView] Creating webview: id={}, url={}, pos=({},{}), size={}x{}",
              webview_id, url, x, y, width, height);
 
-    let parsed_url = url.parse().map_err(|e: url::ParseError| {
+    let parsed_url: url::Url = url.parse().map_err(|e: url::ParseError| {
         println!("[WebView] URL parse error: {}", e);
         e.to_string()
     })?;
 
-    let webview_builder = WebviewBuilder::new(&webview_id, WebviewUrl::External(parsed_url))
+    validate_external_url(&parsed_url)?;
+
+    let webview_builder = WebviewBuilder::new(&webview_id, WebviewUrl::External(parsed_url.clone()))
         .user_agent(CHROME_USER_AGENT)
         .auto_resize();  // Enable auto-resize
 
@@ -65,7 +84,7 @@ async fn create_embedded_webview(
     // Store reference
     if let Some(store) = app.try_state::<Mutex<WebviewStore>>() {
         let mut store = store.lock().unwrap();
-        store.webviews.insert(webview_id.clone(), ());
+        store.webviews.insert(webview_id.clone(), StoredWebview { url: parsed_url.clone(), trusted: true });
     }
 
     Ok(webview_id)
@@ -96,9 +115,18 @@ async fn navigate_webview(
     url: String,
 ) -> Result<(), String> {
     let parsed_url: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    validate_external_url(&parsed_url)?;
 
     if let Some(webview) = app.get_webview(&webview_id) {
-        webview.navigate(parsed_url).map_err(|e| e.to_string())?;
+        webview.navigate(parsed_url.clone()).map_err(|e| e.to_string())?;
+
+        // Update stored URL
+        if let Some(store) = app.try_state::<Mutex<WebviewStore>>() {
+            let mut store = store.lock().unwrap();
+            if let Some(entry) = store.webviews.get_mut(&webview_id) {
+                entry.url = parsed_url;
+            }
+        }
         Ok(())
     } else {
         Err("Webview not found".to_string())
@@ -132,6 +160,20 @@ async fn execute_webview_script(
     webview_id: String,
     script: String,
 ) -> Result<String, String> {
+    // NOTE: This is a powerful primitive. It is currently only used by the
+    // internal element selector tooling. Do not expose to untrusted inputs.
+    if script.len() > 100_000 {
+        return Err("Script too large".to_string());
+    }
+    if let Some(store) = app.try_state::<Mutex<WebviewStore>>() {
+        let store = store.lock().unwrap();
+        match store.webviews.get(&webview_id) {
+            Some(entry) if entry.trusted => {},
+            _ => return Err("Webview is not trusted for script execution".to_string()),
+        }
+    } else {
+        return Err("Webview store unavailable".to_string());
+    }
     if let Some(webview) = app.get_webview(&webview_id) {
         // Execute JavaScript in the webview and return result
         let result = webview.eval(&script);
@@ -215,6 +257,41 @@ fn get_current_directory() -> Result<String, String> {
     std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_system_metrics() -> Result<SystemMetrics, String> {
+    // Refresh CPU + memory.
+    let refresh = RefreshKind::new()
+        .with_cpu(CpuRefreshKind::everything())
+        .with_memory(MemoryRefreshKind::everything());
+    let mut sys = System::new_with_specifics(refresh);
+    sys.refresh_cpu();
+    sys.refresh_memory();
+
+    let cpu_usage = sys.global_cpu_info().cpu_usage();
+
+    let memory_total_mb = sys.total_memory() / 1024;
+    let memory_used_mb = sys.used_memory() / 1024;
+
+    let mut disks = Disks::new_with_refreshed_list();
+    disks.refresh();
+    let mut disk_total_mb: u64 = 0;
+    let mut disk_used_mb: u64 = 0;
+    for disk in disks.list() {
+        let total = disk.total_space() / (1024 * 1024);
+        let available = disk.available_space() / (1024 * 1024);
+        disk_total_mb += total;
+        disk_used_mb += total.saturating_sub(available);
+    }
+
+    Ok(SystemMetrics {
+        cpu_usage,
+        memory_used_mb,
+        memory_total_mb,
+        disk_used_mb,
+        disk_total_mb,
+    })
 }
 
 #[tauri::command]
@@ -382,39 +459,46 @@ async fn git_checkout_branch(path: String, branch: String) -> Result<(), String>
 // File system operations for file explorer context menu
 #[tauri::command]
 async fn fs_create_file(path: String) -> Result<(), String> {
+    let safe_path = sanitize_fs_path(&path)?;
     use std::fs::File;
-    File::create(&path).map_err(|e| e.to_string())?;
+    File::create(&safe_path).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn fs_create_directory(path: String) -> Result<(), String> {
-    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    let safe_path = sanitize_fs_path(&path)?;
+    std::fs::create_dir_all(&safe_path).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn fs_rename(old_path: String, new_path: String) -> Result<(), String> {
-    std::fs::rename(&old_path, &new_path).map_err(|e| e.to_string())?;
+    let safe_old = sanitize_fs_path(&old_path)?;
+    let safe_new = sanitize_fs_path(&new_path)?;
+    std::fs::rename(&safe_old, &safe_new).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn fs_delete(path: String, is_directory: bool) -> Result<(), String> {
+    let safe_path = sanitize_fs_path(&path)?;
     if is_directory {
-        std::fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&safe_path).map_err(|e| e.to_string())?;
     } else {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&safe_path).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 #[tauri::command]
 async fn fs_copy(source: String, destination: String, is_directory: bool) -> Result<(), String> {
+    let safe_source = sanitize_fs_path(&source)?;
+    let safe_destination = sanitize_fs_path(&destination)?;
     if is_directory {
-        copy_dir_recursive(&source, &destination).map_err(|e| e.to_string())?;
+        copy_dir_recursive(&safe_source, &safe_destination).map_err(|e| e.to_string())?;
     } else {
-        std::fs::copy(&source, &destination).map_err(|e| e.to_string())?;
+        std::fs::copy(&safe_source, &safe_destination).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -450,7 +534,70 @@ fn copy_dir_recursive(src: &str, dst: &str) -> std::io::Result<()> {
 
 #[tauri::command]
 async fn fs_move(source: String, destination: String) -> Result<(), String> {
-    std::fs::rename(&source, &destination).map_err(|e| e.to_string())?;
+    let safe_source = sanitize_fs_path(&source)?;
+    let safe_destination = sanitize_fs_path(&destination)?;
+    std::fs::rename(&safe_source, &safe_destination).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn sanitize_fs_path(path: &str) -> Result<String, String> {
+    use std::path::{Path, Component};
+
+    // Disallow empty paths and parent traversal.
+    if path.trim().is_empty() {
+        return Err("Empty path".to_string());
+    }
+
+    let p = Path::new(path);
+
+    if !p.is_absolute() {
+        return Err("Path must be absolute".to_string());
+    }
+
+    for comp in p.components() {
+        if let Component::ParentDir = comp {
+            return Err("Parent directory traversal is not allowed".to_string());
+        }
+    }
+
+    // Restrict to the user's home directory when available.
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    if let Some(home_dir) = home {
+        let home_path = Path::new(&home_dir);
+        if !p.starts_with(home_path) {
+            return Err("File operations are restricted to the home directory".to_string());
+        }
+    }
+
+    Ok(p.to_string_lossy().to_string())
+}
+
+fn validate_external_url(url: &url::Url) -> Result<(), String> {
+    // Only allow http/https.
+    let scheme = url.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("Blocked URL scheme: {}", scheme));
+    }
+
+    // Block localhost.
+    let host = url.host_str().unwrap_or_default();
+    let blocked = ["localhost", "127.0.0.1", "0.0.0.0", "::1"];
+    if blocked.contains(&host) {
+        return Err(format!("Blocked URL host: {}", host));
+    }
+
+    // Block private IPv4 ranges.
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        let octets = ip.octets();
+        let a = octets[0];
+        let b = octets[1];
+        if a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) {
+            return Err(format!("Blocked private IP: {}", host));
+        }
+    }
+
     Ok(())
 }
 
@@ -727,6 +874,7 @@ pub fn run() {
             move_tab_to_new_window,
             get_window_count,
             get_current_directory,
+            get_system_metrics,
             get_git_status,
             git_stage_file,
             git_unstage_file,

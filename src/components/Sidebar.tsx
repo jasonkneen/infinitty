@@ -312,11 +312,6 @@ function WidgetsPanel() {
         label="Chart"
         onClick={() => createWidgetTab('chart', 'Chart')}
       />
-      <MenuItem
-        icon={GitBranch}
-        label="Workflow"
-        onClick={() => createWidgetTab('workflow', 'Workflow')}
-      />
     </div>
   )
 }

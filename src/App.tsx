@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { type TerminalHandle } from './components/Terminal'
 import { Sidebar } from './components/Sidebar'
 import { CommandPalette } from './components/CommandPalette'
-import { WarpInput } from './components/WarpInput'
+import { WarpInput, triggerOpenSessionsPicker } from './components/WarpInput'
 import { BlocksView } from './components/BlocksView'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -31,6 +31,35 @@ function hexToRgba(hex: string, alpha: number): string {
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+function resolveBackgroundSrc(path: string): string {
+  // Already a browser-usable URL
+  if (
+    path.startsWith('blob:') ||
+    path.startsWith('data:') ||
+    path.startsWith('http:') ||
+    path.startsWith('https:') ||
+    path.startsWith('tauri:')
+  ) {
+    return path
+  }
+
+  // In desktop builds, convert absolute file paths.
+  if (typeof window !== 'undefined' && '__TAURI__' in window) {
+    try {
+      return convertFileSrc(path)
+    } catch {
+      return path
+    }
+  }
+
+  return path
+}
+
+function videoObjectFit(position: 'cover' | 'contain' | 'tile' | 'center'): 'cover' | 'contain' {
+  if (position === 'contain' || position === 'center') return 'contain'
+  return 'cover'
 }
 
 function AppContent() {
@@ -70,6 +99,7 @@ function AppContent() {
     initPty,
     killPty,
     completeInteractiveBlock,
+    loadOpenCodeSession,
   } = useBlockTerminal()
 
   // Initialize PTY on mount for OpenWarp mode
@@ -167,6 +197,16 @@ function AppContent() {
       shortcut: 'Cmd+0',
       action: () => setFontSize(14),
     },
+    {
+      id: 'switch-session',
+      label: 'Switch Session',
+      shortcut: 'Cmd+Shift+S',
+      action: () => {
+        setIsCommandPaletteOpen(false)
+        // Small delay to let command palette close first
+        setTimeout(() => triggerOpenSessionsPicker(), 100)
+      },
+    },
   ]
 
   // Global keyboard shortcuts
@@ -234,6 +274,11 @@ function AppContent() {
       e.preventDefault()
       setFontSize(14) // Default size
     }
+    // Switch session with Cmd+Shift+S
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'S') {
+      e.preventDefault()
+      triggerOpenSessionsPicker()
+    }
   }, [ghosttyMode, clearBlocks, createNewTab, createNewWindow, activePaneId, splitPane, tabs, setActiveTab, settings.fontSize, setFontSize, openSettings, openCommandPalette])
 
   useEffect(() => {
@@ -246,6 +291,12 @@ function AppContent() {
     const handleChangeTerminalCwd = (event: CustomEvent<{ path: string }>) => {
       const path = event.detail.path
       if (!path) return
+
+      // Quote a path for POSIX shells (bash/zsh) to avoid injection.
+      const quotePathForShell = (value: string) => {
+        // Wrap in single quotes and escape embedded single quotes.
+        return `'${value.replace(/'/g, `'\\''`)}'`
+      }
 
       // Find the active terminal pane and write cd command
       const tab = getActiveTab()
@@ -264,7 +315,7 @@ function AppContent() {
 
       if (targetPaneId) {
         // Write cd command to the terminal (clear line first, then cd)
-        const cdCommand = `cd "${path}"\n`
+        const cdCommand = `cd -- ${quotePathForShell(path)}\n`
         console.log('[App] Sending cd command to terminal:', targetPaneId, cdCommand)
         writeToTerminalByKey(targetPaneId, cdCommand)
       }
@@ -285,9 +336,10 @@ function AppContent() {
         console.log('[App] Tauri drag-drop event:', event.payload.type, event.payload)
 
         if (event.payload.type === 'over') {
-          // Dragging over - show overlay
+          // Dragging over - show overlay. Some platforms don't provide paths until drop.
+          const paths = 'paths' in event.payload ? (event.payload as any).paths : []
           window.dispatchEvent(new CustomEvent('tauri-drag-enter', {
-            detail: { paths: event.payload.paths }
+            detail: { paths }
           }))
         } else if (event.payload.type === 'drop') {
           // Dropped - handle files
@@ -298,8 +350,8 @@ function AppContent() {
             }))
           }
           window.dispatchEvent(new CustomEvent('tauri-drag-leave'))
-        } else if (event.payload.type === 'leave' || event.payload.type === 'cancel') {
-          // Left or cancelled
+        } else if (event.payload.type === 'leave') {
+          // Left
           window.dispatchEvent(new CustomEvent('tauri-drag-leave'))
         }
       })
@@ -471,31 +523,36 @@ function AppContent() {
         >
           {settings.background.type === 'video' && settings.background.videoPath ? (
             <video
-              src={settings.background.videoPath}
+              src={resolveBackgroundSrc(settings.background.videoPath)}
               autoPlay
               muted={settings.background.videoMuted}
               loop={settings.background.videoLoop}
               playsInline
+              onCanPlay={(e) => {
+                void e.currentTarget.play().catch(() => {})
+              }}
               style={{
                 width: '100%',
                 height: '100%',
-                objectFit: settings.background.position === 'tile' || settings.background.position === 'center'
-                  ? 'none'
-                  : (settings.background.position as 'cover' | 'contain'),
+                objectFit: videoObjectFit(settings.background.position),
                 objectPosition: 'center',
               }}
             />
           ) : settings.background.imagePath ? (
-            <img
-              src={settings.background.imagePath}
-              alt="Background"
+            <div
+              aria-label="Background"
               style={{
                 width: '100%',
                 height: '100%',
-                objectFit: settings.background.position === 'tile' || settings.background.position === 'center'
-                  ? 'none'
-                  : (settings.background.position as 'cover' | 'contain'),
-                objectPosition: 'center',
+                backgroundImage: `url(${resolveBackgroundSrc(settings.background.imagePath)})`,
+                backgroundRepeat: settings.background.position === 'tile' ? 'repeat' : 'no-repeat',
+                backgroundSize:
+                  settings.background.position === 'cover'
+                    ? 'cover'
+                    : settings.background.position === 'contain'
+                      ? 'contain'
+                      : 'auto',
+                backgroundPosition: 'center',
               }}
             />
           ) : null}
@@ -530,6 +587,12 @@ function AppContent() {
           <WarpInput
             onSubmit={handleCommand}
             onModelChange={setSelectedModel}
+            onSessionSelect={async (sessionId) => {
+              console.log('[App] Session selected:', sessionId)
+              // Load the session's messages as blocks
+              const result = await loadOpenCodeSession(sessionId)
+              console.log('[App] Loaded', result.loaded, 'of', result.total, 'blocks from session')
+            }}
           />
         </main>
         </div>

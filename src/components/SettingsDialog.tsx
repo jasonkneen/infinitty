@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } fr
 import { createPortal } from 'react-dom'
 import { X, Settings, Palette, Terminal, Image, Monitor, Code, RotateCcw, Check, ChevronDown, Search } from 'lucide-react'
 import { useTerminalSettings } from '../contexts/TerminalSettingsContext'
+import { open } from '@tauri-apps/plugin-dialog'
 import { triggerWebviewRestore } from '../hooks/useWebviewOverlay'
 import { TERMINAL_THEMES, TERMINAL_FONTS, UI_FONTS, SYNTAX_THEMES, themeToXterm, type TerminalFont, type UIFont, type SyntaxTheme } from '../config/terminal'
 import { FontLoader } from './FontLoader'
@@ -1608,6 +1609,9 @@ function CodingPanel() {
 
       {/* LSP Section */}
       <LSPSettingsSection />
+
+      {/* Provider API Keys / Model preferences */}
+      <ProviderSettingsSection />
     </div>
   )
 }
@@ -1679,6 +1683,49 @@ function LSPSettingsSection() {
   )
 }
 
+function ProviderSettingsSection() {
+  const { settings, setProviderSettings } = useTerminalSettings()
+  const theme = settings.theme
+
+  const keyInputs = [
+    { label: 'Anthropic API Key', key: 'anthropicKey' as const, placeholder: 'sk-ant-...' },
+    { label: 'OpenAI API Key', key: 'openaiKey' as const, placeholder: 'sk-proj-...' },
+    { label: 'OpenRouter API Key', key: 'openrouterKey' as const, placeholder: 'or-...' },
+    { label: 'Grok API Key', key: 'grokKey' as const, placeholder: 'gsk-...' },
+  ]
+
+  return (
+    <section>
+      <h4 style={{ color: '#e6edf3', fontSize: '12px', fontWeight: 500, margin: '0 0 8px' }}>
+        Providers & Models
+      </h4>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+        {keyInputs.map((item) => (
+          <div key={item.key} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label style={{ color: theme.brightBlack, fontSize: '11px' }}>{item.label}</label>
+            <input
+              type="password"
+              value={settings.providers[item.key] || ''}
+              onChange={(e) => setProviderSettings({ [item.key]: e.target.value })}
+              placeholder={item.placeholder}
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                backgroundColor: '#161b22',
+                border: '1px solid #30363d',
+                borderRadius: '6px',
+                color: '#e6edf3',
+                fontSize: '12px',
+              }}
+            />
+          </div>
+        ))}
+      </div>
+
+    </section>
+  )
+}
+
 // Background Panel - Keep existing implementation but simplified
 function BackgroundPanel() {
   const {
@@ -1700,28 +1747,79 @@ function BackgroundPanel() {
   const handleImageSelect = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0]
-      if (file) {
-        const url = URL.createObjectURL(file)
-        setBackgroundImage(url)
-        setBackgroundType('image')
-        setBackgroundEnabled(true)
-      }
+      if (!file) return
+
+      // Web fallback: use blob URL
+      const url = URL.createObjectURL(file)
+      setBackgroundImage(url)
+      setBackgroundType('image')
+      setBackgroundEnabled(true)
     },
-    [setBackgroundImage, setBackgroundType, setBackgroundEnabled]
+    [setBackgroundEnabled, setBackgroundImage, setBackgroundType]
   )
 
   const handleVideoSelect = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0]
-      if (file) {
-        const url = URL.createObjectURL(file)
-        setBackgroundVideo(url)
-        setBackgroundType('video')
-        setBackgroundEnabled(true)
-      }
+      if (!file) return
+
+      // Web fallback: use blob URL
+      const url = URL.createObjectURL(file)
+      setBackgroundVideo(url)
+      setBackgroundType('video')
+      setBackgroundEnabled(true)
     },
-    [setBackgroundVideo, setBackgroundType, setBackgroundEnabled]
+    [setBackgroundEnabled, setBackgroundType, setBackgroundVideo]
   )
+
+  const handleChooseBackground = useCallback(async () => {
+    const isVideo = settings.background.type === 'video'
+
+    // Prefer native Tauri dialog when available (persists across restarts).
+    if (typeof window !== 'undefined' && '__TAURI__' in window) {
+      try {
+        const result = await open({
+          multiple: false,
+          directory: false,
+          filters: isVideo
+            ? [{ name: 'Video', extensions: ['mp4', 'webm', 'mov', 'm4v', 'avi', 'mkv'] }]
+            : [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif', 'tiff'] }],
+        })
+
+        if (!result) return
+
+        const path = Array.isArray(result) ? result[0] : result
+        if (!path) return
+
+        if (isVideo) {
+          setBackgroundVideo(path)
+          setBackgroundType('video')
+        } else {
+          setBackgroundImage(path)
+          setBackgroundType('image')
+        }
+
+        setBackgroundEnabled(true)
+        return
+      } catch (error) {
+        // If capabilities/plugin are misconfigured, fall back to HTML picker.
+        console.error('[BackgroundPanel] Native dialog failed, falling back to file input:', error)
+      }
+    }
+
+    // Web fallback (and desktop fallback if native dialog fails).
+    if (isVideo) {
+      videoInputRef.current?.click()
+    } else {
+      imageInputRef.current?.click()
+    }
+  }, [
+    settings.background.type,
+    setBackgroundEnabled,
+    setBackgroundImage,
+    setBackgroundType,
+    setBackgroundVideo,
+  ])
 
   const handleRemoveBackground = useCallback(() => {
     setBackgroundImage(null)
@@ -1786,7 +1884,7 @@ function BackgroundPanel() {
 
         <div style={{ display: 'flex', gap: '12px' }}>
           <button
-            onClick={() => settings.background.type === 'image' ? imageInputRef.current?.click() : videoInputRef.current?.click()}
+            onClick={handleChooseBackground}
             style={{
               padding: '10px 20px',
               backgroundColor: '#21262d',

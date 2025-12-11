@@ -69,24 +69,25 @@ export function useFileExplorer(): UseFileExplorerState & UseFileExplorerActions
     async (path: string): Promise<FileNode | null> => {
       try {
         const entries = await readDir(path)
-        const children: FileNode[] = []
 
-        for (const entry of entries) {
-          try {
+        // Resolve stats in parallel to minimize folder expansion latency
+        const childrenResults = await Promise.allSettled(
+          entries.map(async (entry) => {
             const entryPath = await join(path, entry.name)
             const fileInfo = await stat(entryPath)
-
-            children.push({
+            return {
               name: entry.name,
               path: entryPath,
               isFolder: fileInfo.isDirectory,
               children: fileInfo.isDirectory ? [] : undefined,
               error: undefined,
-            })
-          } catch (err) {
-            continue
-          }
-        }
+            } as FileNode
+          })
+        )
+
+        const children: FileNode[] = childrenResults
+          .filter((r): r is PromiseFulfilledResult<FileNode> => r.status === 'fulfilled')
+          .map((r) => r.value)
 
         children.sort((a, b) => {
           if (a.isFolder !== b.isFolder) {
@@ -244,30 +245,9 @@ export function useFileExplorer(): UseFileExplorerState & UseFileExplorerActions
       if (!node) return
       if (!node.isFolder) return
 
+      // Only fetch when we have never loaded children; keep cached children to avoid re-fetching
       if ((!node.children || node.children.length === 0) && !node.isLoading) {
         await expandFolder(path)
-      } else {
-        setState((prev) => {
-          if (!prev.root) return prev
-
-          const updateNode = (n: FileNode): FileNode => {
-            if (n.path === path) {
-              return {
-                ...n,
-                children: n.children && n.children.length > 0 ? [] : n.children,
-              }
-            }
-            if (n.children) {
-              return {
-                ...n,
-                children: n.children.map(updateNode),
-              }
-            }
-            return n
-          }
-
-          return { ...prev, root: prev.root ? updateNode(prev.root) : null }
-        })
       }
     },
     [state.root, findNodeByPath, expandFolder]

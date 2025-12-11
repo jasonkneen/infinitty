@@ -23,18 +23,14 @@ import {
   Lightbulb,
   Bot,
   X,
-  Zap,
-  Brain,
-  DollarSign,
-  BarChart3,
   Hash,
+  Brain,
 } from 'lucide-react'
 import { useTerminalSettings } from '../contexts/TerminalSettingsContext'
 import { detectNaturalLanguage, detectCLICommand } from '../hooks/useInputInterception'
 import { PROVIDERS, getProviderModels, type Provider, type ProviderType, type ProviderModel } from '../types/providers'
-import { getProvidersAndModels, type OpenCodeProvider } from '../services/opencode'
+import { getProvidersAndModels, listSessions, type OpenCodeProvider, type OpenCodeSessionInfo } from '../services/opencode'
 import { type ThinkingLevel, getThinkingLevelLabel } from '../services/claudecode'
-import trumpsCard from '../assets/trumps.png'
 
 // Context block reference for ghost chips
 interface ContextBlock {
@@ -50,6 +46,13 @@ interface CustomContextChip {
   enabled: boolean
 }
 
+// Event for opening the sessions picker from outside
+export const OPEN_SESSIONS_PICKER_EVENT = 'open-sessions-picker'
+
+export function triggerOpenSessionsPicker() {
+  window.dispatchEvent(new CustomEvent(OPEN_SESSIONS_PICKER_EVENT))
+}
+
 interface WarpInputProps {
   onSubmit: (command: string, isAI: boolean, providerId?: ProviderType, modelId?: string, contextBlocks?: ContextBlock[], thinkingLevel?: ThinkingLevel) => void
   onModelChange?: (modelId: string) => void
@@ -60,6 +63,7 @@ interface WarpInputProps {
   onConfirmContext?: () => void
   confirmedContextBlocks?: ContextBlock[]
   onRemoveConfirmedContext?: (blockId: string) => void
+  onSessionSelect?: (sessionId: string) => void
 }
 
 const MODELS = [
@@ -99,6 +103,7 @@ export function WarpInput({
   onConfirmContext,
   confirmedContextBlocks = [],
   onRemoveConfirmedContext,
+  onSessionSelect,
 }: WarpInputProps) {
   const { settings } = useTerminalSettings()
   const [input, setInput] = useState('')
@@ -108,7 +113,6 @@ export function WarpInput({
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [showThinkingPicker, setShowThinkingPicker] = useState(false)
   const [isAIMode, setIsAIMode] = useState(true)
-  const [autoMode, setAutoMode] = useState<'responsive' | 'cost-efficient'>('responsive')
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('none')
   const [inputSize, setInputSize] = useState<InputSize>('small')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -121,6 +125,15 @@ export function WarpInput({
   const [overlay, setOverlay] = useState<'conversations' | 'slash' | 'mentions' | null>(null)
   const [openCodeProviders, setOpenCodeProviders] = useState<OpenCodeProvider[]>([])
   const [customContextChips, setCustomContextChips] = useState<CustomContextChip[]>([])
+
+  // Listen for external trigger to open sessions picker
+  useEffect(() => {
+    const handleOpenSessions = () => {
+      setOverlay('conversations')
+    }
+    window.addEventListener(OPEN_SESSIONS_PICKER_EVENT, handleOpenSessions)
+    return () => window.removeEventListener(OPEN_SESSIONS_PICKER_EVENT, handleOpenSessions)
+  }, [])
 
   // Fetch OpenCode providers/models when needed
   const fetchOpenCodeModels = useCallback(async () => {
@@ -293,10 +306,22 @@ export function WarpInput({
 
   // Clear pending context when user starts typing
   const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(event.target.value)
+    const nextValue = event.target.value
+    setInput(nextValue)
     // Clear pending context if user types - they've moved on
-    if (pendingContextBlock && event.target.value !== input) {
+    if (pendingContextBlock && nextValue !== input) {
       onClearPendingContext?.()
+    }
+
+    // Lightweight inline triggers for @ and / to open pickers
+    const triggerMatch = nextValue.match(/(?:^|\\s)([@/])(\\w*)$/)
+    if (triggerMatch) {
+      const symbol = triggerMatch[1]
+      if (symbol === '@') {
+        setOverlay('mentions')
+      } else if (symbol === '/') {
+        setOverlay('slash')
+      }
     }
   }
 
@@ -329,9 +354,7 @@ export function WarpInput({
     return () => window.removeEventListener('keydown', closeOnEsc)
   }, [overlay])
 
-  const displayModelName = selectedModel.id === 'auto'
-    ? `auto (${autoMode})`
-    : selectedModel.name
+  const displayModelName = selectedModel.name
 
   // Helper to get button position for portal rendering
   const getButtonPosition = (ref: React.RefObject<HTMLDivElement | null>) => {
@@ -718,13 +741,13 @@ export function WarpInput({
                     border: 'none',
                     cursor: 'pointer',
                   }}
-                  title="Select model"
-                >
-                  <Sparkles size={12} />
-                  <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayModelName}</span>
-                  <ChevronDown size={10} style={{ opacity: 0.6, flexShrink: 0 }} />
-                </button>
-              </div>
+              title="Select model"
+            >
+              <Sparkles size={12} />
+              <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayModelName}</span>
+              <ChevronDown size={10} style={{ opacity: 0.6, flexShrink: 0 }} />
+            </button>
+          </div>
 
               {/* Thinking level selector - only for Claude Code */}
               {selectedProvider.id === 'claude-code' && (
@@ -794,7 +817,14 @@ export function WarpInput({
             zIndex: 999999,
           }}
         >
-          <ConversationPicker onClose={() => setOverlay(null)} currentProvider={selectedProvider.id} />
+          <ConversationPicker 
+            onClose={() => setOverlay(null)} 
+            currentProvider={selectedProvider.id} 
+            onSelectSession={(sessionId) => {
+              setOverlay(null)
+              onSessionSelect?.(sessionId)
+            }}
+          />
         </div>,
         document.body
       )}
@@ -839,11 +869,9 @@ export function WarpInput({
           <ModelPicker
             models={providerModels.map(m => ({ id: m.id, name: m.name, description: m.description || '' }))}
             selectedModel={{ id: selectedModelId, name: selectedModel?.name || selectedModelId, description: selectedModel?.description || '' }}
-            autoMode={autoMode}
             onSelectModel={(model) => {
               handleModelChange(model.id)
             }}
-            onAutoModeChange={setAutoMode}
           />
         </div>,
         document.body
@@ -963,267 +991,17 @@ function ToolbarIcon({
 interface ModelPickerProps {
   models: typeof MODELS
   selectedModel: typeof MODELS[0]
-  autoMode: 'responsive' | 'cost-efficient'
   onSelectModel: (model: typeof MODELS[0]) => void
-  onAutoModeChange: (mode: 'responsive' | 'cost-efficient') => void
 }
 
-// Model stats for Top Trumps cards - extended stats with rarity and tagline
-const MODEL_STATS_EXTENDED: Record<string, {
-  displayName: string
-  intelligence: number
-  speed: number
-  context: number
-  value: number
-  reasoning: number
-  tagline: string
-  rarity: 'common' | 'uncommon' | 'rare' | 'legendary' | 'mythic'
-}> = {
-  'auto': {
-    displayName: 'Auto',
-    intelligence: 75,
-    speed: 75,
-    context: 80,
-    value: 80,
-    reasoning: 75,
-    tagline: 'Smart Selection',
-    rarity: 'uncommon',
-  },
-  'gpt-5.1-low': {
-    displayName: 'GPT-5.1 Low',
-    intelligence: 70,
-    speed: 95,
-    context: 60,
-    value: 90,
-    reasoning: 50,
-    tagline: 'Speed Racer',
-    rarity: 'uncommon',
-  },
-  'gpt-5.1-medium': {
-    displayName: 'GPT-5.1 Medium',
-    intelligence: 85,
-    speed: 75,
-    context: 60,
-    value: 65,
-    reasoning: 70,
-    tagline: 'Balanced Pro',
-    rarity: 'rare',
-  },
-  'gpt-5.1-high': {
-    displayName: 'GPT-5.1 High',
-    intelligence: 95,
-    speed: 50,
-    context: 60,
-    value: 30,
-    reasoning: 92,
-    tagline: 'The Thinker',
-    rarity: 'legendary',
-  },
-  'claude-4-sonnet': {
-    displayName: 'Claude 4 Sonnet',
-    intelligence: 88,
-    speed: 80,
-    context: 85,
-    value: 60,
-    reasoning: 80,
-    tagline: 'Reliable Genius',
-    rarity: 'legendary',
-  },
-  'claude-4.5-sonnet': {
-    displayName: 'Claude 4.5 Sonnet',
-    intelligence: 92,
-    speed: 75,
-    context: 85,
-    value: 65,
-    reasoning: 88,
-    tagline: 'Speed Meets Smarts',
-    rarity: 'legendary',
-  },
-  'claude-4.5-sonnet-thinking': {
-    displayName: 'Claude 4.5 Sonnet',
-    intelligence: 95,
-    speed: 40,
-    context: 85,
-    value: 35,
-    reasoning: 96,
-    tagline: 'Deep Thoughts',
-    rarity: 'rare',
-  },
-  'claude-4.5-haiku': {
-    displayName: 'Claude 4.5 Haiku',
-    intelligence: 72,
-    speed: 95,
-    context: 85,
-    value: 92,
-    reasoning: 60,
-    tagline: 'Lightning Fast',
-    rarity: 'uncommon',
-  },
-  'claude-4.5-opus': {
-    displayName: 'Claude 4.5 Opus',
-    intelligence: 98,
-    speed: 35,
-    context: 85,
-    value: 25,
-    reasoning: 99,
-    tagline: 'The Ultimate Mind',
-    rarity: 'mythic',
-  },
-  'claude-4.5-opus-thinking': {
-    displayName: 'Claude 4.5 Opus',
-    intelligence: 99,
-    speed: 30,
-    context: 85,
-    value: 20,
-    reasoning: 100,
-    tagline: 'Absolute Peak',
-    rarity: 'mythic',
-  },
-  'claude-4.1-opus': {
-    displayName: 'Claude 4.1 Opus',
-    intelligence: 96,
-    speed: 50,
-    context: 85,
-    value: 30,
-    reasoning: 95,
-    tagline: 'The Predecessor',
-    rarity: 'legendary',
-  },
-  'gpt-5-low': {
-    displayName: 'GPT-5 Low',
-    intelligence: 65,
-    speed: 90,
-    context: 60,
-    value: 85,
-    reasoning: 45,
-    tagline: 'Budget King',
-    rarity: 'common',
-  },
-  'gpt-5-medium': {
-    displayName: 'GPT-5 Medium',
-    intelligence: 80,
-    speed: 70,
-    context: 60,
-    value: 60,
-    reasoning: 65,
-    tagline: 'Solid Performer',
-    rarity: 'rare',
-  },
-  'gpt-5-high': {
-    displayName: 'GPT-5 High',
-    intelligence: 92,
-    speed: 45,
-    context: 60,
-    value: 25,
-    reasoning: 90,
-    tagline: 'Peak Thinker',
-    rarity: 'legendary',
-  },
-  'gemini-3-pro': {
-    displayName: 'Gemini 3 Pro',
-    intelligence: 90,
-    speed: 80,
-    context: 95,
-    value: 65,
-    reasoning: 75,
-    tagline: 'Context Master',
-    rarity: 'legendary',
-  },
-  'gemini-2.5-pro': {
-    displayName: 'Gemini 2.5 Pro',
-    intelligence: 85,
-    speed: 85,
-    context: 100,
-    value: 70,
-    reasoning: 70,
-    tagline: 'Context King',
-    rarity: 'rare',
-  },
-  'glm-4.6': {
-    displayName: 'GLM 4.6',
-    intelligence: 78,
-    speed: 88,
-    context: 75,
-    value: 75,
-    reasoning: 65,
-    tagline: 'The Challenger',
-    rarity: 'uncommon',
-  },
-}
-
-// Rarity colors and filters
-const RARITY_COLORS: Record<string, { border: string; filter: string }> = {
-  common: {
-    border: '#6a6a7a',
-    filter: 'grayscale(0.7) brightness(0.6)',
-  },
-  uncommon: {
-    border: '#22c55e',
-    filter: 'hue-rotate(85deg) saturate(1.2) brightness(0.75)',
-  },
-  rare: {
-    border: '#3b82f6',
-    filter: 'hue-rotate(200deg) saturate(1.3) brightness(0.8)',
-  },
-  legendary: {
-    border: '#fbbf24',
-    filter: 'hue-rotate(35deg) saturate(1.5) brightness(0.85)',
-  },
-  mythic: {
-    border: '#a855f7',
-    filter: 'hue-rotate(280deg) saturate(1.4) brightness(0.85)',
-  },
-}
-
-function ModelPicker({ models, selectedModel, autoMode, onSelectModel, onAutoModeChange }: ModelPickerProps) {
+function ModelPicker({ models, selectedModel, onSelectModel }: ModelPickerProps) {
   const { settings } = useTerminalSettings()
-  const [hoveredModel, setHoveredModel] = useState<typeof MODELS[0] | null>(null)
-  const [viewMode, setViewMode] = useState<'specs' | 'fun'>('specs')
-
-  // Use hovered model for display, fall back to selected
-  const displayModel = hoveredModel || selectedModel
-  const isAutoModel = displayModel.id === 'auto'
-
-  // Model stats lookup
-  const modelStats: Record<string, { intelligence: number; speed: number; cost: number }> = {
-    'auto': { intelligence: autoMode === 'responsive' ? 90 : 65, speed: autoMode === 'responsive' ? 85 : 55, cost: autoMode === 'responsive' ? 50 : 95 },
-    'gpt-5.1-low': { intelligence: 70, speed: 95, cost: 90 },
-    'gpt-5.1-medium': { intelligence: 85, speed: 75, cost: 60 },
-    'gpt-5.1-high': { intelligence: 95, speed: 50, cost: 30 },
-    'claude-4-sonnet': { intelligence: 88, speed: 80, cost: 55 },
-    'claude-4.5-sonnet': { intelligence: 92, speed: 75, cost: 50 },
-    'claude-4.5-sonnet-thinking': { intelligence: 95, speed: 40, cost: 35 },
-    'claude-4.5-haiku': { intelligence: 75, speed: 95, cost: 85 },
-    'claude-4.5-opus': { intelligence: 98, speed: 45, cost: 20 },
-    'claude-4.5-opus-thinking': { intelligence: 99, speed: 30, cost: 15 },
-    'claude-4.1-opus': { intelligence: 96, speed: 50, cost: 25 },
-    'gpt-5-low': { intelligence: 65, speed: 90, cost: 85 },
-    'gpt-5-medium': { intelligence: 80, speed: 70, cost: 55 },
-    'gpt-5-high': { intelligence: 92, speed: 45, cost: 30 },
-    'gemini-3-pro': { intelligence: 90, speed: 80, cost: 60 },
-    'gemini-2.5-pro': { intelligence: 85, speed: 85, cost: 65 },
-    'glm-4.6': { intelligence: 78, speed: 88, cost: 80 },
-  }
-
-  const stats = modelStats[displayModel.id] || { intelligence: 80, speed: 70, cost: 50 }
-  const extendedStats = MODEL_STATS_EXTENDED[displayModel.id] || {
-    displayName: displayModel.name,
-    intelligence: stats.intelligence,
-    speed: stats.speed,
-    context: 75,
-    value: 100 - stats.cost,
-    reasoning: stats.intelligence,
-    tagline: displayModel.description,
-    rarity: 'common' as const,
-  }
-  const rarity = RARITY_COLORS[extendedStats.rarity]
 
   return (
     <div
       onClick={(event) => event.stopPropagation()}
       style={{
-        display: 'flex',
-        width: '580px',
+        width: '280px',
         backgroundColor: settings.theme.background,
         border: `1px solid ${settings.theme.brightBlack}`,
         borderRadius: '12px',
@@ -1231,17 +1009,13 @@ function ModelPicker({ models, selectedModel, autoMode, onSelectModel, onAutoMod
         overflow: 'hidden',
       }}
     >
-      {/* Model list */}
-      <div style={{ flex: 1, maxHeight: '380px', overflowY: 'auto', padding: '8px 0' }}>
+      <div style={{ maxHeight: '380px', overflowY: 'auto', padding: '8px 0' }}>
         {models.map((model) => {
           const isSelected = selectedModel.id === model.id
-          const isHovered = hoveredModel?.id === model.id
           return (
             <button
               key={model.id}
               onClick={() => onSelectModel(model)}
-              onMouseEnter={() => setHoveredModel(model)}
-              onMouseLeave={() => setHoveredModel(null)}
               style={{
                 display: 'flex',
                 width: '100%',
@@ -1250,7 +1024,7 @@ function ModelPicker({ models, selectedModel, autoMode, onSelectModel, onAutoMod
                 padding: '10px 16px',
                 textAlign: 'left',
                 fontSize: '14px',
-                backgroundColor: isSelected ? settings.theme.cyan : isHovered ? settings.theme.cyan + '26' : 'transparent',
+                backgroundColor: isSelected ? settings.theme.cyan : 'transparent',
                 color: isSelected ? settings.theme.background : settings.theme.foreground,
                 border: 'none',
                 cursor: 'pointer',
@@ -1260,296 +1034,16 @@ function ModelPicker({ models, selectedModel, autoMode, onSelectModel, onAutoMod
               {isSelected && (
                 <Check size={14} style={{ color: settings.theme.background }} />
               )}
-              <span style={{ marginLeft: !isSelected ? '26px' : 0 }}>{model.name}</span>
+              <div style={{ flex: 1, marginLeft: !isSelected ? '26px' : 0 }}>
+                <div>{model.name}</div>
+                {model.description && (
+                  <div style={{ fontSize: '11px', opacity: 0.6, marginTop: '2px' }}>{model.description}</div>
+                )}
+              </div>
             </button>
           )
         })}
       </div>
-
-      {/* Model info panel */}
-      <div style={{ width: '220px', padding: '16px', borderLeft: `1px solid ${settings.theme.brightBlack}` }}>
-        <div style={{ marginBottom: '16px' }}>
-          <div style={{ fontSize: '14px', fontWeight: 500, color: settings.theme.foreground, marginBottom: '8px' }}>
-            {isAutoModel ? 'Auto mode' : displayModel.name}
-          </div>
-          <p style={{ fontSize: '12px', color: settings.theme.brightBlack, lineHeight: 1.5 }}>
-            {isAutoModel
-              ? 'Auto will select the best model for the task. Cost-efficiency optimizes for cost, Responsiveness optimizes for response speed.'
-              : displayModel.description
-            }
-          </p>
-        </div>
-
-        {/* Auto mode toggle - only show for auto model */}
-        {isAutoModel && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '20px' }}>
-            <button
-              onClick={() => onAutoModeChange('responsive')}
-              style={{
-                display: 'flex',
-                width: '100%',
-                alignItems: 'center',
-                gap: '8px',
-                padding: '8px 12px',
-                fontSize: '14px',
-                borderRadius: '6px',
-                backgroundColor: autoMode === 'responsive' ? '#2dd4bf' : 'transparent',
-                color: autoMode === 'responsive' ? '#0a0e16' : 'rgba(255,255,255,0.5)',
-                border: 'none',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-            >
-              {autoMode === 'responsive' && <Check size={14} />}
-              <span style={{ marginLeft: autoMode !== 'responsive' ? '22px' : 0 }}>Responsive</span>
-            </button>
-            <button
-              onClick={() => onAutoModeChange('cost-efficient')}
-              style={{
-                display: 'flex',
-                width: '100%',
-                alignItems: 'center',
-                gap: '8px',
-                padding: '8px 12px',
-                fontSize: '14px',
-                borderRadius: '6px',
-                backgroundColor: autoMode === 'cost-efficient' ? '#2dd4bf' : 'transparent',
-                color: autoMode === 'cost-efficient' ? '#0a0e16' : 'rgba(255,255,255,0.5)',
-                border: 'none',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-            >
-              {autoMode === 'cost-efficient' && <Check size={14} />}
-              <span style={{ marginLeft: autoMode !== 'cost-efficient' ? '22px' : 0 }}>Cost-efficient</span>
-            </button>
-          </div>
-        )}
-
-        {/* Specs/Fun toggle */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '12px' }}>
-          <button
-            onClick={() => setViewMode('specs')}
-            style={{
-              padding: '4px 8px',
-              fontSize: '11px',
-              fontWeight: viewMode === 'specs' ? 600 : 400,
-              color: viewMode === 'specs' ? settings.theme.white : settings.theme.brightBlack,
-              backgroundColor: viewMode === 'specs' ? `${settings.theme.brightBlack}40` : 'transparent',
-              border: `1px solid ${viewMode === 'specs' ? settings.theme.brightBlack : 'transparent'}`,
-              borderRadius: '3px 0 0 3px',
-              cursor: 'pointer',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            Specs
-          </button>
-          <button
-            onClick={() => setViewMode('fun')}
-            style={{
-              padding: '4px 8px',
-              fontSize: '11px',
-              fontWeight: viewMode === 'fun' ? 600 : 400,
-              color: viewMode === 'fun' ? settings.theme.white : settings.theme.brightBlack,
-              backgroundColor: viewMode === 'fun' ? `${settings.theme.brightBlack}40` : 'transparent',
-              border: `1px solid ${viewMode === 'fun' ? settings.theme.brightBlack : 'transparent'}`,
-              borderRadius: '0 3px 3px 0',
-              cursor: 'pointer',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            Fun
-          </button>
-        </div>
-
-        {/* Stats display - Specs or Fun mode */}
-        {viewMode === 'specs' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <StatBar label="Intelligence" value={stats.intelligence} />
-            <StatBar label="Speed" value={stats.speed} />
-            <StatBar label="Cost" value={stats.cost} />
-          </div>
-        ) : (
-          /* Top Trumps card in Fun mode */
-          <div
-            style={{
-              position: 'relative',
-              width: '188px',
-              aspectRatio: '0.68',
-              borderRadius: '8px',
-              overflow: 'hidden',
-              boxShadow: '0 0 20px rgba(0,0,0,0.3)',
-            }}
-          >
-            {/* Background image with color filter */}
-            <img
-              src={trumpsCard}
-              alt=""
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                filter: rarity.filter,
-                pointerEvents: 'none',
-              }}
-            />
-
-            {/* Content overlay */}
-            <div
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                padding: '12px 14px',
-              }}
-            >
-              {/* Rarity badge */}
-              <div style={{
-                padding: '3px 8px',
-                fontSize: '8px',
-                fontWeight: 700,
-                color: rarity.border,
-                backgroundColor: `${rarity.border}30`,
-                borderRadius: '3px',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                border: `1px solid ${rarity.border}50`,
-                alignSelf: 'fit-content',
-                marginBottom: '4px',
-              }}>
-                {extendedStats.rarity}
-              </div>
-
-              {/* Center - model name and tagline */}
-              <div style={{
-                flex: 1,
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center',
-                alignItems: 'center',
-                textAlign: 'center',
-              }}>
-                <div style={{
-                  fontSize: '13px',
-                  fontWeight: 800,
-                  color: settings.theme.white,
-                  letterSpacing: '-0.5px',
-                  textShadow: '0 2px 6px rgba(0,0,0,0.5)',
-                  marginBottom: '2px',
-                  lineHeight: 1.2,
-                }}>
-                  {extendedStats.displayName}
-                </div>
-                <div style={{
-                  fontSize: '7px',
-                  color: rarity.border,
-                  fontWeight: 600,
-                  textTransform: 'uppercase',
-                  letterSpacing: '1px',
-                  textShadow: '0 1px 3px rgba(0,0,0,0.5)',
-                }}>
-                  {extendedStats.tagline}
-                </div>
-              </div>
-
-              {/* Stats at bottom */}
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '4px',
-                marginTop: 'auto',
-              }}>
-                <CompactStatBar icon={Brain} label="INT" value={extendedStats.intelligence} color={settings.theme.magenta} />
-                <CompactStatBar icon={Zap} label="SPD" value={extendedStats.speed} color={settings.theme.yellow} />
-                <CompactStatBar icon={BarChart3} label="CTX" value={extendedStats.context} color={settings.theme.cyan} />
-                <CompactStatBar icon={DollarSign} label="VAL" value={extendedStats.value} color={settings.theme.green} />
-                <CompactStatBar icon={Sparkles} label="RSN" value={extendedStats.reasoning} color={settings.theme.blue} />
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function StatBar({ label, value }: { label: string; value: number }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-      <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)', width: '90px' }}>{label}</div>
-      <div style={{ flex: 1, height: '4px', backgroundColor: 'rgba(255,255,255,0.05)', overflow: 'hidden', borderRadius: '2px' }}>
-        <div
-          style={{
-            height: '100%',
-            width: `${value}%`,
-            background: 'linear-gradient(to right, rgba(45, 212, 191, 0.3), rgba(168, 85, 247, 0.3))',
-            transition: 'width 0.3s ease',
-            borderRadius: '2px',
-          }}
-        />
-      </div>
-    </div>
-  )
-}
-
-function CompactStatBar({
-  icon: Icon,
-  label,
-  value,
-  color,
-}: {
-  icon: typeof Brain
-  label: string
-  value: number
-  color: string
-}) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-      <Icon size={8} style={{ color, flexShrink: 0 }} />
-      <span style={{
-        fontSize: '7px',
-        color: '#aaa',
-        width: '24px',
-        flexShrink: 0,
-        fontWeight: 600,
-      }}>
-        {label}
-      </span>
-      <div style={{
-        flex: 1,
-        height: '6px',
-        backgroundColor: 'rgba(0,0,0,0.4)',
-        borderRadius: '3px',
-        overflow: 'hidden',
-        border: '1px solid rgba(255,255,255,0.1)',
-      }}>
-        <div style={{
-          width: `${value}%`,
-          height: '100%',
-          backgroundColor: color,
-          borderRadius: '2px',
-          transition: 'width 0.5s ease-out',
-          boxShadow: `0 0 6px ${color}60`,
-        }} />
-      </div>
-      <span style={{
-        fontSize: '8px',
-        fontWeight: 700,
-        color: '#fff',
-        width: '18px',
-        textAlign: 'right',
-        flexShrink: 0,
-        textShadow: '0 1px 2px rgba(0,0,0,0.5)',
-      }}>
-        {value}
-      </span>
     </div>
   )
 }
@@ -1732,53 +1226,101 @@ function ThinkingPicker({ selectedLevel, onSelectLevel }: ThinkingPickerProps) {
 interface ConversationPickerProps {
   onClose: () => void
   currentProvider: string
+  onSelectSession?: (sessionId: string) => void
 }
 
-function ConversationPicker({ onClose: _onClose, currentProvider }: ConversationPickerProps) {
+interface ConversationItem {
+  id: string
+  title: string
+  path: string
+  date: string
+  provider: string
+}
+
+function ConversationPicker({ onClose: _onClose, currentProvider, onSelectSession }: ConversationPickerProps) {
   const { settings } = useTerminalSettings()
   const theme = settings.theme
   const [search, setSearch] = useState('')
   const [activeTab, setActiveTab] = useState<'provider' | 'all'>('provider')
+  const [openCodeSessions, setOpenCodeSessions] = useState<OpenCodeSessionInfo[]>([])
+  const [isLoading, setIsLoading] = useState(false)
 
-  // Mock conversations with provider info
-  const conversations = [
+  // Load OpenCode sessions when provider is opencode
+  useEffect(() => {
+    if (currentProvider === 'opencode') {
+      setIsLoading(true)
+      listSessions()
+        .then((sessions) => {
+          setOpenCodeSessions(sessions)
+        })
+        .catch((err) => {
+          console.error('Failed to load OpenCode sessions:', err)
+        })
+        .finally(() => {
+          setIsLoading(false)
+        })
+    }
+  }, [currentProvider])
+
+  // Helper to format relative time
+  const formatRelativeTime = (date: Date): string => {
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+    
+    if (diffDays === 0) return 'Today'
+    if (diffDays === 1) return 'Yesterday'
+    if (diffDays < 7) return `${diffDays} days ago`
+    if (diffDays < 30) return `${Math.floor(diffDays / 7)} weeks ago`
+    if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`
+    return `${Math.floor(diffDays / 365)} years ago`
+  }
+
+  // Convert OpenCode sessions to conversation items
+  const openCodeConversations: ConversationItem[] = openCodeSessions.map((session) => ({
+    id: session.id,
+    title: session.title || 'Untitled session',
+    path: session.directory,
+    date: formatRelativeTime(session.updatedAt),
+    provider: 'opencode',
+  }))
+
+  // Mock conversations for other providers
+  const mockConversations: ConversationItem[] = [
     {
+      id: 'mock-1',
       title: 'can you find out where my env vars are being defined on startup',
       path: '/Users/jkneen',
       date: '1 month ago',
       provider: 'claude-code'
     },
     {
-      title: 'we have just added a custom webview component that renders a list...',
-      path: '/Users/jkneen/Documents/GitHub/langflow',
-      date: '1 month ago',
-      provider: 'opencode'
-    },
-    {
+      id: 'mock-2',
       title: "Fix the parse error near '@' in the JavaScript code",
       path: '/Users/jkneen/Documents/GitHub/flows/petersandmay/petersandmay',
       date: '2 months ago',
       provider: 'claude-code'
     },
     {
-      title: "can you work out why we're getting errors adding shipping records",
-      path: '/Users/jkneen/Documents/github/flows/petersandmay/petersandmay',
-      date: '2 months ago',
-      provider: 'opencode'
-    },
-    {
+      id: 'mock-3',
       title: 'i have an installation somewhere of code that is vscode-oss-serv...',
       path: '/Users/jkneen',
       date: '2 months ago',
       provider: 'aider'
     },
     {
+      id: 'mock-4',
       title: 'I need to get this running on web. mobile. ios android ASAP/User...',
       path: '/Users/jkneen',
       date: '2 months ago',
       provider: 'claude-code'
     },
   ]
+
+  // Combine real OpenCode sessions with mock data for other providers
+  const conversations: ConversationItem[] = currentProvider === 'opencode' 
+    ? openCodeConversations 
+    : [...openCodeConversations, ...mockConversations]
 
   // Filter conversations based on active tab and search
   const filteredConversations = conversations.filter(c => {
@@ -1801,6 +1343,7 @@ function ConversationPicker({ onClose: _onClose, currentProvider }: Conversation
 
   return (
     <div
+      onClick={(e) => e.stopPropagation()}
       style={{
         width: '580px',
         backgroundColor: theme.background,
@@ -1894,13 +1437,21 @@ function ConversationPicker({ onClose: _onClose, currentProvider }: Conversation
           {activeTab === 'provider' ? `${getProviderDisplayName(currentProvider)} conversations` : 'All conversations'}
         </div>
         <div style={{ maxHeight: '320px', overflowY: 'auto' }}>
-          {filteredConversations.length === 0 ? (
+          {isLoading ? (
+            <div style={{ padding: '16px', textAlign: 'center', color: theme.brightBlack, fontSize: '13px' }}>
+              Loading sessions...
+            </div>
+          ) : filteredConversations.length === 0 ? (
             <div style={{ padding: '16px', textAlign: 'center', color: theme.brightBlack, fontSize: '13px' }}>
               No conversations found
             </div>
           ) : filteredConversations.map((conversation) => (
             <button
-              key={conversation.title}
+              key={conversation.id}
+              onClick={() => {
+                console.log('[ConversationPicker] Session clicked:', conversation.id, conversation.title)
+                onSelectSession?.(conversation.id)
+              }}
               style={{
                 display: 'flex',
                 width: '100%',

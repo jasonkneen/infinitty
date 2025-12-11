@@ -28,6 +28,8 @@
         { "name": "uvx", "cmd": "uvx", "args": true, "sidecar": false },
         { "name": "claude", "cmd": "claude", "args": true, "sidecar": false },
         { "name": "claude-path", "cmd": "/usr/local/bin/claude", "args": true, "sidecar": false },
+        { "name": "codex", "cmd": "codex", "args": true, "sidecar": false },
+        { "name": "opencode", "cmd": "opencode", "args": true, "sidecar": false },
         { "name": "script", "cmd": "script", "args": true, "sidecar": false }
       ]
     },
@@ -45,6 +47,8 @@
         { "name": "uvx", "cmd": "uvx", "args": true, "sidecar": false },
         { "name": "claude", "cmd": "claude", "args": true, "sidecar": false },
         { "name": "claude-path", "cmd": "/usr/local/bin/claude", "args": true, "sidecar": false },
+        { "name": "codex", "cmd": "codex", "args": true, "sidecar": false },
+        { "name": "opencode", "cmd": "opencode", "args": true, "sidecar": false },
         { "name": "script", "cmd": "script", "args": true, "sidecar": false }
       ]
     },

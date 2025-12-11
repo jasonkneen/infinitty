@@ -30,6 +30,8 @@ interface BlocksViewProps {
   onDismissBlock?: (blockId: string) => void
   onBlockClick?: (blockId: string, blockType: string, label: string) => void
   onBlockDoubleClick?: (blockId: string, blockType: string, label: string) => void
+  onLoadMore?: () => Promise<{ loaded: number; hasMore: boolean }>  // Called when scrolling to top
+  canLoadMore?: boolean  // Whether more messages are available
 }
 
 // Estimate height of blocks based on type and content
@@ -61,7 +63,7 @@ const estimateBlockHeight = (block: Block): number => {
   }
 }
 
-export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockClick, onBlockDoubleClick, onScrollToEndRef }: BlocksViewProps & { onScrollToEndRef?: React.MutableRefObject<(() => void) | null> }) {
+export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockClick, onBlockDoubleClick, onScrollToEndRef, onLoadMore, canLoadMore }: BlocksViewProps & { onScrollToEndRef?: React.MutableRefObject<(() => void) | null> }) {
   const { settings } = useTerminalSettings()
   const theme = settings.theme
   const containerRef = useRef<HTMLDivElement>(null)
@@ -73,19 +75,17 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
   const [isSticky, setIsSticky] = useState(true) // Sticky mode - auto-scroll to bottom
   const [showScrollButton, setShowScrollButton] = useState(false)
   const lastBlockCountRef = useRef(blocks.length)
+  const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>({})
+  const blockObserversRef = useRef<Map<string, ResizeObserver>>(new Map())
 
   // Track block heights for accurate virtualization
   const blockHeights = useMemo(() => {
-    return blocks.map((block) => estimateBlockHeight(block))
-  }, [blocks])
+    return blocks.map((block) => measuredHeights[block.id] ?? estimateBlockHeight(block))
+  }, [blocks, measuredHeights])
 
   // Calculate cumulative heights for fast index lookup
   const cumulativeHeights = useMemo(() => {
     const cumulative: number[] = [0]
-    let total = 0
-    for (const height of blockHeights) {
-      total += height
-    }
     for (const height of blockHeights) {
       cumulative.push(cumulative[cumulative.length - 1] + height)
     }
@@ -164,10 +164,15 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
     }
   }, [blocks, isSticky])
 
+  // Track loading state for backfill
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const loadMoreThrottleRef = useRef<number | null>(null)
+
   // Handle scroll events for virtualization and sticky detection
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget
-    setScrollTop(target.scrollTop)
+    const currentScrollTop = target.scrollTop
+    setScrollTop(currentScrollTop)
 
     // Check if user is near bottom (within 100px)
     const isNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100
@@ -179,7 +184,38 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
       setIsSticky(false)
       setShowScrollButton(true)
     }
-  }, [])
+
+    // Check if scrolled to top - trigger load more
+    if (currentScrollTop < 100 && canLoadMore && onLoadMore && !isLoadingMore) {
+      // Throttle to prevent multiple calls
+      if (!loadMoreThrottleRef.current) {
+        setIsLoadingMore(true)
+        
+        // Remember scroll height before loading
+        const prevScrollHeight = target.scrollHeight
+        
+        onLoadMore().then((result) => {
+          setIsLoadingMore(false)
+          
+          // Maintain scroll position after prepending blocks
+          if (result.loaded > 0) {
+            requestAnimationFrame(() => {
+              const newScrollHeight = target.scrollHeight
+              const heightDiff = newScrollHeight - prevScrollHeight
+              target.scrollTop = currentScrollTop + heightDiff
+            })
+          }
+        }).catch(() => {
+          setIsLoadingMore(false)
+        })
+        
+        // Throttle for 1 second
+        loadMoreThrottleRef.current = window.setTimeout(() => {
+          loadMoreThrottleRef.current = null
+        }, 1000)
+      }
+    }
+  }, [canLoadMore, onLoadMore, isLoadingMore])
 
   // Handle container resize
   useEffect(() => {
@@ -194,6 +230,35 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
     setContainerHeight(container.clientHeight)
 
     return () => resizeObserver.disconnect()
+  }, [])
+
+  // Measure each rendered block and store its height for virtualization
+  const registerBlock = useCallback((id: string) => (node: HTMLDivElement | null) => {
+    const existingObserver = blockObserversRef.current.get(id)
+    if (existingObserver) {
+      existingObserver.disconnect()
+      blockObserversRef.current.delete(id)
+    }
+    if (!node) return
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      const height = entry?.contentRect?.height ?? node.getBoundingClientRect().height
+      setMeasuredHeights((prev) => {
+        if (Math.abs((prev[id] ?? 0) - height) < 1) return prev
+        return { ...prev, [id]: height }
+      })
+    })
+    observer.observe(node)
+    blockObserversRef.current.set(id, observer)
+  }, [])
+
+  // Clean up observers on unmount
+  useEffect(() => {
+    return () => {
+      blockObserversRef.current.forEach((observer) => observer.disconnect())
+      blockObserversRef.current.clear()
+    }
   }, [])
 
   const handleBlockClick = useCallback((blockId: string, blockType: string, label: string) => {
@@ -225,15 +290,29 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
   }, [])
 
   // Render a single block
-  const renderBlock = (block: Block) => {
+  const renderBlock = (block: Block, index: number, allBlocks: Block[]) => {
     const isFocused = focusedBlockId === block.id
     const isExpanded = expandedBlockId === block.id
+    
+    // Check if model changed from previous AI response block
+    let showModelInfo = true
+    if (block.type === 'ai-response' && index > 0) {
+      // Find the previous AI response block
+      for (let i = index - 1; i >= 0; i--) {
+        const prevBlock = allBlocks[i]
+        if (prevBlock.type === 'ai-response') {
+          showModelInfo = prevBlock.model !== block.model || prevBlock.provider !== block.provider
+          break
+        }
+      }
+    }
 
     switch (block.type) {
       case 'command':
         return (
           <div
             key={block.id}
+            ref={registerBlock(block.id)}
             onClick={() => handleBlockClick(block.id, 'command', block.command)}
             onDoubleClick={() => handleBlockDoubleClick(block.id, 'command', block.command)}
             style={{
@@ -251,6 +330,7 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
         return (
           <div key={block.id}>
             <div
+              ref={registerBlock(block.id)}
               onClick={() => handleBlockClick(block.id, 'ai-response', block.prompt)}
               onDoubleClick={() => handleBlockDoubleClick(block.id, 'ai-response', block.prompt)}
               style={{
@@ -258,7 +338,7 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
                 borderRadius: '0 12px 12px 0',
               }}
             >
-              <AIResponseBlock block={block} isFocused={isFocused} onToolClick={handleToolClick} />
+              <AIResponseBlock block={block} isFocused={isFocused} onToolClick={handleToolClick} showModelInfo={showModelInfo} />
             </div>
             {/* Collapsible tool output */}
             {expandedTool && expandedTool.output && (
@@ -314,6 +394,7 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
           return (
             <div
               key={block.id}
+              ref={registerBlock(block.id)}
               onClick={() => handleBlockClick(block.id, 'interactive', block.command)}
               onDoubleClick={() => handleBlockDoubleClick(block.id, 'interactive', block.command)}
               style={{
@@ -338,6 +419,7 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
         return (
           <div
             key={block.id}
+            ref={registerBlock(block.id)}
             onClick={() => handleBlockClick(block.id, 'interactive', block.command)}
             onDoubleClick={() => handleBlockDoubleClick(block.id, 'interactive', block.command)}
             style={{
@@ -361,6 +443,7 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
         return (
           <div
             key={block.id}
+            ref={registerBlock(block.id)}
             style={{
               backgroundColor: `${theme.red}1a`,
               border: `1px solid ${theme.red}33`,
@@ -379,6 +462,7 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
         return (
           <div
             key={block.id}
+            ref={registerBlock(block.id)}
             style={{
               textAlign: 'center',
               fontSize: '10px',
@@ -415,10 +499,10 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
         style={{
           height: '100%',
           overflowY: 'auto',
-          scrollBehavior: 'smooth',
+          scrollBehavior: 'auto',
         }}
       >
-        <div style={{ padding: '0 16px 12px 0' }}>
+        <div style={{ padding: '0 16px 32px 0' }}>
 
           {blocks.length === 0 ? (
             <div style={{ display: 'flex', height: '60vh', alignItems: 'center', justifyContent: 'center' }}>
@@ -446,12 +530,51 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
             </div>
           ) : (
             <>
+              {/* Spinner keyframes */}
+              <style>{`@keyframes blocksview-spin { to { transform: rotate(360deg); } }`}</style>
+              
+              {/* Loading indicator when fetching older messages */}
+              {isLoadingMore && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '16px',
+                  color: theme.brightBlack,
+                  fontSize: '12px',
+                  gap: '8px',
+                }}>
+                  <span style={{
+                    width: '16px',
+                    height: '16px',
+                    border: `2px solid ${theme.brightBlack}40`,
+                    borderTopColor: theme.cyan,
+                    borderRadius: '50%',
+                    animation: 'blocksview-spin 1s linear infinite',
+                  }} />
+                  Loading older messages...
+                </div>
+              )}
+              
+              {/* "Load more" indicator when more messages available */}
+              {canLoadMore && !isLoadingMore && (
+                <div style={{
+                  textAlign: 'center',
+                  padding: '12px',
+                  color: theme.brightBlack,
+                  fontSize: '11px',
+                  opacity: 0.7,
+                }}>
+                  ↑ Scroll up for older messages
+                </div>
+              )}
+
               {/* Spacer for blocks above viewport */}
               <div style={{ height: `${offsetY}px` }} />
 
               {/* Virtualized block list */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0' }}>
-                {visibleBlocks.map((block) => renderBlock(block))}
+                {visibleBlocks.map((block, i) => renderBlock(block, visibleRange.startIndex + i, blocks))}
               </div>
 
               {/* Spacer for blocks below viewport */}

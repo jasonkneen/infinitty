@@ -43,6 +43,20 @@ export interface LSPSettings {
   servers: Record<string, boolean> // Per-server enable/disable
 }
 
+export interface ProviderSettings {
+  anthropicKey?: string
+  openaiKey?: string
+  openrouterKey?: string
+  lmStudioUrl?: string
+  ollamaUrl?: string
+  grokKey?: string
+  modelPreferences: {
+    fast: string
+    thinking: string
+    tooling: string
+  }
+}
+
 export interface TerminalSettings {
   theme: TerminalTheme
   font: TerminalFont           // Monospace font for terminal/code
@@ -62,6 +76,7 @@ export interface TerminalSettings {
   behavior: BehaviorSettings
   editor: EditorSettings
   lsp: LSPSettings
+  providers: ProviderSettings
 }
 
 interface TerminalSettingsContextType {
@@ -100,6 +115,8 @@ interface TerminalSettingsContextType {
   setSyntaxTheme: (themeId: string) => void
   setLSPEnabled: (enabled: boolean) => void
   setLSPServerEnabled: (serverId: string, enabled: boolean) => void
+  setProviderSettings: (providers: Partial<ProviderSettings>) => void
+  setModelPreference: (kind: keyof ProviderSettings['modelPreferences'], modelId: string) => void
   resetToDefaults: () => void
   // Ghostty config integration
   ghosttyConfig: GhosttyConfig | null
@@ -162,6 +179,19 @@ const defaultSettings: TerminalSettings = {
       'tailwindcss-language-server': true,
     },
   },
+  providers: {
+    anthropicKey: '',
+    openaiKey: '',
+    openrouterKey: '',
+    lmStudioUrl: '',
+    ollamaUrl: '',
+    grokKey: '',
+    modelPreferences: {
+      fast: 'gpt-4o-mini',
+      thinking: 'o1-mini',
+      tooling: 'gpt-4o',
+    },
+  },
 }
 
 const STORAGE_KEY = 'terminal-settings'
@@ -192,6 +222,14 @@ function loadSettings(): TerminalSettings {
         lsp: {
           enabled: parsed.lsp?.enabled ?? defaultSettings.lsp.enabled,
           servers: { ...defaultSettings.lsp.servers, ...(parsed.lsp?.servers ?? {}) },
+        },
+        providers: {
+          ...defaultSettings.providers,
+          ...(parsed.providers ?? {}),
+          modelPreferences: {
+            ...defaultSettings.providers.modelPreferences,
+            ...(parsed.providers?.modelPreferences ?? {}),
+          },
         },
       }
     }
@@ -226,6 +264,7 @@ function saveSettings(settings: TerminalSettings): void {
         syntaxThemeId: settings.editor.syntaxTheme.id,
       },
       lsp: settings.lsp,
+      providers: settings.providers,
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore))
   } catch (error: unknown) {
@@ -426,6 +465,31 @@ export function TerminalSettingsProvider({ children }: { children: ReactNode }) 
     })
   }, [updateSettings, settings.lsp])
 
+  const setProviderSettings = useCallback((providers: Partial<ProviderSettings>) => {
+    updateSettings({
+      providers: {
+        ...settings.providers,
+        ...providers,
+        modelPreferences: {
+          ...settings.providers.modelPreferences,
+          ...(providers.modelPreferences ?? {}),
+        },
+      },
+    })
+  }, [settings.providers, updateSettings])
+
+  const setModelPreference = useCallback((kind: keyof ProviderSettings['modelPreferences'], modelId: string) => {
+    updateSettings({
+      providers: {
+        ...settings.providers,
+        modelPreferences: {
+          ...settings.providers.modelPreferences,
+          [kind]: modelId,
+        },
+      },
+    })
+  }, [settings.providers, updateSettings])
+
   const resetToDefaults = useCallback(() => {
     setSettings(defaultSettings)
     saveSettings(defaultSettings)
@@ -469,6 +533,8 @@ export function TerminalSettingsProvider({ children }: { children: ReactNode }) 
         setSyntaxTheme,
         setLSPEnabled,
         setLSPServerEnabled,
+        setProviderSettings,
+        setModelPreference,
         resetToDefaults,
         ghosttyConfig,
         ghosttyConfigLoading,

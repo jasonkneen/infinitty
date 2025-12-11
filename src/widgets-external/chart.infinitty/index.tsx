@@ -1,7 +1,7 @@
 // Example Chart Widget - Shows how to build widgets with the SDK
 // NOTE: In a real external widget package, you'd import from '@infinitty/widget-sdk'
 // For this example in the monorepo, we use relative paths
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   defineWidget,
   useTheme,
@@ -23,6 +23,8 @@ interface ChartConfig {
   defaultType?: 'line' | 'bar' | 'pie' | 'scatter'
   animate?: boolean
   theme?: 'auto' | 'light' | 'dark'
+  refreshIntervalMs?: number
+  historyPoints?: number
 }
 
 interface ChartData {
@@ -44,13 +46,66 @@ function ChartWidget({ api }: WidgetComponentProps) {
   const { context: { log } } = useWidgetSDK()
 
   const [chartType, setChartType] = useState(config.defaultType ?? 'line')
+  const historyPoints = config.historyPoints ?? 60
+  const refreshIntervalMs = config.refreshIntervalMs ?? 1000
+
   const [chartData, setChartData] = useState<ChartData>({
-    labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May'],
+    labels: Array.from({ length: historyPoints }, (_, i) => `${historyPoints - i}s`),
     datasets: [
-      { label: 'Sales', data: [12, 19, 3, 5, 2], color: theme.cyan },
-      { label: 'Revenue', data: [8, 15, 7, 12, 9], color: theme.magenta },
+      { label: 'CPU %', data: Array(historyPoints).fill(0), color: theme.cyan },
+      { label: 'Memory %', data: Array(historyPoints).fill(0), color: theme.magenta },
+      { label: 'Disk %', data: Array(historyPoints).fill(0), color: theme.yellow },
     ],
   })
+
+  const tickRef = useRef(0)
+
+  useEffect(() => {
+    let stopped = false
+    const updateOnce = async () => {
+      try {
+        const result = await api.executeCommand('tauri:invoke', 'get_system_metrics') as {
+          cpu_usage: number
+          memory_used_mb: number
+          memory_total_mb: number
+          disk_used_mb: number
+          disk_total_mb: number
+        }
+
+        const cpu = result.cpu_usage
+        const memPct = result.memory_total_mb > 0
+          ? (result.memory_used_mb / result.memory_total_mb) * 100
+          : 0
+        const diskPct = result.disk_total_mb > 0
+          ? (result.disk_used_mb / result.disk_total_mb) * 100
+          : 0
+
+        tickRef.current += 1
+        const label = `${tickRef.current * refreshIntervalMs / 1000}s`
+
+        setChartData(prev => {
+          const nextLabels = [...prev.labels.slice(1), label]
+          const nextDatasets = prev.datasets.map(ds => {
+            const val = ds.label.startsWith('CPU') ? cpu : ds.label.startsWith('Memory') ? memPct : diskPct
+            return { ...ds, data: [...ds.data.slice(1), Math.round(val * 10) / 10] }
+          })
+          return { labels: nextLabels, datasets: nextDatasets }
+        })
+      } catch (err) {
+        log.warn('Failed to fetch system metrics', err)
+      }
+    }
+
+    const interval = setInterval(() => {
+      if (!stopped) updateOnce()
+    }, refreshIntervalMs)
+    updateOnce()
+
+    return () => {
+      stopped = true
+      clearInterval(interval)
+    }
+  }, [api, log, refreshIntervalMs])
 
   // Register tool: chart_create
   useTool(
@@ -392,9 +447,9 @@ function ChartWidget({ api }: WidgetComponentProps) {
 
 export default defineWidget({
   id: 'com.infinitty.chart-widget',
-  name: 'Chart Widget',
+  name: 'System Monitor',
   version: '1.0.0',
-  description: 'Interactive charts and data visualization',
+  description: 'Live CPU, memory, and disk usage monitor',
 
   activate: (context) => {
     context.log.info('Chart widget activated')

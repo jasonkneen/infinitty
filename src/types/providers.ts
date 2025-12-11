@@ -56,11 +56,11 @@ export const PROVIDERS: Provider[] = [
     description: 'Anthropic Claude Code Agent (via CLI)',
     isAgent: true,
     models: [
+      { id: 'haiku', name: 'Claude Haiku', supportsTools: true },
       { id: 'sonnet', name: 'Claude Sonnet', supportsTools: true, supportsVision: true },
       { id: 'opus', name: 'Claude Opus', supportsTools: true, supportsVision: true },
-      { id: 'haiku', name: 'Claude Haiku', supportsTools: true },
     ],
-    defaultModel: 'sonnet',
+    defaultModel: 'haiku',
   },
   {
     id: 'anthropic',
@@ -97,9 +97,11 @@ export const PROVIDERS: Provider[] = [
     description: 'OpenAI Codex Agent',
     isAgent: true,
     models: [
-      { id: 'codex-default', name: 'Default', description: 'Default Codex model' },
+      { id: 'o4-mini', name: 'o4-mini', description: 'Fast and efficient' },
+      { id: 'o3', name: 'o3', description: 'Most capable reasoning' },
+      { id: 'gpt-4.1', name: 'GPT-4.1', description: 'Latest GPT-4 variant' },
     ],
-    defaultModel: 'codex-default',
+    defaultModel: 'o4-mini',
   },
   {
     id: 'cursor',

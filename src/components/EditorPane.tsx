@@ -6,7 +6,9 @@ import { Save, X, Eye, Edit2, FileCode, Image as ImageIcon, FileText, File, Book
 import { useTerminalSettings } from '../contexts/TerminalSettingsContext'
 import { type EditorPane as EditorPaneType } from '../types/tabs'
 import { SYNTAX_THEMES, type SyntaxTheme } from '../config/terminal'
+import { useLSP } from '../hooks/useLSP'
 import Prism from 'prismjs'
+import ReactMarkdown from 'react-markdown'
 
 // Lazy load editor components to reduce initial bundle size
 const CodeMirrorEditor = lazy(() => import('./editors/CodeMirrorEditor').then(m => ({ default: m.CodeMirrorEditor })))
@@ -32,59 +34,7 @@ import 'prismjs/components/prism-toml'
 import 'prismjs/components/prism-docker'
 import 'prismjs/components/prism-graphql'
 
-// Simple markdown to HTML converter
-function renderMarkdown(markdown: string): string {
-  let html = markdown
-    // Escape HTML
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    // Headers
-    .replace(/^######\s+(.*)$/gm, '<h6>$1</h6>')
-    .replace(/^#####\s+(.*)$/gm, '<h5>$1</h5>')
-    .replace(/^####\s+(.*)$/gm, '<h4>$1</h4>')
-    .replace(/^###\s+(.*)$/gm, '<h3>$1</h3>')
-    .replace(/^##\s+(.*)$/gm, '<h2>$1</h2>')
-    .replace(/^#\s+(.*)$/gm, '<h1>$1</h1>')
-    // Bold and italic
-    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/___(.+?)___/g, '<strong><em>$1</em></strong>')
-    .replace(/__(.+?)__/g, '<strong>$1</strong>')
-    .replace(/_(.+?)_/g, '<em>$1</em>')
-    // Strikethrough
-    .replace(/~~(.+?)~~/g, '<del>$1</del>')
-    // Inline code
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    // Code blocks
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>')
-    // Blockquotes
-    .replace(/^>\s+(.*)$/gm, '<blockquote>$1</blockquote>')
-    // Horizontal rules
-    .replace(/^[-*_]{3,}$/gm, '<hr/>')
-    // Unordered lists
-    .replace(/^\s*[-*+]\s+(.*)$/gm, '<li>$1</li>')
-    // Ordered lists
-    .replace(/^\s*\d+\.\s+(.*)$/gm, '<li>$1</li>')
-    // Links
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    // Images
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width: 100%; border-radius: 8px;"/>')
-    // Line breaks (paragraphs)
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br/>')
-
-  // Wrap in paragraph
-  html = '<p>' + html + '</p>'
-
-  // Clean up consecutive list items into lists
-  html = html
-    .replace(/(<li>.*<\/li>[\s<br/>]*)+/g, (match) => '<ul>' + match.replace(/<br\/>/g, '') + '</ul>')
-    .replace(/<\/blockquote>[\s<br/>]*<blockquote>/g, '<br/>')
-
-  return html
-}
+// Markdown preview is rendered via `react-markdown` to avoid XSS.
 
 // Check if file is markdown
 function isMarkdownFile(filePath: string): boolean {
@@ -225,9 +175,7 @@ function getFileIcon(filePath: string): typeof FileCode {
 export const EditorPane = memo(function EditorPane({ pane, onClose }: EditorPaneProps) {
   const { settings, setSyntaxTheme } = useTerminalSettings()
   const theme = settings.theme
-
-  // Debug: log when component renders with current syntax theme
-  console.log('[EditorPane] Render with syntaxTheme:', settings.editor.syntaxTheme.id)
+  const lsp = useLSP()
 
   const [content, setContent] = useState<string>('')
   const [originalContent, setOriginalContent] = useState<string>('')
@@ -242,14 +190,6 @@ export const EditorPane = memo(function EditorPane({ pane, onClose }: EditorPane
   const language = pane.language || detectLanguage(pane.filePath)
   const FileIcon = getFileIcon(pane.filePath)
   const isMarkdown = isMarkdownFile(pane.filePath)
-
-  // Memoize rendered markdown
-  const renderedMarkdown = useMemo(() => {
-    if (isMarkdown && showPreview) {
-      return renderMarkdown(content)
-    }
-    return ''
-  }, [content, isMarkdown, showPreview])
 
   // Memoize syntax-highlighted code for read-only view
   const highlightedCode = useMemo(() => {
@@ -281,6 +221,23 @@ export const EditorPane = memo(function EditorPane({ pane, onClose }: EditorPane
     }
     loadFile()
   }, [pane.filePath])
+
+  // Initialize LSP for the current workspace when enabled
+  useEffect(() => {
+    if (!settings.lsp?.enabled) return
+    const projectPath = pane.filePath.substring(0, pane.filePath.lastIndexOf('/')) || '/'
+    let cancelled = false
+    ;(async () => {
+      const ok = await lsp.init(projectPath)
+      if (!ok && !cancelled) {
+        console.warn('[EditorPane] LSP init failed for', projectPath)
+      }
+    })()
+    return () => {
+      cancelled = true
+      void lsp.shutdown()
+    }
+  }, [lsp, pane.filePath, settings.lsp?.enabled])
 
   // Save file
   const handleSave = useCallback(async () => {
@@ -513,9 +470,14 @@ export const EditorPane = memo(function EditorPane({ pane, onClose }: EditorPane
               fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif',
               fontSize: '15px',
               lineHeight: 1.6,
+              overflow: 'auto',
+              padding: '12px 16px',
             }}
-            dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
-          />
+          >
+            <ReactMarkdown>
+              {content}
+            </ReactMarkdown>
+          </div>
         ) : settings.editor.editor === 'basic' ? (
           // Basic editor - simple textarea or syntax-highlighted view
           isEditing ? (

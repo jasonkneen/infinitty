@@ -98,8 +98,15 @@ export function MCPConnectionProvider({
       },
     })
 
+    // Expose the manager globally so non-React services (AI providers)
+    // can access MCP tools.
+    ;(globalThis as any).__infinittyMcpManager = clientManagerRef.current
+
     return () => {
       clientManagerRef.current?.disconnectAll()
+      if ((globalThis as any).__infinittyMcpManager === clientManagerRef.current) {
+        delete (globalThis as any).__infinittyMcpManager
+      }
     }
   }, [])
 

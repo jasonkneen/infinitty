@@ -10,19 +10,17 @@ import { createEventEmitter } from '../widget-sdk/core'
 // Import widgets
 import { NodesWidget } from './widgets/NodesWidget'
 import ChartWidgetModule from '../widgets-external/chart.infinitty/index'
-import { WorkflowComponent } from '../widgets-external/workflow.infinitty/src/Component'
 
 // Extract the Component from the widget modules
 const ChartWidgetComponent = ChartWidgetModule.Component
 
 // Widgets that need SDK context wrapper
-const SDK_WIDGETS = new Set(['chart', 'workflow'])
+const SDK_WIDGETS = new Set(['chart'])
 
 // Widget registry - add new widgets here
 const WIDGET_REGISTRY: Record<string, React.ComponentType<{ config?: Record<string, unknown> }>> = {
   nodes: NodesWidget,
   chart: ChartWidgetComponent as React.ComponentType<{ config?: Record<string, unknown> }>,
-  workflow: WorkflowComponent as React.ComponentType<{ config?: Record<string, unknown> }>,
 }
 
 interface WidgetPaneProps {

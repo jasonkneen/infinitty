@@ -25,10 +25,17 @@ export const TerminalPane = memo(function TerminalPane({ pane }: TerminalPanePro
   const viewMode = pane.viewMode ?? 'classic'
 
   // Block terminal hook for blocks mode - use pane.id as persistKey to preserve blocks across tab switches
-  const { blocks, executeCommand, executeAIQuery, completeInteractiveBlock, dismissBlock } = useBlockTerminal({
+  const { blocks, executeCommand, executeAIQuery, completeInteractiveBlock, dismissBlock, loadOpenCodeSession, loadMoreMessages, canLoadMoreMessages } = useBlockTerminal({
     persistKey: `blocks-${pane.id}`,
     initialCwd: pane.cwd,
   })
+
+  // Handle session selection from ConversationPicker
+  const handleSessionSelect = useCallback(async (sessionId: string) => {
+    console.log('[TerminalPane] Session selected:', sessionId)
+    const result = await loadOpenCodeSession(sessionId)
+    console.log('[TerminalPane] Loaded', result.loaded, 'of', result.total, 'blocks from session')
+  }, [loadOpenCodeSession])
 
   // Context chip state - ghost block reference that can be locked as context
   const [pendingContextBlock, setPendingContextBlock] = useState<{ id: string; label: string; type: string } | null>(null)
@@ -265,6 +272,8 @@ export const TerminalPane = memo(function TerminalPane({ pane }: TerminalPanePro
               onBlockClick={handleBlockClick}
               onBlockDoubleClick={handleBlockDoubleClick}
               onScrollToEndRef={scrollToEndRef}
+              onLoadMore={loadMoreMessages}
+              canLoadMore={canLoadMoreMessages()}
             />
           </div>
           {/* Background shade gradient behind input */}
@@ -285,6 +294,7 @@ export const TerminalPane = memo(function TerminalPane({ pane }: TerminalPanePro
               onConfirmContext={handleConfirmContext}
               confirmedContextBlocks={confirmedContextBlocks}
               onRemoveConfirmedContext={handleRemoveConfirmedContext}
+              onSessionSelect={handleSessionSelect}
             />
           </div>
         </>
