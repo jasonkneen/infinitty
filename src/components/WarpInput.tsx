@@ -53,6 +53,40 @@ export function triggerOpenSessionsPicker() {
   window.dispatchEvent(new CustomEvent(OPEN_SESSIONS_PICKER_EVENT))
 }
 
+// Storage keys for persisting provider/model selection
+const STORAGE_KEY_PROVIDER = 'warp-input-provider'
+const STORAGE_KEY_MODEL = 'warp-input-model'
+
+// Default provider and model
+const DEFAULT_PROVIDER_ID = 'opencode'
+const DEFAULT_MODEL_ID = 'claude-3-5-haiku'
+
+function getInitialProvider(): Provider {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_PROVIDER)
+    if (stored) {
+      const provider = PROVIDERS.find(p => p.id === stored)
+      if (provider) return provider
+    }
+  } catch { /* ignore */ }
+  // Default to opencode provider
+  return PROVIDERS.find(p => p.id === DEFAULT_PROVIDER_ID) || PROVIDERS[0]
+}
+
+function getInitialModelId(provider: Provider): string {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_MODEL)
+    if (stored) {
+      // Verify the model exists for this provider (or is a valid opencode model)
+      const modelExists = provider.models.some(m => m.id === stored)
+      if (modelExists || provider.id === 'opencode') return stored
+    }
+  } catch { /* ignore */ }
+  // Default to claude-3-5-haiku for opencode, otherwise provider default
+  if (provider.id === DEFAULT_PROVIDER_ID) return DEFAULT_MODEL_ID
+  return provider.defaultModel || provider.models[0]?.id || 'auto'
+}
+
 interface WarpInputProps {
   onSubmit: (command: string, isAI: boolean, providerId?: ProviderType, modelId?: string, contextBlocks?: ContextBlock[], thinkingLevel?: ThinkingLevel) => void
   onModelChange?: (modelId: string) => void
@@ -107,8 +141,8 @@ export function WarpInput({
 }: WarpInputProps) {
   const { settings } = useTerminalSettings()
   const [input, setInput] = useState('')
-  const [selectedProvider, setSelectedProvider] = useState<Provider>(PROVIDERS[0])
-  const [selectedModelId, setSelectedModelId] = useState(PROVIDERS[0].defaultModel || PROVIDERS[0].models[0]?.id || 'auto')
+  const [selectedProvider, setSelectedProvider] = useState<Provider>(getInitialProvider)
+  const [selectedModelId, setSelectedModelId] = useState(() => getInitialModelId(getInitialProvider()))
   const [showProviderPicker, setShowProviderPicker] = useState(false)
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [showThinkingPicker, setShowThinkingPicker] = useState(false)
@@ -179,8 +213,16 @@ export function WarpInput({
   // Handle provider change
   const handleProviderChange = (provider: Provider) => {
     setSelectedProvider(provider)
-    setSelectedModelId(provider.defaultModel || provider.models[0]?.id || 'auto')
+    const newModelId = provider.id === DEFAULT_PROVIDER_ID 
+      ? DEFAULT_MODEL_ID 
+      : (provider.defaultModel || provider.models[0]?.id || 'auto')
+    setSelectedModelId(newModelId)
     setShowProviderPicker(false)
+    // Persist selection
+    try {
+      localStorage.setItem(STORAGE_KEY_PROVIDER, provider.id)
+      localStorage.setItem(STORAGE_KEY_MODEL, newModelId)
+    } catch { /* ignore */ }
     onProviderChange?.(provider.id)
   }
 
@@ -188,6 +230,10 @@ export function WarpInput({
   const handleModelChange = (modelId: string) => {
     setSelectedModelId(modelId)
     setShowModelPicker(false)
+    // Persist selection
+    try {
+      localStorage.setItem(STORAGE_KEY_MODEL, modelId)
+    } catch { /* ignore */ }
     onModelChange?.(modelId)
   }
 
