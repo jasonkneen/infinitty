@@ -288,6 +288,7 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
   }), [theme.magenta, theme.green, theme.blue, theme.yellow, theme.brightBlack, theme.cyan, theme.foreground])
 
   // Memoize the large CSS string to prevent recreation on every render
+  // Use UI font for prose content, monospace font for code
   const streamdownStyles = useMemo(() => `
     .streamdown-response {
       --shiki-dark-bg: ${theme.background};
@@ -308,6 +309,7 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
       --shiki-light-variable: ${codeColors.variable};
       --shiki-dark-punctuation: ${codeColors.punctuation};
       --shiki-light-punctuation: ${codeColors.punctuation};
+      font-family: ${settings.uiFont.family};
     }
     .streamdown-response [data-rehype-pretty-code-figure] {
       margin: 20px 0;
@@ -328,6 +330,7 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
       border-bottom: 1px solid ${theme.brightBlack}18 !important;
       padding: 10px 14px !important;
       color: ${theme.foreground}60 !important;
+      font-family: ${settings.font.family} !important;
     }
     .streamdown-response [data-streamdown="code-block-body"] {
       background: ${theme.background} !important;
@@ -387,12 +390,14 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
       border-radius: 5px;
       font-weight: 450;
       border: 1px solid ${theme.brightBlack}15;
+      font-family: ${settings.font.family};
     }
     .streamdown-response p {
       margin: 0 0 ${settings.paragraphSpacing}px 0;
-      line-height: ${settings.lineHeight};
+      line-height: ${settings.uiLineHeight};
       color: ${theme.foreground};
       font-size: inherit;
+      font-family: ${settings.uiFont.family};
     }
     .streamdown-response p:last-child { margin-bottom: 0; }
     .streamdown-response h1, .streamdown-response h2, .streamdown-response h3, .streamdown-response h4 {
@@ -401,6 +406,7 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
       line-height: 1.25;
       color: ${theme.white};
       letter-spacing: -0.5px;
+      font-family: ${settings.uiFont.family};
     }
     .streamdown-response h1:first-child, .streamdown-response h2:first-child, .streamdown-response h3:first-child { margin-top: 0; }
     .streamdown-response h1 { font-size: 28px; margin-bottom: 16px; }
@@ -413,11 +419,12 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
     }
     .streamdown-response h3 { font-size: 16px; font-weight: 600; color: ${theme.white}; }
     .streamdown-response h4 { font-size: 14px; font-weight: 600; color: ${theme.foreground}; }
-    .streamdown-response ul, .streamdown-response ol { margin: 18px 0; padding-left: 28px; }
+    .streamdown-response ul, .streamdown-response ol { margin: 18px 0; padding-left: 28px; font-family: ${settings.uiFont.family}; }
     .streamdown-response li {
       margin: 10px 0;
-      line-height: ${settings.lineHeight};
+      line-height: ${settings.uiLineHeight};
       color: ${theme.foreground};
+      font-family: ${settings.uiFont.family};
     }
     .streamdown-response li::marker { color: ${theme.brightBlack}60; font-weight: 500; }
     .streamdown-response a {
@@ -438,6 +445,7 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
       border-radius: 8px;
       color: ${theme.foreground};
       font-style: normal;
+      font-family: ${settings.uiFont.family};
     }
     .streamdown-response blockquote p { margin: 0; line-height: 1.75; }
     .streamdown-response blockquote strong { color: ${theme.yellow}; }
@@ -446,7 +454,8 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
       border-collapse: separate;
       border-spacing: 0;
       margin: 24px 0;
-      font-size: ${settings.fontSize}px;
+      font-size: ${settings.uiFontSize}px;
+      font-family: ${settings.uiFont.family};
       border: 1px solid ${theme.brightBlack}30;
       border-radius: 10px;
       overflow: hidden;
@@ -527,7 +536,7 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
     .streamdown-response [class*="actions"],
     .streamdown-response [class*="progress"],
     .streamdown-response [class*="slider"] { display: none !important; }
-  `, [theme, codeColors, settings.font.family, settings.fontSize, settings.lineHeight, settings.paragraphSpacing])
+  `, [theme, codeColors, settings.font.family, settings.fontSize, settings.lineHeight, settings.paragraphSpacing, settings.uiFont.family, settings.uiFontSize, settings.uiLineHeight])
 
   const copyResponse = async () => {
     await navigator.clipboard.writeText(block.response)
@@ -600,9 +609,9 @@ export const AIResponseBlock = memo(function AIResponseBlock({ block, isFocused,
             className="streamdown-response"
             style={{
               padding: '16px',
-              fontSize: `${settings.fontSize}px`,
-              fontFamily: settings.font.family,
-              lineHeight: settings.lineHeight,
+              fontSize: `${settings.uiFontSize}px`,
+              fontFamily: settings.uiFont.family,
+              lineHeight: settings.uiLineHeight,
               color: theme.foreground,
             }}
           >

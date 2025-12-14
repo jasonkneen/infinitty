@@ -167,54 +167,63 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
   // Track loading state for backfill
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const loadMoreThrottleRef = useRef<number | null>(null)
+  const scrollRafRef = useRef<number | null>(null)
 
-  // Handle scroll events for virtualization and sticky detection
+  // Handle scroll events for virtualization and sticky detection (RAF-throttled)
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget
-    const currentScrollTop = target.scrollTop
-    setScrollTop(currentScrollTop)
 
-    // Check if user is near bottom (within 100px)
-    const isNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100
-
-    if (isNearBottom) {
-      setIsSticky(true)
-      setShowScrollButton(false)
-    } else {
-      setIsSticky(false)
-      setShowScrollButton(true)
+    // Cancel pending RAF to avoid stacking
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current)
     }
 
-    // Check if scrolled to top - trigger load more
-    if (currentScrollTop < 100 && canLoadMore && onLoadMore && !isLoadingMore) {
-      // Throttle to prevent multiple calls
-      if (!loadMoreThrottleRef.current) {
-        setIsLoadingMore(true)
-        
-        // Remember scroll height before loading
-        const prevScrollHeight = target.scrollHeight
-        
-        onLoadMore().then((result) => {
-          setIsLoadingMore(false)
-          
-          // Maintain scroll position after prepending blocks
-          if (result.loaded > 0) {
-            requestAnimationFrame(() => {
-              const newScrollHeight = target.scrollHeight
-              const heightDiff = newScrollHeight - prevScrollHeight
-              target.scrollTop = currentScrollTop + heightDiff
-            })
-          }
-        }).catch(() => {
-          setIsLoadingMore(false)
-        })
-        
-        // Throttle for 1 second
-        loadMoreThrottleRef.current = window.setTimeout(() => {
-          loadMoreThrottleRef.current = null
-        }, 1000)
+    scrollRafRef.current = requestAnimationFrame(() => {
+      const currentScrollTop = target.scrollTop
+      setScrollTop(currentScrollTop)
+
+      // Check if user is near bottom (within 100px)
+      const isNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100
+
+      if (isNearBottom) {
+        setIsSticky(true)
+        setShowScrollButton(false)
+      } else {
+        setIsSticky(false)
+        setShowScrollButton(true)
       }
-    }
+
+      // Check if scrolled to top - trigger load more
+      if (currentScrollTop < 100 && canLoadMore && onLoadMore && !isLoadingMore) {
+        // Throttle to prevent multiple calls
+        if (!loadMoreThrottleRef.current) {
+          setIsLoadingMore(true)
+
+          // Remember scroll height before loading
+          const prevScrollHeight = target.scrollHeight
+
+          onLoadMore().then((result) => {
+            setIsLoadingMore(false)
+
+            // Maintain scroll position after prepending blocks
+            if (result.loaded > 0) {
+              requestAnimationFrame(() => {
+                const newScrollHeight = target.scrollHeight
+                const heightDiff = newScrollHeight - prevScrollHeight
+                target.scrollTop = currentScrollTop + heightDiff
+              })
+            }
+          }).catch(() => {
+            setIsLoadingMore(false)
+          })
+
+          // Throttle for 1 second
+          loadMoreThrottleRef.current = window.setTimeout(() => {
+            loadMoreThrottleRef.current = null
+          }, 1000)
+        }
+      }
+    })
   }, [canLoadMore, onLoadMore, isLoadingMore])
 
   // Handle container resize
@@ -500,6 +509,9 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
           height: '100%',
           overflowY: 'auto',
           scrollBehavior: 'auto',
+          willChange: 'scroll-position',
+          contain: 'strict',
+          transform: 'translateZ(0)',
         }}
       >
         <div style={{ padding: '0 16px 32px 0' }}>
@@ -573,7 +585,13 @@ export function BlocksView({ blocks, onInteractiveExit, onDismissBlock, onBlockC
               <div style={{ height: `${offsetY}px` }} />
 
               {/* Virtualized block list */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0' }}>
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0',
+                contain: 'layout style',
+                willChange: 'contents',
+              }}>
                 {visibleBlocks.map((block, i) => renderBlock(block, visibleRange.startIndex + i, blocks))}
               </div>
 

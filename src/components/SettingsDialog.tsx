@@ -1,13 +1,13 @@
 import { useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Settings, Palette, Terminal, Image, Monitor, Code, RotateCcw, Check, ChevronDown, Search } from 'lucide-react'
+import { X, Settings, Palette, Terminal, Image, Monitor, Code, RotateCcw, Check, ChevronDown, Search, Key } from 'lucide-react'
 import { useTerminalSettings } from '../contexts/TerminalSettingsContext'
 import { open } from '@tauri-apps/plugin-dialog'
 import { triggerWebviewRestore } from '../hooks/useWebviewOverlay'
 import { TERMINAL_THEMES, TERMINAL_FONTS, UI_FONTS, SYNTAX_THEMES, themeToXterm, type TerminalFont, type UIFont, type SyntaxTheme } from '../config/terminal'
 import { FontLoader } from './FontLoader'
 
-type TabId = 'general' | 'themes' | 'background' | 'application' | 'terminal' | 'coding'
+type TabId = 'general' | 'themes' | 'background' | 'application' | 'terminal' | 'coding' | 'providers'
 
 interface Tab {
   id: TabId
@@ -17,6 +17,7 @@ interface Tab {
 
 const tabs: Tab[] = [
   { id: 'general', label: 'General', icon: Settings },
+  { id: 'providers', label: 'Providers', icon: Key },
   { id: 'themes', label: 'Theme', icon: Palette },
   { id: 'background', label: 'Background', icon: Image },
   { id: 'application', label: 'Application', icon: Monitor },
@@ -236,6 +237,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
             }}
           >
             {activeTab === 'general' && <GeneralPanel />}
+            {activeTab === 'providers' && <ProvidersPanel />}
             {activeTab === 'themes' && <ThemesPanel />}
             {activeTab === 'background' && <BackgroundPanel />}
             {activeTab === 'application' && <ApplicationPanel />}
@@ -1609,9 +1611,247 @@ function CodingPanel() {
 
       {/* LSP Section */}
       <LSPSettingsSection />
+    </div>
+  )
+}
 
-      {/* Provider API Keys / Model preferences */}
-      <ProviderSettingsSection />
+// Providers Panel - Dedicated tab for API keys and provider configuration
+function ProvidersPanel() {
+  const { settings, setProviderSettings } = useTerminalSettings()
+  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({})
+
+  const toggleShowKey = (key: string) => {
+    setShowKeys(prev => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  const apiKeyProviders = [
+    {
+      id: 'anthropic',
+      name: 'Anthropic',
+      key: 'anthropicKey' as const,
+      placeholder: 'sk-ant-api03-...',
+      description: 'Claude models (Opus, Sonnet, Haiku)',
+      docsUrl: 'https://console.anthropic.com/settings/keys'
+    },
+    {
+      id: 'openai',
+      name: 'OpenAI',
+      key: 'openaiKey' as const,
+      placeholder: 'sk-proj-...',
+      description: 'GPT-4, GPT-4o, o1, o3 models',
+      docsUrl: 'https://platform.openai.com/api-keys'
+    },
+    {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      key: 'openrouterKey' as const,
+      placeholder: 'sk-or-v1-...',
+      description: 'Access to 100+ models via single API',
+      docsUrl: 'https://openrouter.ai/keys'
+    },
+    {
+      id: 'google',
+      name: 'Google AI',
+      key: 'googleKey' as const,
+      placeholder: 'AIza...',
+      description: 'Gemini 2.0, Gemini 1.5 models',
+      docsUrl: 'https://aistudio.google.com/apikey'
+    },
+    {
+      id: 'groq',
+      name: 'Groq',
+      key: 'groqKey' as const,
+      placeholder: 'gsk_...',
+      description: 'Ultra-fast inference (Llama, Mixtral)',
+      docsUrl: 'https://console.groq.com/keys'
+    },
+    {
+      id: 'grok',
+      name: 'xAI (Grok)',
+      key: 'grokKey' as const,
+      placeholder: 'xai-...',
+      description: 'Grok models from xAI',
+      docsUrl: 'https://console.x.ai/'
+    },
+    {
+      id: 'mistral',
+      name: 'Mistral AI',
+      key: 'mistralKey' as const,
+      placeholder: '...',
+      description: 'Mistral Large, Codestral, Mixtral',
+      docsUrl: 'https://console.mistral.ai/api-keys/'
+    },
+    {
+      id: 'cohere',
+      name: 'Cohere',
+      key: 'cohereKey' as const,
+      placeholder: '...',
+      description: 'Command R, Command R+ models',
+      docsUrl: 'https://dashboard.cohere.com/api-keys'
+    },
+    {
+      id: 'together',
+      name: 'Together AI',
+      key: 'togetherKey' as const,
+      placeholder: '...',
+      description: 'Open source models (Llama, Qwen)',
+      docsUrl: 'https://api.together.xyz/settings/api-keys'
+    },
+    {
+      id: 'deepseek',
+      name: 'DeepSeek',
+      key: 'deepseekKey' as const,
+      placeholder: 'sk-...',
+      description: 'DeepSeek Coder, DeepSeek Chat',
+      docsUrl: 'https://platform.deepseek.com/api_keys'
+    },
+  ]
+
+  const localProviders = [
+    {
+      id: 'ollama',
+      name: 'Ollama',
+      key: 'ollamaUrl' as const,
+      placeholder: 'http://localhost:11434',
+      description: 'Run models locally with Ollama',
+      isUrl: true
+    },
+    {
+      id: 'lmstudio',
+      name: 'LM Studio',
+      key: 'lmStudioUrl' as const,
+      placeholder: 'http://localhost:1234',
+      description: 'Local inference with LM Studio',
+      isUrl: true
+    },
+  ]
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      <p style={{ color: '#8b949e', fontSize: '13px', margin: 0 }}>
+        Configure API keys for cloud providers and URLs for local inference servers.
+      </p>
+
+      {/* Cloud Providers */}
+      <section>
+        <h4 style={{ color: '#e6edf3', fontSize: '14px', fontWeight: 500, marginBottom: '16px' }}>
+          Cloud Providers
+        </h4>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {apiKeyProviders.map((provider) => {
+            const value = settings.providers[provider.key] || ''
+            const isVisible = showKeys[provider.id]
+            return (
+              <div
+                key={provider.id}
+                style={{
+                  padding: '12px 14px',
+                  backgroundColor: '#161b22',
+                  borderRadius: '8px',
+                  border: value ? '1px solid #238636' : '1px solid #30363d',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <div>
+                    <span style={{ color: '#e6edf3', fontSize: '13px', fontWeight: 500 }}>{provider.name}</span>
+                    {value && <span style={{ marginLeft: '8px', color: '#238636', fontSize: '11px' }}>●</span>}
+                  </div>
+                  <a
+                    href={provider.docsUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      fontSize: '11px',
+                      color: '#58a6ff',
+                      textDecoration: 'none',
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    Get API key →
+                  </a>
+                </div>
+                <p style={{ color: '#8b949e', fontSize: '11px', margin: '0 0 8px 0' }}>{provider.description}</p>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <input
+                    type={isVisible ? 'text' : 'password'}
+                    value={value}
+                    onChange={(e) => setProviderSettings({ [provider.key]: e.target.value })}
+                    placeholder={provider.placeholder}
+                    style={{
+                      flex: 1,
+                      padding: '8px 10px',
+                      backgroundColor: '#0d1117',
+                      border: '1px solid #30363d',
+                      borderRadius: '6px',
+                      color: '#e6edf3',
+                      fontSize: '12px',
+                      fontFamily: 'monospace',
+                    }}
+                  />
+                  <button
+                    onClick={() => toggleShowKey(provider.id)}
+                    style={{
+                      padding: '8px 12px',
+                      backgroundColor: '#21262d',
+                      border: '1px solid #30363d',
+                      borderRadius: '6px',
+                      color: '#8b949e',
+                      fontSize: '11px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {isVisible ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </section>
+
+      {/* Local Providers */}
+      <section>
+        <h4 style={{ color: '#e6edf3', fontSize: '14px', fontWeight: 500, marginBottom: '16px' }}>
+          Local Providers
+        </h4>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {localProviders.map((provider) => {
+            const value = settings.providers[provider.key] || ''
+            return (
+              <div
+                key={provider.id}
+                style={{
+                  padding: '12px 14px',
+                  backgroundColor: '#161b22',
+                  borderRadius: '8px',
+                  border: '1px solid #30363d',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ color: '#e6edf3', fontSize: '13px', fontWeight: 500 }}>{provider.name}</span>
+                </div>
+                <p style={{ color: '#8b949e', fontSize: '11px', margin: '0 0 8px 0' }}>{provider.description}</p>
+                <input
+                  type="text"
+                  value={value}
+                  onChange={(e) => setProviderSettings({ [provider.key]: e.target.value })}
+                  placeholder={provider.placeholder}
+                  style={{
+                    width: '100%',
+                    padding: '8px 10px',
+                    backgroundColor: '#0d1117',
+                    border: '1px solid #30363d',
+                    borderRadius: '6px',
+                    color: '#e6edf3',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                  }}
+                />
+              </div>
+            )
+          })}
+        </div>
+      </section>
     </div>
   )
 }
@@ -1683,48 +1923,6 @@ function LSPSettingsSection() {
   )
 }
 
-function ProviderSettingsSection() {
-  const { settings, setProviderSettings } = useTerminalSettings()
-  const theme = settings.theme
-
-  const keyInputs = [
-    { label: 'Anthropic API Key', key: 'anthropicKey' as const, placeholder: 'sk-ant-...' },
-    { label: 'OpenAI API Key', key: 'openaiKey' as const, placeholder: 'sk-proj-...' },
-    { label: 'OpenRouter API Key', key: 'openrouterKey' as const, placeholder: 'or-...' },
-    { label: 'Grok API Key', key: 'grokKey' as const, placeholder: 'gsk-...' },
-  ]
-
-  return (
-    <section>
-      <h4 style={{ color: '#e6edf3', fontSize: '12px', fontWeight: 500, margin: '0 0 8px' }}>
-        Providers & Models
-      </h4>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-        {keyInputs.map((item) => (
-          <div key={item.key} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <label style={{ color: theme.brightBlack, fontSize: '11px' }}>{item.label}</label>
-            <input
-              type="password"
-              value={settings.providers[item.key] || ''}
-              onChange={(e) => setProviderSettings({ [item.key]: e.target.value })}
-              placeholder={item.placeholder}
-              style={{
-                width: '100%',
-                padding: '8px 10px',
-                backgroundColor: '#161b22',
-                border: '1px solid #30363d',
-                borderRadius: '6px',
-                color: '#e6edf3',
-                fontSize: '12px',
-              }}
-            />
-          </div>
-        ))}
-      </div>
-
-    </section>
-  )
-}
 
 // Background Panel - Keep existing implementation but simplified
 function BackgroundPanel() {

@@ -42,13 +42,12 @@ export const PROVIDERS: Provider[] = [
     description: 'OpenCode CLI Agent',
     isAgent: true,
     models: [
-      { id: 'auto', name: 'Auto', description: 'Automatically select best model' },
+      { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', supportsTools: true, supportsVision: true },
+      { id: 'claude-3-5-haiku', name: 'Claude 3.5 Haiku', supportsTools: true },
       { id: 'gpt-4o', name: 'GPT-4o', supportsVision: true, supportsTools: true },
       { id: 'gpt-4o-mini', name: 'GPT-4o Mini', supportsTools: true },
-      { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', supportsTools: true },
-      { id: 'claude-3-5-haiku', name: 'Claude 3.5 Haiku', supportsTools: true },
     ],
-    defaultModel: 'auto',
+    defaultModel: 'claude-3-5-sonnet',
   },
   {
     id: 'claude-code',

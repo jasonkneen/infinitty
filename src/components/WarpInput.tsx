@@ -25,6 +25,8 @@ import {
   X,
   Hash,
   Brain,
+  File,
+  Code,
 } from 'lucide-react'
 import { useTerminalSettings } from '../contexts/TerminalSettingsContext'
 import { detectNaturalLanguage, detectCLICommand } from '../hooks/useInputInterception'
@@ -59,7 +61,7 @@ const STORAGE_KEY_MODEL = 'warp-input-model'
 
 // Default provider and model
 const DEFAULT_PROVIDER_ID = 'opencode'
-const DEFAULT_MODEL_ID = 'claude-3-5-haiku'
+const DEFAULT_MODEL_ID = 'claude-3-5-sonnet'
 
 function getInitialProvider(): Provider {
   try {
@@ -76,15 +78,15 @@ function getInitialProvider(): Provider {
 function getInitialModelId(provider: Provider): string {
   try {
     const stored = localStorage.getItem(STORAGE_KEY_MODEL)
-    if (stored) {
+    if (stored && stored !== 'auto') {
       // Verify the model exists for this provider (or is a valid opencode model)
       const modelExists = provider.models.some(m => m.id === stored)
       if (modelExists || provider.id === 'opencode') return stored
     }
   } catch { /* ignore */ }
-  // Default to claude-3-5-haiku for opencode, otherwise provider default
+  // Default to claude-3-5-sonnet for opencode, otherwise provider default
   if (provider.id === DEFAULT_PROVIDER_ID) return DEFAULT_MODEL_ID
-  return provider.defaultModel || provider.models[0]?.id || 'auto'
+  return provider.defaultModel || provider.models[0]?.id || DEFAULT_MODEL_ID
 }
 
 interface WarpInputProps {
@@ -101,23 +103,19 @@ interface WarpInputProps {
 }
 
 const MODELS = [
-  { id: 'auto', name: 'auto', description: 'Auto will select the best model for the task' },
-  { id: 'gpt-5.1-low', name: 'gpt-5.1 (low reasoning)', description: 'Fast, cost-effective' },
-  { id: 'gpt-5.1-medium', name: 'gpt-5.1 (medium reasoning)', description: 'Balanced performance' },
-  { id: 'gpt-5.1-high', name: 'gpt-5.1 (high reasoning)', description: 'Best quality' },
-  { id: 'claude-4-sonnet', name: 'claude 4 sonnet', description: 'Anthropic' },
-  { id: 'claude-4.5-sonnet', name: 'claude 4.5 sonnet', description: 'Anthropic' },
-  { id: 'claude-4.5-sonnet-thinking', name: 'claude 4.5 sonnet (thinking)', description: 'Extended thinking' },
-  { id: 'claude-4.5-haiku', name: 'claude 4.5 haiku', description: 'Fast, efficient' },
-  { id: 'claude-4.5-opus', name: 'claude 4.5 opus', description: 'Most capable' },
-  { id: 'claude-4.5-opus-thinking', name: 'claude 4.5 opus (thinking)', description: 'Extended thinking' },
-  { id: 'claude-4.1-opus', name: 'claude 4.1 opus', description: 'Anthropic' },
-  { id: 'gpt-5-low', name: 'gpt-5 (low reasoning)', description: 'OpenAI' },
-  { id: 'gpt-5-medium', name: 'gpt-5 (medium reasoning)', description: 'OpenAI' },
-  { id: 'gpt-5-high', name: 'gpt-5 (high reasoning)', description: 'OpenAI' },
-  { id: 'gemini-3-pro', name: 'gemini 3 pro', description: 'Google' },
-  { id: 'gemini-2.5-pro', name: 'gemini 2.5 pro', description: 'Google' },
-  { id: 'glm-4.6', name: 'glm 4.6 (us-hosted)', description: 'GLM' },
+  { id: 'claude-4-sonnet', name: 'Claude 4 Sonnet', description: 'Anthropic' },
+  { id: 'claude-4.5-sonnet', name: 'Claude 4.5 Sonnet', description: 'Anthropic' },
+  { id: 'claude-4.5-sonnet-thinking', name: 'Claude 4.5 Sonnet (thinking)', description: 'Extended thinking' },
+  { id: 'claude-4.5-haiku', name: 'Claude 4.5 Haiku', description: 'Fast, efficient' },
+  { id: 'claude-4.5-opus', name: 'Claude 4.5 Opus', description: 'Most capable' },
+  { id: 'claude-4.5-opus-thinking', name: 'Claude 4.5 Opus (thinking)', description: 'Extended thinking' },
+  { id: 'gpt-4o', name: 'GPT-4o', description: 'OpenAI' },
+  { id: 'gpt-4o-mini', name: 'GPT-4o Mini', description: 'OpenAI, fast' },
+  { id: 'gpt-5.1-low', name: 'GPT-5.1 (low reasoning)', description: 'Fast, cost-effective' },
+  { id: 'gpt-5.1-medium', name: 'GPT-5.1 (medium reasoning)', description: 'Balanced performance' },
+  { id: 'gpt-5.1-high', name: 'GPT-5.1 (high reasoning)', description: 'Best quality' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Google' },
+  { id: 'gemini-3-pro', name: 'Gemini 3 Pro', description: 'Google' },
 ]
 
 type InputSize = 'small' | 'medium' | 'large'
@@ -190,10 +188,8 @@ export function WarpInput({
   // Get models for current provider (use OpenCode dynamic models if available)
   const providerModels = useMemo((): ProviderModel[] => {
     if (selectedProvider.id === 'opencode' && openCodeProviders.length > 0) {
-      // Flatten all OpenCode provider models into a list
-      const models: ProviderModel[] = [
-        { id: 'auto', name: 'Auto', description: 'Automatically select best model' },
-      ]
+      // Flatten all OpenCode provider models into a list (no Auto option)
+      const models: ProviderModel[] = []
       for (const provider of openCodeProviders) {
         for (const model of provider.models) {
           models.push({
@@ -884,7 +880,7 @@ export function WarpInput({
             zIndex: 999999,
           }}
         >
-          <SlashPicker onClose={() => setOverlay(null)} />
+          <SlashPicker onClose={() => setOverlay(null)} selectedProviderId={selectedProvider.id} />
         </div>,
         document.body
       )}
@@ -898,7 +894,17 @@ export function WarpInput({
             zIndex: 999999,
           }}
         >
-          <MentionsPicker onClose={() => setOverlay(null)} />
+          <MentionsPicker onClose={() => setOverlay(null)} onSelect={(item) => {
+            // Insert the @ mention into the input
+            setInputValue(prev => {
+              // Find the last @ symbol and replace the partial match
+              const atIndex = prev.lastIndexOf('@')
+              if (atIndex >= 0) {
+                return prev.slice(0, atIndex) + `@${item.name} `
+              }
+              return prev + `@${item.name} `
+            })
+          }} />
         </div>,
         document.body
       )}
@@ -1042,53 +1048,149 @@ interface ModelPickerProps {
 
 function ModelPicker({ models, selectedModel, onSelectModel }: ModelPickerProps) {
   const { settings } = useTerminalSettings()
+  const [search, setSearch] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const theme = settings.theme
+
+  // Focus search on mount
+  useEffect(() => {
+    searchInputRef.current?.focus()
+  }, [])
+
+  // Filter models based on search
+  const filteredModels = useMemo(() => {
+    if (!search.trim()) return models
+    const lower = search.toLowerCase()
+    return models.filter(m =>
+      m.name.toLowerCase().includes(lower) ||
+      (m.description && m.description.toLowerCase().includes(lower))
+    )
+  }, [models, search])
 
   return (
     <div
       onClick={(event) => event.stopPropagation()}
       style={{
-        width: '280px',
-        backgroundColor: settings.theme.background,
-        border: `1px solid ${settings.theme.brightBlack}`,
+        width: '320px',
+        backgroundColor: theme.background,
+        border: `1px solid ${theme.brightBlack}`,
         borderRadius: '12px',
         boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
         overflow: 'hidden',
       }}
     >
-      <div style={{ maxHeight: '380px', overflowY: 'auto', padding: '8px 0' }}>
-        {models.map((model) => {
-          const isSelected = selectedModel.id === model.id
-          return (
-            <button
-              key={model.id}
-              onClick={() => onSelectModel(model)}
-              style={{
-                display: 'flex',
-                width: '100%',
-                alignItems: 'center',
-                gap: '12px',
-                padding: '10px 16px',
-                textAlign: 'left',
-                fontSize: '14px',
-                backgroundColor: isSelected ? settings.theme.cyan : 'transparent',
-                color: isSelected ? settings.theme.background : settings.theme.foreground,
-                border: 'none',
-                cursor: 'pointer',
-                transition: 'background-color 0.1s ease',
-              }}
-            >
-              {isSelected && (
-                <Check size={14} style={{ color: settings.theme.background }} />
-              )}
-              <div style={{ flex: 1, marginLeft: !isSelected ? '26px' : 0 }}>
-                <div>{model.name}</div>
-                {model.description && (
-                  <div style={{ fontSize: '11px', opacity: 0.6, marginTop: '2px' }}>{model.description}</div>
+      {/* Search input */}
+      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${theme.brightBlack}40` }}>
+        <div style={{ position: 'relative' }}>
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search models..."
+            style={{
+              width: '100%',
+              padding: '8px 12px 8px 32px',
+              backgroundColor: `${theme.brightBlack}20`,
+              border: `1px solid ${theme.brightBlack}40`,
+              borderRadius: '8px',
+              color: theme.foreground,
+              fontSize: '13px',
+              outline: 'none',
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && filteredModels.length > 0) {
+                onSelectModel(filteredModels[0])
+              }
+            }}
+          />
+          <svg
+            style={{
+              position: 'absolute',
+              left: '10px',
+              top: '50%',
+              transform: 'translateY(-50%)',
+              color: theme.brightBlack,
+            }}
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.3-4.3" />
+          </svg>
+        </div>
+      </div>
+
+      {/* Models list */}
+      <div style={{ maxHeight: '340px', overflowY: 'auto', padding: '6px 0' }}>
+        {filteredModels.length === 0 ? (
+          <div style={{ padding: '16px', textAlign: 'center', color: theme.brightBlack, fontSize: '13px' }}>
+            No models found
+          </div>
+        ) : (
+          filteredModels.map((model) => {
+            const isSelected = selectedModel.id === model.id
+            return (
+              <button
+                key={model.id}
+                onClick={() => onSelectModel(model)}
+                style={{
+                  display: 'flex',
+                  width: '100%',
+                  alignItems: 'center',
+                  gap: '10px',
+                  padding: '10px 14px',
+                  textAlign: 'left',
+                  fontSize: '13px',
+                  backgroundColor: isSelected ? theme.cyan : 'transparent',
+                  color: isSelected ? theme.background : theme.foreground,
+                  border: 'none',
+                  cursor: 'pointer',
+                  transition: 'background-color 0.1s ease',
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) e.currentTarget.style.backgroundColor = `${theme.brightBlack}20`
+                }}
+                onMouseLeave={(e) => {
+                  if (!isSelected) e.currentTarget.style.backgroundColor = 'transparent'
+                }}
+              >
+                {isSelected && (
+                  <Check size={14} style={{ color: theme.background, flexShrink: 0 }} />
                 )}
-              </div>
-            </button>
-          )
-        })}
+                <div style={{ flex: 1, marginLeft: !isSelected ? '24px' : 0, minWidth: 0 }}>
+                  <div style={{ fontWeight: 500 }}>{model.name}</div>
+                  {model.description && (
+                    <div style={{
+                      fontSize: '11px',
+                      opacity: 0.6,
+                      marginTop: '2px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {model.description}
+                    </div>
+                  )}
+                </div>
+              </button>
+            )
+          })
+        )}
+      </div>
+
+      {/* Footer with count */}
+      <div style={{
+        padding: '8px 14px',
+        borderTop: `1px solid ${theme.brightBlack}40`,
+        fontSize: '11px',
+        color: theme.brightBlack,
+      }}>
+        {filteredModels.length} model{filteredModels.length !== 1 ? 's' : ''} available
       </div>
     </div>
   )
@@ -1525,15 +1627,54 @@ function ConversationPicker({ onClose: _onClose, currentProvider, onSelectSessio
   )
 }
 
-function SlashPicker({ onClose: _onClose }: { onClose: () => void }) {
-  const { settings } = useTerminalSettings()
-  const theme = settings.theme
-  const commands = [
+// Provider-specific slash commands
+const PROVIDER_COMMANDS: Record<string, Array<{ icon: typeof Server; label: string; description: string }>> = {
+  'claude-code': [
+    { icon: Terminal, label: '/help', description: 'Get help with Claude Code' },
+    { icon: Shield, label: '/allowed-tools', description: 'Show allowed tools' },
+    { icon: Sparkles, label: '/config', description: 'View or modify configuration' },
+    { icon: Code, label: '/diff', description: 'Show diff of pending changes' },
+    { icon: Server, label: '/mcp', description: 'Configure MCP servers' },
+    { icon: Sparkles, label: '/model', description: 'Change AI model' },
+    { icon: ClipboardList, label: '/todo', description: 'Manage todo list' },
+    { icon: Terminal, label: '/terminal', description: 'Run terminal commands' },
+  ],
+  'codex': [
+    { icon: Terminal, label: '/help', description: 'Get help with OpenAI Codex' },
+    { icon: Code, label: '/generate', description: 'Generate code from prompt' },
+    { icon: Sparkles, label: '/explain', description: 'Explain code' },
+    { icon: Code, label: '/edit', description: 'Edit code with instructions' },
+    { icon: Terminal, label: '/shell', description: 'Run shell commands' },
+  ],
+  'default': [
     { icon: Server, label: '/add-mcp', description: 'Add new MCP server' },
     { icon: Server, label: '/create-environment', description: 'Create a Warp Environment (Docker image + repos)' },
     { icon: Sparkles, label: '/add-prompt', description: 'Add new Agent prompt' },
     { icon: Shield, label: '/add-rule', description: 'Add new rule' },
-  ]
+  ],
+}
+
+function SlashPicker({ onClose, selectedProviderId }: { onClose: () => void; selectedProviderId: string }) {
+  const { settings } = useTerminalSettings()
+  const theme = settings.theme
+  const [search, setSearch] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  // Focus search on mount
+  useEffect(() => {
+    searchInputRef.current?.focus()
+  }, [])
+
+  // Get provider-specific commands
+  const commands = useMemo(() => {
+    const providerCommands = PROVIDER_COMMANDS[selectedProviderId] || PROVIDER_COMMANDS['default']
+    if (!search.trim()) return providerCommands
+    const lower = search.toLowerCase()
+    return providerCommands.filter(cmd =>
+      cmd.label.toLowerCase().includes(lower) ||
+      cmd.description.toLowerCase().includes(lower)
+    )
+  }, [selectedProviderId, search])
 
   const categories = [
     { icon: Sparkles, label: 'Prompts', hasSubmenu: true },
@@ -1550,34 +1691,73 @@ function SlashPicker({ onClose: _onClose }: { onClose: () => void }) {
         overflow: 'hidden',
       }}
     >
+      {/* Search input */}
+      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${theme.brightBlack}40` }}>
+        <input
+          ref={searchInputRef}
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search commands..."
+          style={{
+            width: '100%',
+            padding: '8px 12px',
+            backgroundColor: `${theme.brightBlack}20`,
+            border: `1px solid ${theme.brightBlack}40`,
+            borderRadius: '8px',
+            color: theme.foreground,
+            fontSize: '13px',
+            outline: 'none',
+          }}
+        />
+      </div>
+
+      {/* Provider label */}
+      <div style={{ padding: '8px 16px', fontSize: '11px', color: theme.brightBlack, textTransform: 'uppercase' }}>
+        {selectedProviderId === 'claude-code' ? 'Claude Code' : selectedProviderId === 'codex' ? 'Codex' : 'Commands'}
+      </div>
+
       {/* Commands */}
-      <div style={{ padding: '8px 0' }}>
-        {commands.map((cmd, index) => (
-          <button
-            key={cmd.label}
-            style={{
-              display: 'flex',
-              width: '100%',
-              alignItems: 'center',
-              gap: '12px',
-              padding: '10px 16px',
-              textAlign: 'left',
-              backgroundColor: index === 0 ? theme.cyan : 'transparent',
-              color: index === 0 ? theme.background : theme.foreground,
-              border: 'none',
-              cursor: 'pointer',
-              transition: 'background-color 0.15s ease',
-            }}
-          >
-            <cmd.icon size={16} style={{ color: index === 0 ? `${theme.background}99` : theme.brightBlack }} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: '14px' }}>{cmd.label}</div>
-              {cmd.description && (
-                <div style={{ fontSize: '12px', marginTop: '2px', color: index === 0 ? `${theme.background}99` : theme.brightBlack }}>{cmd.description}</div>
-              )}
-            </div>
-          </button>
-        ))}
+      <div style={{ maxHeight: '300px', overflowY: 'auto', padding: '0 0 8px' }}>
+        {commands.length === 0 ? (
+          <div style={{ padding: '16px', textAlign: 'center', color: theme.brightBlack, fontSize: '13px' }}>
+            No commands found
+          </div>
+        ) : (
+          commands.map((cmd, index) => (
+            <button
+              key={cmd.label}
+              onClick={() => onClose()}
+              style={{
+                display: 'flex',
+                width: '100%',
+                alignItems: 'center',
+                gap: '12px',
+                padding: '10px 16px',
+                textAlign: 'left',
+                backgroundColor: index === 0 ? theme.cyan : 'transparent',
+                color: index === 0 ? theme.background : theme.foreground,
+                border: 'none',
+                cursor: 'pointer',
+                transition: 'background-color 0.15s ease',
+              }}
+              onMouseEnter={(e) => {
+                if (index !== 0) e.currentTarget.style.backgroundColor = `${theme.brightBlack}20`
+              }}
+              onMouseLeave={(e) => {
+                if (index !== 0) e.currentTarget.style.backgroundColor = 'transparent'
+              }}
+            >
+              <cmd.icon size={16} style={{ color: index === 0 ? `${theme.background}99` : theme.brightBlack }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '14px', fontWeight: 500 }}>{cmd.label}</div>
+                {cmd.description && (
+                  <div style={{ fontSize: '12px', marginTop: '2px', color: index === 0 ? `${theme.background}99` : theme.brightBlack }}>{cmd.description}</div>
+                )}
+              </div>
+            </button>
+          ))
+        )}
       </div>
 
       {/* Categories with submenus */}
@@ -1612,22 +1792,98 @@ function SlashPicker({ onClose: _onClose }: { onClose: () => void }) {
   )
 }
 
-function MentionsPicker({ onClose: _onClose }: { onClose: () => void }) {
+interface MentionItem {
+  type: 'file' | 'folder' | 'agent'
+  name: string
+  path: string
+  icon: typeof File
+}
+
+function MentionsPicker({ onClose, onSelect }: { onClose: () => void; onSelect?: (item: MentionItem) => void }) {
   const { settings } = useTerminalSettings()
   const theme = settings.theme
+  const [search, setSearch] = useState('')
+  const [files, setFiles] = useState<MentionItem[]>([])
+  const [agents, setAgents] = useState<MentionItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  // Focus search on mount
+  useEffect(() => {
+    searchInputRef.current?.focus()
+  }, [])
+
+  // Load files and agents from working directory
+  useEffect(() => {
+    const loadItems = async () => {
+      setLoading(true)
+      try {
+        // Try to get working directory files via Tauri
+        const { readDir } = await import('@tauri-apps/plugin-fs')
+        const { homeDir } = await import('@tauri-apps/api/path')
+
+        // Get current working directory (fallback to home)
+        const cwd = (window as unknown as { __TAURI_INTERNALS__?: { cwd?: string } }).__TAURI_INTERNALS__?.cwd || await homeDir()
+
+        // Read working directory files
+        const entries = await readDir(cwd)
+        const fileItems: MentionItem[] = entries.slice(0, 50).map(entry => ({
+          type: entry.isDirectory ? 'folder' : 'file',
+          name: entry.name,
+          path: `${cwd}/${entry.name}`,
+          icon: entry.isDirectory ? FolderOpen : File,
+        }))
+        setFiles(fileItems)
+
+        // Try to read .claude/agents directory
+        try {
+          const agentsDir = `${cwd}/.claude/agents`
+          const agentEntries = await readDir(agentsDir)
+          const agentItems: MentionItem[] = agentEntries
+            .filter(e => e.name.endsWith('.md') || e.name.endsWith('.json'))
+            .map(entry => ({
+              type: 'agent' as const,
+              name: entry.name.replace(/\.(md|json)$/, ''),
+              path: `${agentsDir}/${entry.name}`,
+              icon: Sparkles,
+            }))
+          setAgents(agentItems)
+        } catch {
+          // .claude/agents doesn't exist, that's fine
+          setAgents([])
+        }
+      } catch {
+        // Fallback to empty if we can't read filesystem
+        setFiles([])
+        setAgents([])
+      }
+      setLoading(false)
+    }
+
+    loadItems()
+  }, [])
+
+  // Filter items based on search
+  const filteredItems = useMemo(() => {
+    const allItems = [...agents, ...files]
+    if (!search.trim()) return allItems.slice(0, 20)
+    const lower = search.toLowerCase()
+    return allItems.filter(item =>
+      item.name.toLowerCase().includes(lower) ||
+      item.path.toLowerCase().includes(lower)
+    ).slice(0, 20)
+  }, [files, agents, search])
+
   const categories = [
     { icon: FolderOpen, label: 'Files and folders' },
+    { icon: Sparkles, label: 'Agents' },
     { icon: Terminal, label: 'Blocks' },
-    { icon: Workflow, label: 'Workflows' },
-    { icon: BookOpen, label: 'Notebooks' },
-    { icon: ClipboardList, label: 'Plans' },
-    { icon: Shield, label: 'Rules' },
   ]
 
   return (
     <div
       style={{
-        width: '320px',
+        width: '380px',
         backgroundColor: theme.background,
         border: `1px solid ${theme.brightBlack}`,
         borderRadius: '12px',
@@ -1635,33 +1891,165 @@ function MentionsPicker({ onClose: _onClose }: { onClose: () => void }) {
         overflow: 'hidden',
       }}
     >
-      <div style={{ padding: '8px 0' }}>
-        {categories.map((cat, index) => (
-          <button
-            key={cat.label}
-            style={{
-              display: 'flex',
-              width: '100%',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '12px',
-              padding: '10px 16px',
-              textAlign: 'left',
-              backgroundColor: index === 0 ? theme.cyan : 'transparent',
-              color: index === 0 ? theme.background : theme.foreground,
-              border: 'none',
-              cursor: 'pointer',
-              transition: 'background-color 0.15s ease',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <cat.icon size={16} style={{ color: index === 0 ? `${theme.background}99` : theme.brightBlack }} />
-              <span style={{ fontSize: '14px' }}>{cat.label}</span>
-            </div>
-            <ChevronRight size={14} style={{ color: index === 0 ? `${theme.background}66` : theme.brightBlack }} />
-          </button>
-        ))}
+      {/* Search input */}
+      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${theme.brightBlack}40` }}>
+        <input
+          ref={searchInputRef}
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search files, folders, agents..."
+          style={{
+            width: '100%',
+            padding: '8px 12px',
+            backgroundColor: `${theme.brightBlack}20`,
+            border: `1px solid ${theme.brightBlack}40`,
+            borderRadius: '8px',
+            color: theme.foreground,
+            fontSize: '13px',
+            outline: 'none',
+          }}
+        />
       </div>
+
+      {/* Loading state */}
+      {loading ? (
+        <div style={{ padding: '24px', textAlign: 'center', color: theme.brightBlack, fontSize: '13px' }}>
+          Loading...
+        </div>
+      ) : search.trim() ? (
+        /* Search results */
+        <div style={{ maxHeight: '320px', overflowY: 'auto', padding: '8px 0' }}>
+          {filteredItems.length === 0 ? (
+            <div style={{ padding: '16px', textAlign: 'center', color: theme.brightBlack, fontSize: '13px' }}>
+              No matches found
+            </div>
+          ) : (
+            filteredItems.map((item, index) => (
+              <button
+                key={item.path}
+                onClick={() => {
+                  onSelect?.(item)
+                  onClose()
+                }}
+                style={{
+                  display: 'flex',
+                  width: '100%',
+                  alignItems: 'center',
+                  gap: '12px',
+                  padding: '8px 16px',
+                  textAlign: 'left',
+                  backgroundColor: index === 0 ? theme.cyan : 'transparent',
+                  color: index === 0 ? theme.background : theme.foreground,
+                  border: 'none',
+                  cursor: 'pointer',
+                  transition: 'background-color 0.15s ease',
+                }}
+                onMouseEnter={(e) => {
+                  if (index !== 0) e.currentTarget.style.backgroundColor = `${theme.brightBlack}20`
+                }}
+                onMouseLeave={(e) => {
+                  if (index !== 0) e.currentTarget.style.backgroundColor = 'transparent'
+                }}
+              >
+                <item.icon
+                  size={16}
+                  style={{
+                    color: index === 0
+                      ? `${theme.background}99`
+                      : item.type === 'agent' ? theme.magenta
+                      : item.type === 'folder' ? theme.yellow
+                      : theme.brightBlack
+                  }}
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: '13px', fontWeight: 500 }}>{item.name}</div>
+                  <div style={{
+                    fontSize: '11px',
+                    marginTop: '2px',
+                    color: index === 0 ? `${theme.background}99` : theme.brightBlack,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {item.type === 'agent' ? 'Agent' : item.path}
+                  </div>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      ) : (
+        /* Category view when not searching */
+        <div style={{ padding: '8px 0' }}>
+          {/* Show agents first if any */}
+          {agents.length > 0 && (
+            <>
+              <div style={{ padding: '6px 16px', fontSize: '11px', color: theme.brightBlack, textTransform: 'uppercase' }}>
+                Agents ({agents.length})
+              </div>
+              {agents.slice(0, 5).map((agent, index) => (
+                <button
+                  key={agent.path}
+                  onClick={() => {
+                    onSelect?.(agent)
+                    onClose()
+                  }}
+                  style={{
+                    display: 'flex',
+                    width: '100%',
+                    alignItems: 'center',
+                    gap: '12px',
+                    padding: '8px 16px',
+                    textAlign: 'left',
+                    backgroundColor: 'transparent',
+                    color: theme.foreground,
+                    border: 'none',
+                    cursor: 'pointer',
+                    transition: 'background-color 0.15s ease',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = `${theme.brightBlack}20`}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                  <Sparkles size={16} style={{ color: theme.magenta }} />
+                  <span style={{ fontSize: '13px' }}>{agent.name}</span>
+                </button>
+              ))}
+            </>
+          )}
+
+          {/* Category shortcuts */}
+          <div style={{ borderTop: agents.length > 0 ? `1px solid ${theme.brightBlack}40` : 'none', padding: '8px 0' }}>
+            {categories.map((cat, index) => (
+              <button
+                key={cat.label}
+                style={{
+                  display: 'flex',
+                  width: '100%',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '12px',
+                  padding: '10px 16px',
+                  textAlign: 'left',
+                  backgroundColor: 'transparent',
+                  color: theme.foreground,
+                  border: 'none',
+                  cursor: 'pointer',
+                  transition: 'background-color 0.15s ease',
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = `${theme.brightBlack}20`}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <cat.icon size={16} style={{ color: theme.brightBlack }} />
+                  <span style={{ fontSize: '14px' }}>{cat.label}</span>
+                </div>
+                <ChevronRight size={14} style={{ color: theme.brightBlack }} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

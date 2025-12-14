@@ -44,12 +44,21 @@ export interface LSPSettings {
 }
 
 export interface ProviderSettings {
+  // API Keys
   anthropicKey?: string
   openaiKey?: string
   openrouterKey?: string
-  lmStudioUrl?: string
-  ollamaUrl?: string
+  googleKey?: string
+  groqKey?: string
   grokKey?: string
+  mistralKey?: string
+  cohereKey?: string
+  togetherKey?: string
+  deepseekKey?: string
+  // Local providers
+  ollamaUrl?: string
+  lmStudioUrl?: string
+  // Model preferences
   modelPreferences: {
     fast: string
     thinking: string
@@ -183,9 +192,15 @@ const defaultSettings: TerminalSettings = {
     anthropicKey: '',
     openaiKey: '',
     openrouterKey: '',
-    lmStudioUrl: '',
-    ollamaUrl: '',
+    googleKey: '',
+    groqKey: '',
     grokKey: '',
+    mistralKey: '',
+    cohereKey: '',
+    togetherKey: '',
+    deepseekKey: '',
+    ollamaUrl: 'http://localhost:11434',
+    lmStudioUrl: 'http://localhost:1234',
     modelPreferences: {
       fast: 'gpt-4o-mini',
       thinking: 'o1-mini',
