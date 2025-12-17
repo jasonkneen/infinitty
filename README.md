@@ -1,5 +1,8 @@
 # Infinitty
 
+<img width="1199" height="762" alt="image" src="https://github.com/user-attachments/assets/65fd8c29-f0b4-4497-8cce-dc8e4ffaa82d" />
+
+
 A hybrid terminal application combining the power of native terminals with AI-powered workflows. Features two modes: **Ghostty Mode** (native terminal) and **OpenWarp Mode** (AI-powered block-based interface).
 
 ![Status](https://img.shields.io/badge/status-alpha-orange)
