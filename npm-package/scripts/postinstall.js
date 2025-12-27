@@ -9,24 +9,23 @@ const platform = process.platform
 const arch = process.arch
 
 // Map Node platform/arch to Tauri target names
+// NOTE: Currently only macOS is supported. Linux/Windows coming soon.
 const targetMap = {
   darwin: {
     x64: 'x86_64-apple-darwin',
     arm64: 'aarch64-apple-darwin'
-  },
-  win32: {
-    x64: 'x86_64-pc-windows-msvc'
-  },
-  linux: {
-    x64: 'x86_64-unknown-linux-gnu'
   }
+  // TODO: Add when builds are fixed
+  // win32: { x64: 'x86_64-pc-windows-msvc' },
+  // linux: { x64: 'x86_64-unknown-linux-gnu' }
 }
 
 const target = targetMap[platform]?.[arch]
 
 if (!target) {
-  console.log(`Platform ${platform}-${arch} not supported`)
-  console.log('Supported: macOS (x64, arm64), Windows (x64), Linux (x64)')
+  console.log(`Platform ${platform}-${arch} not yet supported`)
+  console.log('Currently supported: macOS (x64, arm64)')
+  console.log('Linux and Windows coming soon!')
   process.exit(0)
 }
 
@@ -38,18 +37,14 @@ const baseUrl = `https://github.com/jasonkneen/infinitty/releases/download/v${ve
 
 // Tauri artifact naming varies by platform
 function getDownloadUrl() {
-  if (platform === 'linux') {
-    return `${baseUrl}/infinitty_${version}_amd64.AppImage`
-  } else if (platform === 'darwin') {
+  if (platform === 'darwin') {
     // macOS - compressed .app bundle
     if (arch === 'arm64') {
       return `${baseUrl}/${appName}_aarch64-apple-darwin.app.tar.gz`
     }
     return `${baseUrl}/${appName}_x86_64-apple-darwin.app.tar.gz`
-  } else if (platform === 'win32') {
-    // Windows - portable exe or NSIS installer
-    return `${baseUrl}/${appName}_${version}_x64-setup.exe`
   }
+  // TODO: Add Linux/Windows when builds are fixed
   return null
 }
 
@@ -114,29 +109,13 @@ function download(url, dest) {
 
 async function install() {
   try {
-    if (platform === 'linux') {
-      // AppImage is a single file
-      const appImagePath = path.join(binDir, 'infinitty.AppImage')
-      await download(downloadUrl, appImagePath)
-      fs.chmodSync(appImagePath, 0o755)
-      console.log('AppImage installed successfully!')
+    // macOS: Download and extract .tar.gz
+    const archiveFile = path.join(binDir, 'download.tar.gz')
+    await download(downloadUrl, archiveFile)
 
-    } else if (platform === 'darwin') {
-      // Download and extract .tar.gz
-      const archiveFile = path.join(binDir, 'download.tar.gz')
-      await download(downloadUrl, archiveFile)
-
-      console.log('Extracting app bundle...')
-      execSync(`tar -xzf "${archiveFile}" -C "${binDir}"`, { stdio: 'inherit' })
-      fs.unlinkSync(archiveFile)
-      console.log('macOS app installed successfully!')
-
-    } else if (platform === 'win32') {
-      // Download exe
-      const exePath = path.join(binDir, 'Infinitty.exe')
-      await download(downloadUrl, exePath)
-      console.log('Windows executable installed successfully!')
-    }
+    console.log('Extracting app bundle...')
+    execSync(`tar -xzf "${archiveFile}" -C "${binDir}"`, { stdio: 'inherit' })
+    fs.unlinkSync(archiveFile)
 
     console.log(`\nInfinitty v${version} installed!`)
     console.log('Run with: infinitty')
