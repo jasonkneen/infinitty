@@ -38,11 +38,11 @@ const baseUrl = `https://github.com/jasonkneen/infinitty/releases/download/v${ve
 // Tauri artifact naming varies by platform
 function getDownloadUrl() {
   if (platform === 'darwin') {
-    // macOS - compressed .app bundle
+    // macOS - compressed .app bundle (Tauri uses short arch names)
     if (arch === 'arm64') {
-      return `${baseUrl}/${appName}_aarch64-apple-darwin.app.tar.gz`
+      return `${baseUrl}/${appName}_aarch64.app.tar.gz`
     }
-    return `${baseUrl}/${appName}_x86_64-apple-darwin.app.tar.gz`
+    return `${baseUrl}/${appName}_x64.app.tar.gz`
   }
   // TODO: Add Linux/Windows when builds are fixed
   return null
