@@ -72,18 +72,15 @@ jobs:
             libayatana-appindicator3-dev
 
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VITE_INTERFACE_MODE: ghostty
-          # macOS signing (optional - uncomment and set secrets)
-          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
+          tauriScript: pnpm tauri
           tagName: v__VERSION__
           releaseName: 'Infinitty v__VERSION__'
           releaseBody: |
