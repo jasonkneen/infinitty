@@ -851,6 +851,7 @@ pub fn run() {
         .plugin(tauri_plugin_pty::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_http::init())
         .manage(Mutex::new(WebviewStore::default()))
         .setup(|app| {
             // Create and set the application menu

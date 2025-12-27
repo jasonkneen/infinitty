@@ -13,6 +13,13 @@
     "fs:allow-home-read-recursive",
     "fs:allow-home-write",
     "fs:allow-home-write-recursive",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://api.anthropic.com/*" },
+        { "url": "https://api.openai.com/*" }
+      ]
+    },
     "shell:default",
     {
       "identifier": "shell:allow-spawn",

@@ -29,7 +29,7 @@ import { useTerminalSettings } from '../contexts/TerminalSettingsContext'
 import { detectNaturalLanguage, detectCLICommand } from '../hooks/useInputInterception'
 import { PROVIDERS, getProviderModels, fetchOllamaModels, fetchLMStudioModels, type Provider, type ProviderType, type ProviderModel } from '../types/providers'
 import { getProvidersAndModels, listSessions, type OpenCodeProvider, type OpenCodeSessionInfo } from '../services/opencode'
-import { type ThinkingLevel, getThinkingLevelLabel } from '../services/claudecode'
+import { type ThinkingLevel, getThinkingLevelLabel } from '../services/ai'
 
 // Context block reference for ghost chips
 interface ContextBlock {
@@ -97,7 +97,7 @@ function getInitialModelId(provider: Provider): string {
 }
 
 interface WarpInputProps {
-  onSubmit: (command: string, isAI: boolean, providerId?: ProviderType, modelId?: string, contextBlocks?: ContextBlock[], thinkingLevel?: ThinkingLevel) => void
+  onSubmit: (command: string, isAI: boolean, providerId?: ProviderType, modelId?: string, contextBlocks?: ContextBlock[], thinkingLevel?: ThinkingLevel) => void | Promise<void>
   onModelChange?: (modelId: string) => void
   onProviderChange?: (providerId: ProviderType) => void
   onInputFocus?: () => void
@@ -146,6 +146,8 @@ export function WarpInput({
 }: WarpInputProps) {
   const { settings } = useTerminalSettings()
   const [input, setInput] = useState('')
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
   const [selectedProvider, setSelectedProvider] = useState<Provider>(getInitialProvider)
   const [selectedModelId, setSelectedModelId] = useState(() => getInitialModelId(getInitialProvider()))
   const [showProviderPicker, setShowProviderPicker] = useState(false)
@@ -336,8 +338,11 @@ export function WarpInput({
     }
   }, [cliDetection.forceTerminal, cliDetection.forceAI, cliDetection.isCLICommand, cliDetection.confidence, isAIMode])
 
-  const handleSubmit = () => {
+  const handleSubmit = useCallback(async () => {
     if (!input.trim()) return
+
+    // Clear previous submission error on a new attempt
+    setSubmitError(null)
 
     // Extract hashtags and add them as custom context chips
     const hashtags = extractHashtags(input)
@@ -362,19 +367,33 @@ export function WarpInput({
     const contextBlocks = finalIsAI && confirmedContextBlocks.length > 0 ? confirmedContextBlocks : undefined
     // Pass thinking level only for Claude Code
     const finalThinkingLevel = selectedProvider.id === 'claude-code' ? thinkingLevel : undefined
-    onSubmit(finalInput, finalIsAI, selectedProvider.id, selectedModelId, contextBlocks, finalThinkingLevel)
-    setInput('')
+
+    try {
+      setIsSubmitting(true)
+      // IMPORTANT: only clear the input once the submission *actually starts*.
+      // Upstream callers should return a Promise that resolves when the AI stream has begun.
+      await Promise.resolve(onSubmit(finalInput, finalIsAI, selectedProvider.id, selectedModelId, contextBlocks, finalThinkingLevel))
+
+      setInput('')
+    } catch (error) {
+      const message = error instanceof Error ? (error.message || 'Unknown error') : 'Unknown error'
+      setSubmitError(message)
+      // Keep input intact on failure.
+    } finally {
+      setIsSubmitting(false)
+    }
+
     // Focus back on textarea after submission
     requestAnimationFrame(() => {
       textareaRef.current?.focus()
     })
-  }
+  }, [input, cliDetection.cleanedInput, cliDetection.forceAI, cliDetection.forceTerminal, confirmedContextBlocks, isAIMode, onSubmit, selectedModelId, selectedProvider.id, thinkingLevel])
 
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-      handleSubmit()
+      void handleSubmit()
     }
     // Tab to switch to AI mode when natural language is detected
     if (event.key === 'Tab' && showNLHint) {
@@ -392,6 +411,7 @@ export function WarpInput({
   const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const nextValue = event.target.value
     setInput(nextValue)
+    if (submitError) setSubmitError(null)
     // Clear pending context if user types - they've moved on
     if (pendingContextBlock && nextValue !== input) {
       onClearPendingContext?.()
@@ -664,6 +684,52 @@ export function WarpInput({
                 transition: 'min-height 0.15s ease',
               }}
             />
+
+            {/* Submission error (dev-friendly, user-visible) */}
+            {submitError && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: '10px',
+                  marginTop: '10px',
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  border: `1px solid ${settings.theme.red}40`,
+                  backgroundColor: `${settings.theme.red}10`,
+                  color: settings.theme.red,
+                  fontSize: '13px',
+                  lineHeight: 1.4,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, marginBottom: '2px' }}>Request failed</div>
+                  <div style={{ opacity: 0.9, wordBreak: 'break-word' }}>{submitError}</div>
+                </div>
+                <button
+                  onClick={() => setSubmitError(null)}
+                  title="Dismiss"
+                  style={{
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '24px',
+                    height: '24px',
+                    borderRadius: '6px',
+                    backgroundColor: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: settings.theme.red,
+                    opacity: 0.8,
+                  }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
             {/* Size toggle button */}
             <button
               onClick={cycleInputSize}
@@ -895,8 +961,8 @@ export function WarpInput({
 
             {/* Send button */}
             <button
-              onClick={handleSubmit}
-              disabled={!input.trim()}
+              onClick={() => void handleSubmit()}
+              disabled={!input.trim() || isSubmitting}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -904,13 +970,13 @@ export function WarpInput({
                 width: '36px',
                 height: '36px',
                 borderRadius: '8px',
-                backgroundColor: input.trim() ? settings.theme.cyan : settings.theme.brightBlack,
-                color: input.trim() ? settings.theme.background : settings.theme.brightBlack,
+                backgroundColor: input.trim() && !isSubmitting ? settings.theme.cyan : settings.theme.brightBlack,
+                color: input.trim() && !isSubmitting ? settings.theme.background : settings.theme.brightBlack,
                 border: 'none',
-                cursor: input.trim() ? 'pointer' : 'not-allowed',
+                cursor: input.trim() && !isSubmitting ? 'pointer' : 'not-allowed',
                 transition: 'all 0.15s ease',
               }}
-              title="Send"
+              title={isSubmitting ? 'Sending…' : 'Send'}
             >
               <Send size={16} />
             </button>

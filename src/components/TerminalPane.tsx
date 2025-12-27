@@ -7,7 +7,7 @@ import { WarpInput, triggerOpenModelPicker } from './WarpInput'
 import { useTabs } from '../contexts/TabsContext'
 import { useTerminalSettings } from '../contexts/TerminalSettingsContext'
 import { useBlockTerminal } from '../hooks/useBlockTerminal'
-import type { ThinkingLevel } from '../services/claudecode'
+import type { ThinkingLevel } from '../services/ai'
 import { type TerminalPane as TerminalPaneType, getAllContentPanes } from '../types/tabs'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -72,11 +72,16 @@ export const TerminalPane = memo(function TerminalPane({ pane }: TerminalPanePro
   }, [])
 
   // Handle WarpInput submissions
-  const handleWarpSubmit = useCallback((command: string, isAI: boolean, providerId?: string, modelId?: string, _contextBlocks?: unknown, thinkingLevel?: ThinkingLevel) => {
+  const handleWarpSubmit = useCallback(async (command: string, isAI: boolean, providerId?: string, modelId?: string, _contextBlocks?: unknown, thinkingLevel?: ThinkingLevel) => {
     if (isAI) {
-      executeAIQuery(command, modelId || 'auto', providerId as 'opencode' | 'anthropic' | 'openai' | 'claude-code' | 'codex' | 'cursor' | 'kilo-code' | 'ollama' | 'lmstudio' | undefined, thinkingLevel)
+      await executeAIQuery(
+        command,
+        modelId || 'auto',
+        providerId as 'opencode' | 'anthropic' | 'openai' | 'claude-code' | 'codex' | 'cursor' | 'kilo-code' | 'ollama' | 'lmstudio' | undefined,
+        thinkingLevel
+      )
     } else {
-      executeCommand(command)
+      await executeCommand(command)
     }
   }, [executeCommand, executeAIQuery])
 

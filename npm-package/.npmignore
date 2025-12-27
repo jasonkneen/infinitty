@@ -1,0 +1,8 @@
+.binary/
+*.tar.gz
+*.AppImage
+*.exe
+*.dmg
+*.deb
+node_modules/
+.DS_Store

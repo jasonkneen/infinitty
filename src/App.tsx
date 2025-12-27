@@ -112,19 +112,20 @@ function AppContent() {
     }
   }, [ghosttyMode, initPty, killPty])
 
-  const handleCommand = useCallback((command: string, isAI: boolean) => {
+  const handleCommand = useCallback(async (command: string, isAI: boolean) => {
     if (ghosttyMode) {
       // Ghostty mode - direct to terminal
       if (terminalRef.current) {
         terminalRef.current.write(command + '\n')
       }
+      return
+    }
+
+    // OpenWarp mode - use blocks
+    if (isAI) {
+      await executeAIQuery(command, selectedModel)
     } else {
-      // OpenWarp mode - use blocks
-      if (isAI) {
-        executeAIQuery(command, selectedModel)
-      } else {
-        executeCommand(command)
-      }
+      await executeCommand(command)
     }
   }, [ghosttyMode, executeCommand, executeAIQuery, selectedModel])
 

@@ -1,4 +1,5 @@
 // Tauri platform implementation
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import type {
   PlatformAPI,
   PlatformType,
@@ -250,8 +251,9 @@ export const tauriPlatform: PlatformAPI = {
 
   http: {
     async fetch(url: string, options?: HttpRequestOptions): Promise<HttpResponse> {
-      // Tauri doesn't have CORS issues - use native fetch directly
-      const response = await globalThis.fetch(url, {
+      // IMPORTANT: In Tauri, WebView `globalThis.fetch` can hit CORS preflight issues.
+      // Route requests through tauri-plugin-http (native Rust HTTP client) instead.
+      const response = await tauriFetch(url, {
         method: options?.method ?? 'GET',
         headers: options?.headers,
         body: options?.body,

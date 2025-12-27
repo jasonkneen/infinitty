@@ -1,0 +1,46 @@
+{
+  "name": "infinitty",
+  "version": "0.1.0",
+  "description": "Infinitty - An AI-powered hybrid terminal with file explorer",
+  "bin": {
+    "infinitty": "./bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": [
+    "bin",
+    "scripts"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "terminal",
+    "cli",
+    "ai",
+    "tauri",
+    "desktop",
+    "hybrid-terminal",
+    "file-explorer"
+  ],
+  "author": "Jason Kneen",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jasonkneen/infinitty.git"
+  },
+  "homepage": "https://github.com/jasonkneen/infinitty",
+  "bugs": {
+    "url": "https://github.com/jasonkneen/infinitty/issues"
+  }
+}
