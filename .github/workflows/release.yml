@@ -25,12 +25,13 @@ jobs:
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'
             name: mac-x64
-          - platform: ubuntu-22.04
-            args: ''
-            name: linux-x64
-          - platform: windows-latest
-            args: ''
-            name: win-x64
+          # TODO: Fix Linux/Windows builds - PTY plugin has platform issues
+          # - platform: ubuntu-22.04
+          #   args: ''
+          #   name: linux-x64
+          # - platform: windows-latest
+          #   args: ''
+          #   name: win-x64
 
     runs-on: ${{ matrix.platform }}
 
