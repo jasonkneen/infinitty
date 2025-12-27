@@ -73,6 +73,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VITE_INTERFACE_MODE: ghostty
         with:
+          tauriScript: pnpm tauri
           tagName: v__VERSION__
           releaseName: 'Infinitty v__VERSION__'
           releaseBody: |
