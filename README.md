@@ -1,4 +1,7 @@
+
 # infinitty
+
+<img align="left" width="100" height="100" alt="436305ef-b7fb-40cd-9526-766c153b2ec2 Background Removed" src="https://github.com/user-attachments/assets/1059db5e-a3f9-400f-b0bd-6e95e77213a6" />
 
 A GPU-native macOS terminal emulator built for two audiences: humans who never
 want to see a frozen terminal again, and **agents/LLMs**, which get a
