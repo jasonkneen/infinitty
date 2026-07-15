@@ -346,9 +346,16 @@ final class TerminalView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         // Clicks in the titlebar strip (top inset) drag the window — the one
-        // place dragging is allowed; everywhere else drags select.
+        // place dragging is allowed; everywhere else drags select. The
+        // exception is a double-click, which (in the bare-titlebar mode where
+        // the titlebar is hidden) the user perceives as "double-click on the
+        // tab title" — we hand it to the rename flow instead.
         let pt = convert(event.locationInWindow, from: nil)
         if bounds.height - pt.y < renderer.topInsetPoints {
+            if event.clickCount == 2 {
+                NSApp.sendAction(#selector(AppDelegate.renameTab(_:)), to: nil, from: event)
+                return
+            }
             window?.performDrag(with: event)
             return
         }

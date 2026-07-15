@@ -5,6 +5,39 @@ import AppKit
 public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     override public init() {
         super.init()
+        installTitlebarDoubleClickMonitor()
+    }
+
+    /// Install a local mouse monitor that turns double-clicks on an infinitty
+    /// window's titlebar into the inline rename UI. (We can't hook the system
+    /// tab bar directly — modern macOS native tabs don't expose hit-testing —
+    /// but the active tab's title is rendered into the titlebar strip in
+    /// both native and bare-titlebar modes, so this is the natural place.)
+    private func installTitlebarDoubleClickMonitor() {
+        titlebarClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
+            [weak self] event in
+            guard let self else { return event }
+            guard event.clickCount == 2,
+                  let win = event.window,
+                  win.tabbingIdentifier == "infinitty",
+                  self.eventIsInTitlebar(event, of: win)
+            else { return event }
+            // Consume the event so the system doesn't also treat it as a
+            // window-drag start (native tabs use double-click for nothing,
+            // but bare-titlebar drags would otherwise kick off).
+            self.beginInlineRename(for: win)
+            return nil
+        }
+    }
+
+    /// True when the mouse event landed in the titlebar/tab strip of `win`,
+    /// including the bare-titlebar case where there's no visible strip but
+    /// the top inset of the content view occupies the same role.
+    private func eventIsInTitlebar(_ event: NSEvent, of win: NSWindow) -> Bool {
+        let p = event.locationInWindow
+        guard win.frame.contains(p) else { return false }
+        let contentTop = win.frame.maxY - win.contentLayoutRect.maxY
+        return p.y >= contentTop
     }
 
     private var config = AppConfig.load()
@@ -17,6 +50,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
+    /// Currently visible rename UI, if any. Capped to one at a time so the
+    /// gestures can't stack.
+    private var activeRename: TabRenameField?
+    /// Local mouse monitor that turns titlebar double-clicks into inline rename.
+    private var titlebarClickMonitor: Any?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
@@ -145,12 +183,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let command = kind == UInt8(ascii: "C") ? s.terminal.lastCommandLine() : nil
             DispatchQueue.main.async {
                 self.notch.handleMarker(kind: kind, exitCode: exit, commandLine: command)
-                if kind == UInt8(ascii: "C") { s.petAnimator?.commandStarted() }
+                if kind == UInt8(ascii: "C") {
+                    s.petAnimator?.commandStarted()
+                    s.processTracker?.poke()
+                }
                 if kind == UInt8(ascii: "D") {
                     s.petAnimator?.commandEnded(exitCode: exit)
                     for waiter in self.runWaiters.removeValue(forKey: s.id) ?? [] {
                         waiter(exit)
                     }
+                    s.processTracker?.poke()
                 }
                 self.appControl.broadcast([
                     "event": "marker", "pane": s.id,
@@ -169,7 +211,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return sessions.first { $0.view === view }
     }
 
+    /// Bring `session`'s pane to the front within its window and make it first
+    /// responder. Used by the titlebar process-icon accessory to refocus the
+    /// pane the icon is describing after a tab switch.
+    private func focusPane(for session: TerminalSession) {
+        guard let win = session.view.window else { return }
+        win.makeFirstResponder(session.view)
+        win.makeKeyAndOrderFront(nil)
+    }
+
     private var titleOverrides: [ObjectIdentifier: String] = [:]
+    private var tabIconAccessories: [ObjectIdentifier: TabIconAccessory] = [:]
 
     /// Tab/window title: custom name if renamed, else the focused pane's
     /// title, plus the pane count when the tab holds more than one shell.
@@ -184,27 +236,75 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             base = focused.title
         }
         win.title = inWindow.count > 1 ? "\(base) (\(inWindow.count))" : base
+        win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
+        // also poke the accessory if the title changed in a way that affects it
+        tabIconAccessories[ObjectIdentifier(win)]?.refreshFromHost()
+    }
+
+    /// The foreground process for the focused pane in `win`, if any session
+    /// in the window is currently tracking one.
+    func foregroundProcessInfo(for win: NSWindow) -> ForegroundProcessInfo? {
+        let inWindow = sessions.filter { $0.view.window === win }
+        let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow.first
+        return focused?.processTracker?.current
+    }
+
+    /// Returns the user-facing "base" title for a window (the override if set,
+    /// otherwise whatever win.title currently shows). The " (N)" suffix that
+    /// updateTitle appends for multi-pane windows has already been written to
+    /// win.title by the time we look at it, so for the override path we use
+    /// the stored bare name; for the auto path we strip any " (N)" tail.
+    private func baseTitle(for win: NSWindow) -> String {
+        if let override = titleOverrides[ObjectIdentifier(win)] {
+            return override
+        }
+        let t = win.title
+        if let r = t.range(of: " \\(\\d+\\)$", options: .regularExpression) {
+            return String(t[..<r.lowerBound])
+        }
+        return t
     }
 
     @objc func renameTab(_ sender: Any?) {
-        guard let win = NSApp.keyWindow, win.tabbingIdentifier == "infinitty" else { return }
-        let alert = NSAlert()
-        alert.messageText = "Rename Tab"
-        alert.informativeText = "Leave empty to restore automatic titles."
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        field.stringValue = titleOverrides[ObjectIdentifier(win)] ?? ""
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
-        if name.isEmpty {
-            titleOverrides.removeValue(forKey: ObjectIdentifier(win))
+        guard let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
+              win.tabbingIdentifier == "infinitty" else { return }
+        beginInlineRename(for: win)
+    }
+
+    /// Show the inline rename UI over `win`'s titlebar. If a rename is
+    /// already in flight for some other window, commit it and replace it
+    /// rather than stack two UIs fighting over first responder.
+    func beginInlineRename(for win: NSWindow) {
+        // Dismiss any previous rename by committing — the user is now
+        // expressing intent on a (possibly different) target.
+        activeRename?.dismiss(committed: true)
+        activeRename = nil
+
+        // Use the stored override if set, otherwise derive the bare title
+        // (stripping any " (N)" pane-count suffix that updateTitle adds).
+        let current: String
+        if let override = titleOverrides[ObjectIdentifier(win)] {
+            current = override
         } else {
-            titleOverrides[ObjectIdentifier(win)] = name
+            current = self.baseTitle(for: win)
         }
-        updateTitle(for: win)
+        let field = TabRenameField(hostWindow: win, currentName: current)
+        field.onCommit = { [weak self, weak win, weak field] name in
+            guard let self, let win else { return }
+            if name.isEmpty {
+                self.titleOverrides.removeValue(forKey: ObjectIdentifier(win))
+            } else {
+                self.titleOverrides[ObjectIdentifier(win)] = name
+            }
+            self.updateTitle(for: win)
+            // Clear our ref if the panel still references itself.
+            if self.activeRename === field { self.activeRename = nil }
+        }
+        field.onCancel = { [weak self, weak field] in
+            if self?.activeRename === field { self?.activeRename = nil }
+        }
+        activeRename = field
+        field.present()
     }
 
     /// One pet per window (furthest bottom-right pane) unless pet-mode=pane.
@@ -356,6 +456,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         window.center()
+
+        // Process-icon accessory: only when the OS titlebar is actually visible.
+        // Bare-titlebar modes (transparent / hidden / custom traffic lights) make
+        // the titlebar invisible, so an accessory there would either be invisible
+        // or, worse, fight with the cell grid.
+        let useAccessory = !bareTitlebar && config.titlebarStyle == "native"
+        if useAccessory {
+            let acc = TabIconAccessory()
+            acc.titlebarShowsTitle = true
+            acc.onClick = { [weak self, weak session] in
+                guard let self, let session else { return }
+                self.focusPane(for: session)
+            }
+            acc.attach(to: window)
+            tabIconAccessories[ObjectIdentifier(window)] = acc
+        }
+
         return (window, session)
     }
 
@@ -713,7 +830,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     public func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
+        // If a rename is currently anchored to this window, cancel it so the
+        // monitors and panel don't outlive their host.
+        if activeRename != nil {
+            activeRename?.dismiss(committed: false)
+            activeRename = nil
+        }
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
+        tabIconAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
+        win.subtitle = ""
         let closing = sessions.filter { $0.view.window === win }
         for s in closing { s.shutdown() }
         sessions.removeAll { s in closing.contains { $0 === s } }

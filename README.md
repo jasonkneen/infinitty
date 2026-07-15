@@ -206,6 +206,10 @@ Font to use one everywhere.
   content and live in scrollback.
 - **Window dragging is titlebar-only**; drags in the grid always select.
   Right-click for context menu: copy/paste, 4-way splits, rename tab, reset.
+- **Rename the active tab**: ⌃-click **Rename Tab…** in the right-click menu,
+  or **double-click the titlebar** (the area where the active tab's title
+  is drawn). An inline field pops over the titlebar — ⏎ commits, ⎋ cancels,
+  empty restores the automatic title.
 - **⌘-click a .md path** opens it via `markdown-command` (default `glow -p`)
 - **Agent glow**: a pulsing inner border while an agent drives the pane over
   the control socket (disable with `agent-glow = false`)

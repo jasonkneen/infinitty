@@ -13,6 +13,8 @@ final class TerminalSession: NSObject {
 
     private(set) var title = "infinitty"
     var petAnimator: PetAnimator?
+    private(set) var processTracker: ForegroundProcessTracker?
+    private var lastForegroundPokeMs: Int64 = 0
     private var launched = false
     private var torndown = false
 
@@ -94,6 +96,12 @@ final class TerminalSession: NSObject {
         renderer.attach(view: view, layer: view.metalLayer, terminal: terminal)
         view.window?.layoutIfNeeded()
         pty.spawn(cols: terminal.cols, rows: terminal.rows, socketPath: control.path)
+        // Foreground process tracking starts once the shell PID is alive.
+        if pty.pid > 0 {
+            let tracker = ForegroundProcessTracker(shellPid: pty.pid)
+            tracker.start()
+            processTracker = tracker
+        }
     }
 
     /// Ask the shell to exit; the EOF path fires onExited for teardown.
@@ -107,6 +115,8 @@ final class TerminalSession: NSObject {
         torndown = true
         petAnimator?.stop()
         petAnimator = nil
+        processTracker?.stop()
+        processTracker = nil
         control.stop()
         renderer.shutdown()
         if pty.pid > 0 { kill(pty.pid, SIGHUP) }
