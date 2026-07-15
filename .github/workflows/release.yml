@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build universal binaries
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Assemble app bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BIN=.build/apple/Products/Release
+          scripts/make-app.sh "$BIN" "$VERSION" dist
+          cp "$BIN/infinitty-mcp" dist/
+
+      # --- Signing (only runs if the cert secret is configured) ---
+      - name: Import signing certificate
+        if: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PASS=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASS" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
+          security set-keychain-settings -t 3600 build.keychain
+          echo "$MAC_CERT_P12_BASE64" | base64 -d > cert.p12
+          security import cert.p12 -k build.keychain -P "$MAC_CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          rm cert.p12
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASS" build.keychain > /dev/null
+
+      - name: Sign
+        if: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+        env:
+          IDENTITY: "Developer ID Application: Jason Kneen (SW75ZJJ5R6)"
+        run: |
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-mcp
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
+          codesign -vvv --strict dist/Infinitty.app
+
+      # --- Notarization (only runs if Apple credentials are configured) ---
+      - name: Notarize & staple
+        if: ${{ secrets.APPLE_ID != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent dist/Infinitty.app notarize-app.zip
+          xcrun notarytool submit notarize-app.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple dist/Infinitty.app
+          ditto -c -k dist/infinitty-mcp notarize-mcp.zip
+          xcrun notarytool submit notarize-mcp.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="infinitty-$VERSION"
+          mkdir -p "pkg/$STAGE"
+          cp -R dist/Infinitty.app "pkg/$STAGE/"
+          cp dist/infinitty-mcp "pkg/$STAGE/"
+          cp -R shell-integration "pkg/$STAGE/"
+          cp infinitty.conf.example README.md "pkg/$STAGE/"
+          tar -czf "infinitty-$VERSION-macos.tar.gz" -C pkg "$STAGE"
+          shasum -a 256 "infinitty-$VERSION-macos.tar.gz" > "infinitty-$VERSION-macos.tar.gz.sha256"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            infinitty-*-macos.tar.gz \
+            infinitty-*-macos.tar.gz.sha256 \
+            --title "infinitty $GITHUB_REF_NAME" \
+            --generate-notes
+
+  npm:
+    name: Publish npm package
+    needs: release
+    if: ${{ secrets.NPM_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish @jasonkneen/infinitty
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version
+          npm publish --access public

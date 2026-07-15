@@ -112,11 +112,30 @@ claude mcp add infinitty -- ~/Documents/GitHub/infinitty/.build/release/infinitt
 `infinitty_run` is the headline: it types the command, waits for the OSC 133
 done-marker, and returns `{"exitCode": …, "output": …}` in one tool call.
 
-## Build & run
+## Install
+
+```sh
+npm install -g @jasonkneen/infinitty   # downloads release binaries
+infinitty
+```
+
+Or grab the tarball from [GitHub Releases](https://github.com/jasonkneen/infinitty/releases).
+
+## Build & run from source
 
 ```sh
 swift build -c release
 .build/release/infinitty
+```
+
+### Releasing
+
+Releases are automated: push a version tag and CI runs the tests, builds
+universal (arm64 + x86_64) binaries, publishes a GitHub release with the
+tarball + sha256, and publishes `@jasonkneen/infinitty` to npm.
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
 Requires macOS 14+ and Xcode command line tools. `$SHELL` is spawned as a

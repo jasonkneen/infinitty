@@ -2,3 +2,8 @@
 .swiftpm/
 *.xcodeproj
 .DS_Store
+dist-local/
+dist/
+npm/vendor/
+npm/*.tgz
+*.p12
