@@ -532,5 +532,26 @@ final class Renderer: NSObject {
             }
             flushRun(at: snap.cols)
         }
+
+        // Inline hint (ghost text): dim glyphs after the cursor, clipped to the
+        // line. Not real cells — purely an overlay.
+        if !snap.ghost.isEmpty, snap.cursorY < snap.rows {
+            let ghostColor = simd_mix(theme.background, theme.foreground, SIMD4<Float>(repeating: 0.42))
+            var col = snap.cursorX
+            let y = insetTop + Float(snap.cursorY) * ch
+            for scalar in snap.ghost.unicodeScalars {
+                if col >= snap.cols { break }
+                let u = scalar.value
+                if u > 0x20, let g = atlas.glyph(u, style: 0, wide: false) {
+                    let x = inset + Float(col) * cw
+                    glyphInst.append(GlyphInstance(
+                        origin: SIMD2<Float>(x - pad, y - pad),
+                        size: g.pxSize, uvOrigin: g.uvOrigin, uvSize: g.uvSize,
+                        color: SIMD4<Float>(ghostColor.x, ghostColor.y, ghostColor.z, 1)
+                    ))
+                }
+                col += 1
+            }
+        }
     }
 }

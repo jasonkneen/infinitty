@@ -50,6 +50,11 @@ struct AppConfig {
     var markdownCommand = "glow -p" // cmd-click on a .md path runs this
     var markdownRender = "off" // off | auto — auto-render command output via glow
     var autoUpdate = "check" // check | off — daily background update check
+    var hints = true // inline ghost-text command suggestions
+    var hintCommand: String? // custom async hint provider (script)
+    var aiBaseURL: String? // OpenAI-compatible endpoint for hints
+    var aiKey: String?
+    var aiModel: String?
     var agentGlow = true // pulsing inner glow while an agent drives the pane
     var sourcePath: String? // config file in use (for live reload)
 
@@ -206,6 +211,16 @@ struct AppConfig {
                 markdownRender = (v == "auto" || v == "on" || v == "true") ? "auto" : "off"
             case "auto-update", "updates":
                 autoUpdate = AppConfig.parseBool(value) || value.lowercased() == "check" ? "check" : "off"
+            case "hints":
+                hints = AppConfig.parseBool(value)
+            case "hint-command":
+                hintCommand = value
+            case "ai-base-url", "ai-endpoint":
+                aiBaseURL = value
+            case "ai-key", "ai-api-key":
+                aiKey = value
+            case "ai-model":
+                aiModel = value
             case "agent-glow":
                 agentGlow = AppConfig.parseBool(value)
             default:
@@ -270,6 +285,11 @@ struct AppConfig {
             if petMode != "window" { out += "pet-mode = pane\n" }
         }
         if !agentGlow { out += "agent-glow = false\n" }
+        if !hints { out += "hints = false\n" }
+        if let v = hintCommand, !v.isEmpty { out += "hint-command = \(v)\n" }
+        if let v = aiBaseURL, !v.isEmpty { out += "ai-base-url = \(v)\n" }
+        if let v = aiKey, !v.isEmpty { out += "ai-key = \(v)\n" }
+        if let v = aiModel, !v.isEmpty { out += "ai-model = \(v)\n" }
         if markdownCommand != "glow -p" { out += "markdown-command = \(markdownCommand)\n" }
         if markdownRender != "off" { out += "markdown-render = \(markdownRender)\n" }
         if notch {

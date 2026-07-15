@@ -42,3 +42,11 @@
 # markdown-render  = auto          # auto-render markdown command output via glow
 #                                   # (guarded: only completed, markdown-looking,
 #                                   #  on-screen output; skips TUIs/alt-screen)
+
+# inline AI hints (ghost text — Tab or → to accept)
+# hints        = true              # history + CLI specs + smart model
+# ai-base-url  = https://api.openai.com/v1   # optional OpenAI-compatible endpoint
+# ai-key       = sk-...            # (default is Apple Foundation Models, on-device)
+# ai-model     = gpt-4o-mini
+# hint-command = my-hint-script    # or a custom script: stdin=input, stdout=completion
+# NOTE: disable zsh-autosuggestions if you use infinitty's hints (they overlap).

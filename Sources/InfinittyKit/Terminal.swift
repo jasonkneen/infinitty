@@ -14,6 +14,7 @@ struct TermSnapshot {
     var cursorVisible = false
     var scrolledBack = false
     var images: [SnapImage] = []
+    var ghost = ""       // dim inline suggestion drawn after the cursor
 }
 
 /// A visible inline image for the renderer (OSC 1337).
@@ -151,6 +152,17 @@ final class Terminal {
 
     private var markers: [Marker] = []
     private var sbAppended = 0 // total rows ever pushed to scrollback
+
+    // MARK: inline hint (ghost text) state
+
+    /// Returns a completion for the current input, or nil. Called on the PTY
+    /// thread after input changes; must be fast (history match, cached).
+    var hintProvider: ((String) -> String?)?
+    private var inputActive = false
+    private var promptLine = 0   // absolute line of input start (OSC 133 B)
+    private var promptCol = 0
+    private var ghostText = ""
+    private var lastHintInput = ""
 
     // MARK: selection & link highlight (absolute content coordinates)
 
@@ -298,6 +310,7 @@ final class Terminal {
                 i += 1
             }
         }
+        updateHint()
         generation &+= 1
         let out = pendingOutput
         pendingOutput.removeAll(keepingCapacity: true)
@@ -365,6 +378,8 @@ final class Terminal {
         snap.cursorY = viewY
         snap.cursorVisible = cursorVisible && viewY < rows
         snap.scrolledBack = offset > 0
+        // Ghost text renders after the cursor, only on the live screen.
+        snap.ghost = (offset == 0 && !usingAlt) ? ghostText : ""
 
         snap.images.removeAll(keepingCapacity: true)
         if !images.isEmpty && !usingAlt {
@@ -1617,6 +1632,18 @@ final class Terminal {
             markers.removeFirst(markers.count - 256)
         }
 
+        // Input tracking for inline hints: B = input begins, C = command runs.
+        if kind == UInt8(ascii: "B") {
+            inputActive = true
+            promptLine = sbAppended + cy
+            promptCol = cx
+            ghostText = ""
+            lastHintInput = ""
+        } else if kind == UInt8(ascii: "C") || kind == UInt8(ascii: "D") {
+            inputActive = false
+            ghostText = ""
+        }
+
         // Auto markdown: at command completion, if the output looks like
         // markdown and is on-screen, re-render it through glow in place.
         if kind == UInt8(ascii: "D"), markdownAuto, !usingAlt {
@@ -1707,6 +1734,75 @@ final class Terminal {
             out.append(b)
         }
         return out
+    }
+
+    // MARK: - inline hint (ghost text)
+
+    /// Current typed input: text from the prompt (OSC 133 B) to the cursor.
+    /// Only valid while inputActive and the cursor is on/after the prompt line.
+    private func currentInputLocked() -> String? {
+        guard inputActive else { return nil }
+        let curAbs = sbAppended + cy
+        guard curAbs >= promptLine else { return nil }
+        // Single-line input (the overwhelmingly common case).
+        if curAbs == promptLine {
+            guard cx >= promptCol, let row = rowAtAbsoluteLine(promptLine) else { return nil }
+            var s = ""
+            for c in promptCol..<min(cx, row.count) {
+                if row[c].flags & CellFlags.wideContinuation != 0 { continue }
+                if row[c].glyph != 0, let u = Unicode.Scalar(row[c].glyph) {
+                    s.unicodeScalars.append(u)
+                } else {
+                    s.append(" ")
+                }
+            }
+            return s
+        }
+        // Wrapped input across lines.
+        return textBetween(startLine: promptLine, startCol: promptCol, endLine: curAbs, endCol: cx)
+    }
+
+    /// Recompute the ghost suggestion after input changes. Fast path: skip when
+    /// the input is unchanged. Only suggests when the cursor is at the end of a
+    /// non-trivial input line (avoids mid-edit noise).
+    private func updateHint() {
+        guard hintProvider != nil, inputActive else {
+            if !ghostText.isEmpty { ghostText = "" }
+            return
+        }
+        guard let input = currentInputLocked() else {
+            ghostText = ""
+            return
+        }
+        if input == lastHintInput { return } // unchanged
+        lastHintInput = input
+        guard input.count >= 2, !input.hasSuffix(" ") else {
+            ghostText = ""
+            return
+        }
+        if let full = hintProvider?(input), full.hasPrefix(input), full.count > input.count {
+            ghostText = String(full.dropFirst(input.count))
+        } else {
+            ghostText = ""
+        }
+    }
+
+    /// The ghost suggestion for the renderer (empty if none).
+    var currentGhost: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return ghostText
+    }
+
+    /// Consume the current ghost suggestion (Tab/Right accept). Returns the
+    /// bytes to send to the pty (the un-typed remainder), or nil.
+    func acceptHint() -> [UInt8]? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard inputActive, !ghostText.isEmpty else { return nil }
+        let bytes = Array(ghostText.utf8)
+        ghostText = ""
+        return bytes
     }
 
     // MARK: - agent/tooling text extraction (control socket)

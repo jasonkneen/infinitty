@@ -61,10 +61,30 @@ final class TerminalSession: NSObject {
         applyMarkdownConfig(config)
     }
 
+    private var hintEngine: HintEngine?
+
     /// Push markdown-render settings into the terminal (launch + live reload).
     func applyMarkdownConfig(_ config: AppConfig) {
         terminal.markdownAuto = config.markdownRender == "auto"
         terminal.markdownCommand = config.markdownCommand
+        applyHintConfig(config)
+    }
+
+    /// Inline hints: history + CLI specs + a smart async source (Foundation
+    /// Models by default, or a configured OpenAI-compatible endpoint / command).
+    func applyHintConfig(_ config: AppConfig) {
+        guard config.hints else {
+            hintEngine = nil
+            terminal.hintProvider = nil
+            return
+        }
+        let smart = HintEngine.resolveSmart(
+            hints: true, hintCommand: config.hintCommand,
+            aiBaseURL: config.aiBaseURL, aiKey: config.aiKey, aiModel: config.aiModel)
+        let engine = HintEngine(smart: smart)
+        engine.onAsyncSuggestion = { [weak self] in self?.terminal.touch() }
+        hintEngine = engine
+        terminal.hintProvider = { [weak engine] input in engine?.suggest(input) }
     }
 
     /// Call once the view is inside a window (display link needs it).

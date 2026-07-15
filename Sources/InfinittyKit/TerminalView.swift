@@ -180,6 +180,14 @@ final class TerminalView: NSView {
     // MARK: - keyboard
 
     override func keyDown(with event: NSEvent) {
+        // Accept an inline hint with Tab or Right-arrow (when one is showing).
+        if event.keyCode == 48 || event.keyCode == 124, // Tab or →
+           !event.modifierFlags.contains(.shift),
+           let accepted = terminal.acceptHint(), !accepted.isEmpty {
+            pty.write(accepted)
+            renderer.poke()
+            return
+        }
         guard let bytes = encodeKey(event), !bytes.isEmpty else { return }
         terminal.userDidInput()
         pty.write(bytes)

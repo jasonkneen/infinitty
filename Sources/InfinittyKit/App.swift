@@ -71,6 +71,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 .link: url, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: center,
             ])
         }
+        credits.append(link("infinitty.ai", "https://infinitty.ai"))
+        credits.append(NSAttributedString(string: "      ", attributes: base))
         credits.append(link("GitHub", "https://github.com/jasonkneen"))
         credits.append(NSAttributedString(string: "      ", attributes: base))
         credits.append(link("X", "https://x.com/jasonkneen"))

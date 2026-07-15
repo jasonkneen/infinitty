@@ -217,11 +217,16 @@ final class SettingsWindowController: NSWindowController {
             action: Selector(("checkForUpdates:")))
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .small
+        let editConfigButton = NSButton(title: "Edit Config…", target: self,
+            action: #selector(editConfig))
+        editConfigButton.bezelStyle = .rounded
+        editConfigButton.controlSize = .small
+        editConfigButton.toolTip = "Open the config file (fonts, colors, AI endpoint, …) in your editor"
         let versionRow = NSStackView(views: [
             versionLabel, byLabel,
             linkButton("GitHub", "https://github.com/jasonkneen"),
             linkButton("X", "https://x.com/jasonkneen"),
-            NSView(), updateButton,
+            NSView(), editConfigButton, updateButton,
         ])
         versionRow.orientation = .horizontal
         versionRow.spacing = 10
@@ -345,6 +350,17 @@ final class SettingsWindowController: NSWindowController {
         kernValue.stringValue = String(format: "%.2f×", kernSlider.doubleValue)
         opacityValue.stringValue = String(format: "%.0f%%", opacitySlider.doubleValue * 100)
         petScaleValue.stringValue = String(format: "%.2f×", petScaleSlider.doubleValue)
+    }
+
+    @objc private func editConfig() {
+        let path = current.writePath
+        let dir = (path as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: path) {
+            // Seed with the current settings so there's something to edit.
+            try? current.serialize().write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
     @objc private func applyPressed() {
