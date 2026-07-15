@@ -11,6 +11,9 @@ jobs:
   release:
     name: Build & Release
     runs-on: macos-14
+    env:
+      HAS_CERT: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+      HAS_APPLE: ${{ secrets.APPLE_ID != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +32,7 @@ jobs:
 
       # --- Signing (only runs if the cert secret is configured) ---
       - name: Import signing certificate
-        if: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+        if: ${{ env.HAS_CERT == 'true' }}
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
@@ -47,7 +50,7 @@ jobs:
             -s -k "$KEYCHAIN_PASS" build.keychain > /dev/null
 
       - name: Sign
-        if: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+        if: ${{ env.HAS_CERT == 'true' }}
         env:
           IDENTITY: "Developer ID Application: Jason Kneen (SW75ZJJ5R6)"
         run: |
@@ -57,7 +60,7 @@ jobs:
 
       # --- Notarization (only runs if Apple credentials are configured) ---
       - name: Notarize & staple
-        if: ${{ secrets.APPLE_ID != '' }}
+        if: ${{ env.HAS_APPLE == 'true' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -98,8 +101,9 @@ jobs:
   npm:
     name: Publish npm package
     needs: release
-    if: ${{ secrets.NPM_TOKEN != '' }}
     runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -107,6 +111,7 @@ jobs:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
       - name: Publish @jasonkneen/infinitty
+        if: ${{ env.NPM_TOKEN != '' }}
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
