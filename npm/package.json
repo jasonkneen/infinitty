@@ -1,12 +1,21 @@
 {
   "name": "@jasonkneen/infinitty",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "description": "infinitty — the agent-native GPU terminal for macOS. Installs the app, the MCP server, and shell integration.",
-  "keywords": ["terminal", "macos", "metal", "mcp", "agent", "tty"],
+  "keywords": [
+    "terminal",
+    "macos",
+    "metal",
+    "mcp",
+    "agent",
+    "tty"
+  ],
   "repository": "github:jasonkneen/infinitty",
   "homepage": "https://github.com/jasonkneen/infinitty",
   "license": "MIT",
-  "os": ["darwin"],
+  "os": [
+    "darwin"
+  ],
   "bin": {
     "infinitty": "bin/infinitty.js",
     "infinitty-mcp": "bin/infinitty-mcp.js"
@@ -14,5 +23,9 @@
   "scripts": {
     "postinstall": "node install.js"
   },
-  "files": ["bin", "install.js", "README.md"]
+  "files": [
+    "bin",
+    "install.js",
+    "README.md"
+  ]
 }
