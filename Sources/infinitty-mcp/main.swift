@@ -147,14 +147,30 @@ let tools: [Tool] = [
     Tool(
         name: "infinitty_new_tab",
         description: "Open a new infinitty tab. Returns the new pane id.",
-        schema: ["type": "object", "properties": [:]],
-        invoke: { _ in infinittyRequest("new-tab") }
+        schema: [
+            "type": "object",
+            "properties": [
+                "cwd": ["type": "string", "description": "Shell starting directory (absolute path)"],
+            ],
+        ],
+        invoke: { args in
+            let cwd = args["cwd"] as? String ?? ""
+            return infinittyRequest(cwd.isEmpty ? "new-tab" : "new-tab \(cwd)")
+        }
     ),
     Tool(
         name: "infinitty_new_window",
         description: "Open a new infinitty window. Returns the new pane id.",
-        schema: ["type": "object", "properties": [:]],
-        invoke: { _ in infinittyRequest("new-window") }
+        schema: [
+            "type": "object",
+            "properties": [
+                "cwd": ["type": "string", "description": "Shell starting directory (absolute path)"],
+            ],
+        ],
+        invoke: { args in
+            let cwd = args["cwd"] as? String ?? ""
+            return infinittyRequest(cwd.isEmpty ? "new-window" : "new-window \(cwd)")
+        }
     ),
     Tool(
         name: "infinitty_split",

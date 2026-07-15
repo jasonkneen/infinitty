@@ -55,6 +55,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var activeRename: TabRenameField?
     /// Local mouse monitor that turns titlebar double-clicks into inline rename.
     private var titlebarClickMonitor: Any?
+    /// Shell cwd for the first window — set from a folder argv (GitHub
+    /// Desktop et al.) before run(), or by an open-folder event that arrives
+    /// during launch.
+    public var initialWorkingDirectory: String?
+    private var launchCompleted = false
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
@@ -62,7 +67,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self?.handleAppRequest(request) ?? "error: shutting down"
         }
         appControl.start()
-        newWindow(nil)
+        openWindow(cwd: initialWorkingDirectory)
+        launchCompleted = true
         watchConfigFile()
         if config.notch { notch.show(display: config.notchDisplay) }
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
@@ -154,6 +160,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    /// Finder / `open -a Infinitty <folder>` / folder dropped on the Dock
+    /// icon: open a tab there (a file opens at its parent directory). Events
+    /// that arrive before launch finishes seed the first window instead.
+    public func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.isFileURL {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+                continue
+            }
+            let dir = isDir.boolValue ? url.path : (url.path as NSString).deletingLastPathComponent
+            if launchCompleted {
+                openTab(cwd: dir)
+                NSApp.activate(ignoringOtherApps: true)
+            } else {
+                initialWorkingDirectory = dir
+            }
+        }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -382,9 +407,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     // MARK: - windows & tabs
 
     @discardableResult
-    private func makeTerminalWindow() -> (NSWindow, TerminalSession) {
+    private func makeTerminalWindow(cwd: String? = nil) -> (NSWindow, TerminalSession) {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let session = createSession(scale: scale)
+        session.workingDirectory = cwd
 
         let cell = session.renderer.cellSizePoints
         let inset = session.renderer.insetPoints
@@ -491,13 +517,40 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func newWindow(_ sender: Any?) {
-        let (window, session) = makeTerminalWindow()
+        openWindow(cwd: nil)
+    }
+
+    @discardableResult
+    private func openWindow(cwd: String?) -> TerminalSession {
+        let (window, session) = makeTerminalWindow(cwd: cwd)
         window.makeKeyAndOrderFront(nil)
         session.launch()
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
         }
+        return session
+    }
+
+    /// Human-initiated tab at a directory (open-folder events): joins the
+    /// key window, or the first terminal window, and takes focus — unlike
+    /// the socket new-tab, which never steals it.
+    @discardableResult
+    private func openTab(cwd: String?) -> TerminalSession {
+        let key = NSApp.keyWindow.flatMap { $0.tabbingIdentifier == "infinitty" ? $0 : nil }
+        guard let host = key ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" })
+        else {
+            return openWindow(cwd: cwd)
+        }
+        let (window, session) = makeTerminalWindow(cwd: cwd)
+        host.addTabbedWindow(window, ordered: .above)
+        window.makeKeyAndOrderFront(nil)
+        session.launch()
+        DispatchQueue.main.async {
+            self.refreshPets()
+            self.updateTitle(for: window)
+        }
+        return session
     }
 
     @objc func newTab(_ sender: Any?) {
@@ -651,8 +704,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let data = (try? JSONSerialization.data(withJSONObject: panes)) ?? Data("[]".utf8)
             return String(decoding: data, as: UTF8.self)
         case "new-window":
+            let trimmed = arg.trimmingCharacters(in: .whitespaces)
+            var cwd: String?
+            if !trimmed.isEmpty {
+                guard let dir = LaunchOptions.workingDirectory(from: [trimmed]) else {
+                    return "error: no such directory: \(trimmed)"
+                }
+                cwd = dir
+            }
             let id = onMain { () -> Int in
-                let (window, session) = self.makeTerminalWindow()
+                let (window, session) = self.makeTerminalWindow(cwd: cwd)
                 // orderFront, NOT makeKey: an agent creating a pane must never
                 // steal keyboard focus from whatever the user is typing in.
                 window.orderFront(nil)
@@ -665,11 +726,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
             return id.map(String.init) ?? "error: could not create window"
         case "new-tab":
+            let trimmed = arg.trimmingCharacters(in: .whitespaces)
+            var cwd: String?
+            if !trimmed.isEmpty {
+                guard let dir = LaunchOptions.workingDirectory(from: [trimmed]) else {
+                    return "error: no such directory: \(trimmed)"
+                }
+                cwd = dir
+            }
             let id = onMain { () -> Int? in
                 guard let host = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else {
                     return nil
                 }
-                let (window, session) = self.makeTerminalWindow()
+                let (window, session) = self.makeTerminalWindow(cwd: cwd)
                 host.addTabbedWindow(window, ordered: .above)
                 // Do not select/key the new tab — keep the user's focus put.
                 session.launch()

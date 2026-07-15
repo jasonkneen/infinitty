@@ -15,16 +15,19 @@ final class PTY {
     private let writeQueue = DispatchQueue(label: "infinitty.pty.write", qos: .userInitiated)
     private var readThread: Thread?
 
-    func spawn(cols: Int, rows: Int, socketPath: String? = nil) {
+    func spawn(cols: Int, rows: Int, socketPath: String? = nil, cwd: String? = nil) {
         var ws = winsize(
             ws_row: UInt16(rows), ws_col: UInt16(cols),
             ws_xpixel: 0, ws_ypixel: 0
         )
         var master: Int32 = -1
-        let child = cpty_spawn_shell(&master, &ws, socketPath)
+        let child = cpty_spawn_shell(&master, &ws, socketPath, cwd)
         guard child > 0, master >= 0 else {
             fatalError("infinitty: failed to spawn shell (forkpty)")
         }
+        // CLOEXEC: shells spawned later for other panes must not inherit
+        // this master fd (forkpty leaves it inheritable).
+        _ = fcntl(master, F_SETFD, FD_CLOEXEC)
         fd = master
         pid = child
 

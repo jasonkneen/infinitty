@@ -10,8 +10,9 @@ import Foundation
 ///   ping                     -> pong
 ///   version                  -> infinitty <version>
 ///   list                     -> JSON array of panes (id, title, focused, …)
-///   new-window               -> pane id of the new window's session
-///   new-tab                  -> pane id (tab of the key window)
+///   new-window [dir]         -> pane id of the new window's session
+///   new-tab [dir]            -> pane id (tab of the key window); optional
+///                               dir = shell starting directory
 ///   split <id> right|left|down|up -> pane id of the new split
 ///   focus <id>               -> ok (raises + focuses the pane)
 ///   close <id>               -> ok (terminates the pane's shell)
@@ -70,6 +71,7 @@ final class AppControlServer {
             return
         }
         chmod(path, 0o600)
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         listenFD = fd
 
         // Stable discovery path for external apps.
@@ -116,6 +118,10 @@ final class AppControlServer {
                 if errno == EINTR { continue }
                 break
             }
+            // CLOEXEC: new-tab/new-window/split fork shells mid-request; an
+            // inherited client fd would hold the connection open (no EOF)
+            // until that shell exits.
+            _ = fcntl(client, F_SETFD, FD_CLOEXEC)
             let thread = Thread { [weak self] in self?.handle(client) }
             thread.name = "infinitty-app-client"
             thread.qualityOfService = .utility

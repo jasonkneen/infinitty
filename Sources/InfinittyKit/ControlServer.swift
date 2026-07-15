@@ -67,6 +67,7 @@ final class ControlServer {
             return
         }
         chmod(path, 0o600)
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         listenFD = fd
 
         let thread = Thread { [weak self] in self?.acceptLoop() }
@@ -92,6 +93,10 @@ final class ControlServer {
                 if errno == EINTR { continue }
                 break
             }
+            // CLOEXEC: a shell forked mid-request must not inherit the
+            // client fd — a leaked copy keeps the connection open (no EOF)
+            // for as long as that shell lives.
+            _ = fcntl(client, F_SETFD, FD_CLOEXEC)
             // One thread per client: a stalled connection can't block the
             // control plane. Read/write deadlines bound each thread's life.
             let thread = Thread { [weak self] in

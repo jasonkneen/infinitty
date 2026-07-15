@@ -22,7 +22,7 @@ static const char *overridden(const char *entry) {
 }
 
 pid_t cpty_spawn_shell(int *amaster, const struct winsize *ws,
-                       const char *socket_path) {
+                       const char *socket_path, const char *cwd) {
     /* Prepare argv and envp entirely before fork. The app has live worker
        threads, so the forked child may only call async-signal-safe
        functions (execve, _exit) before exec. */
@@ -75,6 +75,10 @@ pid_t cpty_spawn_shell(int *amaster, const struct winsize *ws,
     struct winsize wsz = *ws;
     pid_t pid = forkpty(amaster, NULL, NULL, &wsz);
     if (pid == 0) {
+        /* chdir is async-signal-safe; on failure keep the inherited cwd. */
+        if (cwd && *cwd) {
+            (void)chdir(cwd);
+        }
         execve(shell, argv, envp);
         _exit(127);
     }

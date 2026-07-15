@@ -53,6 +53,15 @@ a tab at that folder via `application(_:open:)` + a `public.folder`
    `/Applications/Infinitty.app/Contents/MacOS/infinitty`, Arguments
    `%TARGET_PATH%`.
 
+## Discovered during implementation
+
+Shells forked by socket-triggered `new-tab`/`new-window`/`split` inherited
+the accepted client socket fd, holding the connection open (no EOF) until
+that shell exited — raw `nc` hung forever after a spawn command. Fixed with
+`FD_CLOEXEC` on listen + client fds in both control servers and on the pty
+master; `AppSocketClient` additionally stops reading at the first newline so
+forwarding stays instant even against an older running server.
+
 ## Out of scope
 
 ⌘T inheriting the current pane's cwd; a `--new-window` flag; `split` cwd.

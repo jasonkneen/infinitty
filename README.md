@@ -115,6 +115,28 @@ claude mcp add infinitty -- ~/Documents/GitHub/infinitty/.build/release/infinitt
 `infinitty_run` is the headline: it types the command, waits for the OSC 133
 done-marker, and returns `{"exitCode": …, "output": …}` in one tool call.
 
+## Open a folder from anywhere
+
+infinitty takes a folder argument — the shell starts there:
+
+```sh
+infinitty ~/Documents/GitHub/myrepo
+```
+
+If infinitty is already running, the folder opens as a new tab in the
+current window (instant — the argument is forwarded over the control
+socket). `open -a Infinitty <folder>` and dropping a folder on the Dock
+icon do the same. The socket commands take an optional directory too:
+`new-tab [dir]`, `new-window [dir]`.
+
+**GitHub Desktop** — Settings → Integrations → Shell → Configure Custom
+Shell…:
+
+- **Path**: `/Applications/Infinitty.app/Contents/MacOS/infinitty` — the
+  binary inside the bundle; Desktop rejects the `.app` itself as "not a
+  valid executable"
+- **Arguments**: `%TARGET_PATH%`
+
 ## Install
 
 ```sh

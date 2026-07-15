@@ -12,6 +12,9 @@ final class TerminalSession: NSObject {
     let control: ControlServer
 
     private(set) var title = "infinitty"
+    /// Shell starting directory; set before launch() (folder launches, socket
+    /// new-tab/new-window with a path).
+    var workingDirectory: String?
     var petAnimator: PetAnimator?
     private(set) var processTracker: ForegroundProcessTracker?
     private var lastForegroundPokeMs: Int64 = 0
@@ -95,7 +98,9 @@ final class TerminalSession: NSObject {
         launched = true
         renderer.attach(view: view, layer: view.metalLayer, terminal: terminal)
         view.window?.layoutIfNeeded()
-        pty.spawn(cols: terminal.cols, rows: terminal.rows, socketPath: control.path)
+        pty.spawn(
+            cols: terminal.cols, rows: terminal.rows,
+            socketPath: control.path, cwd: workingDirectory)
         // Foreground process tracking starts once the shell PID is alive.
         if pty.pid > 0 {
             let tracker = ForegroundProcessTracker(shellPid: pty.pid)
