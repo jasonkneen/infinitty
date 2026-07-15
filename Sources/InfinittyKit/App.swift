@@ -54,6 +54,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         updater.check(userInitiated: true)
     }
 
+    @objc func showAbout(_ sender: Any?) {
+        let credits = NSMutableAttributedString()
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        center.paragraphSpacing = 6
+        let base: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: center,
+        ]
+        credits.append(NSAttributedString(
+            string: "The agent-native GPU terminal for macOS.\nby Jason Kneen\n\n", attributes: base))
+        func link(_ text: String, _ url: String) -> NSAttributedString {
+            NSAttributedString(string: text, attributes: [
+                .link: url, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: center,
+            ])
+        }
+        credits.append(link("GitHub", "https://github.com/jasonkneen"))
+        credits.append(NSAttributedString(string: "      ", attributes: base))
+        credits.append(link("X", "https://x.com/jasonkneen"))
+
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: credits,
+            .applicationName: "infinitty",
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "© Jason Kneen",
+        ])
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func showUpdateIndicator(version: String) {
         for win in NSApp.windows where win.tabbingIdentifier == "infinitty" {
             guard let content = win.contentView,
@@ -696,6 +725,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(
+            withTitle: "About infinitty",
+            action: #selector(AppDelegate.showAbout(_:)),
+            keyEquivalent: ""
+        )
         appMenu.addItem(
             withTitle: "Check for Updates…",
             action: #selector(AppDelegate.checkForUpdates(_:)),

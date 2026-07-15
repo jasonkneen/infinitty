@@ -1,27 +1,34 @@
 import AppKit
 
-/// Subtle "update available" pill, top-right of the window. Muted until
-/// hovered; click to open the update prompt.
+/// Subtle "update available" chip, tucked into the top-right corner. Compact,
+/// centered, lightly rounded. Click to open the update prompt.
 final class UpdateIndicatorView: NSView {
     var onClick: (() -> Void)?
     private let label = NSTextField(labelWithString: "")
     private var hovering = false
+    private let accent = NSColor(srgbRed: 0.40, green: 0.78, blue: 0.60, alpha: 1)
+    private let h: CGFloat = 15
 
     init(version: String) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 96, height: 22))
+        super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 11
-        layer?.borderWidth = 1
+        layer?.cornerRadius = 4                 // less rounded than a capsule
+        layer?.masksToBounds = true
 
         label.stringValue = "↑ \(version)"
-        label.font = .systemFont(ofSize: 11, weight: .medium)
-        label.alignment = .center
-        label.frame = bounds
-        label.autoresizingMask = [.width, .height]
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.alignment = .center               // centered text
         label.isEditable = false
         label.isBezeled = false
         label.drawsBackground = false
+        label.textColor = accent
         addSubview(label)
+
+        // Snug width: just the text plus a little side padding.
+        let textW = ceil(label.attributedStringValue.size().width)
+        setFrameSize(NSSize(width: textW + 12, height: h))
+        label.frame = bounds
+        label.autoresizingMask = [.width, .height]
         applyStyle()
         toolTip = "Update available — click to install"
     }
@@ -29,9 +36,7 @@ final class UpdateIndicatorView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func applyStyle() {
-        let accent = NSColor(srgbRed: 0.36, green: 0.72, blue: 0.55, alpha: 1) // soft green
-        layer?.backgroundColor = accent.withAlphaComponent(hovering ? 0.28 : 0.14).cgColor
-        layer?.borderColor = accent.withAlphaComponent(hovering ? 0.9 : 0.45).cgColor
+        layer?.backgroundColor = accent.withAlphaComponent(hovering ? 0.24 : 0.14).cgColor
         label.textColor = accent.withAlphaComponent(hovering ? 1.0 : 0.85)
     }
 
@@ -46,11 +51,11 @@ final class UpdateIndicatorView: NSView {
     override func mouseExited(with event: NSEvent) { hovering = false; applyStyle() }
     override func mouseDown(with event: NSEvent) { onClick?() }
 
-    /// Position in the top-right of a host content view, below the titlebar inset.
+    /// Pin to the top-right corner, tight under the titlebar inset.
     func place(in host: NSView, topInset: CGFloat) {
         frame.origin = NSPoint(
-            x: host.bounds.width - frame.width - 10,
-            y: host.bounds.height - frame.height - max(topInset, 6) - 4
+            x: host.bounds.width - frame.width - 8,
+            y: host.bounds.height - h - max(topInset, 4) - 3
         )
         autoresizingMask = [.minXMargin, .minYMargin]
     }

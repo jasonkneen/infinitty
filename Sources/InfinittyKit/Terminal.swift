@@ -1655,19 +1655,8 @@ final class Terminal {
         guard startRow >= 0, startRow < rows, d.line - c.line <= 300 else { return }
 
         let text = textBetween(startLine: c.line, startCol: c.col, endLine: d.line, endCol: d.col)
-        if ProcessInfo.processInfo.environment["INFINITTY_MD_DEBUG"] != nil {
-            FileHandle.standardError.write(Data("MD: startRow=\(startRow) len=\(text.count) md=\(looksLikeMarkdown(text))\n".utf8))
-        }
-        guard !text.isEmpty, looksLikeMarkdown(text) else { return }
-        guard let rendered = Terminal.runGlow(markdownCommand, input: text) else {
-            if ProcessInfo.processInfo.environment["INFINITTY_MD_DEBUG"] != nil {
-                FileHandle.standardError.write(Data("MD: glow returned nil\n".utf8))
-            }
-            return
-        }
-        if ProcessInfo.processInfo.environment["INFINITTY_MD_DEBUG"] != nil {
-            FileHandle.standardError.write(Data("MD: glow ok, \(rendered.count) bytes\n".utf8))
-        }
+        guard !text.isEmpty, looksLikeMarkdown(text),
+              let rendered = Terminal.runGlow(markdownCommand, input: text) else { return }
 
         // Erase the raw output region and re-emit glow's ANSI at its start.
         // We're being called mid-OSC-dispatch, so force the parser back to

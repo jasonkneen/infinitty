@@ -120,8 +120,27 @@ final class Updater {
     private func promptUpdate(_ release: Release, current: String) {
         let a = NSAlert()
         a.messageText = "infinitty \(release.version) is available"
-        a.informativeText = "You have \(current).\n\n"
-            + String(release.notes.prefix(600))
+        a.informativeText = "You have \(current)."
+
+        // Rich, scrollable release notes.
+        if !release.notes.isEmpty {
+            let width: CGFloat = 420
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: 220))
+            scroll.hasVerticalScroller = true
+            scroll.drawsBackground = false
+            scroll.borderType = .noBorder
+            let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: 10))
+            tv.isEditable = false
+            tv.isSelectable = true
+            tv.drawsBackground = false
+            tv.textContainerInset = NSSize(width: 4, height: 4)
+            tv.textStorage?.setAttributedString(MarkdownRender.attributed(release.notes, width: width))
+            tv.textContainer?.containerSize = NSSize(width: width - 8, height: .greatestFiniteMagnitude)
+            tv.textContainer?.widthTracksTextView = true
+            scroll.documentView = tv
+            a.accessoryView = scroll
+        }
+
         a.addButton(withTitle: release.tarballURL != nil ? "Install & Relaunch" : "Download")
         a.addButton(withTitle: "Release Notes")
         a.addButton(withTitle: "Later")

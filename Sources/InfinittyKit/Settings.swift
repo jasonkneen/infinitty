@@ -1,9 +1,21 @@
 import AppKit
 
+/// Opens an associated URL when its button is clicked.
+final class LinkOpener: NSObject {
+    @objc func open(_ sender: NSButton) {
+        if let url = objc_getAssociatedObject(sender, &SettingsWindowController.urlKey) as? String,
+           let u = URL(string: url) {
+            NSWorkspace.shared.open(u)
+        }
+    }
+}
+
 /// Settings window (⌘,). Controls edit the config *file* and rely on the
 /// live-reload watcher, so every change applies to all panes immediately and
 /// persists. Saving regenerates the managed config file.
 final class SettingsWindowController: NSWindowController {
+    static let linkOpener = LinkOpener()
+    static var urlKey: UInt8 = 0
     private var current: AppConfig
     private let onSave: (AppConfig) -> Void
 
@@ -179,17 +191,40 @@ final class SettingsWindowController: NSWindowController {
         footer.spacing = 16
         footer.alignment = .centerY
 
-        // Version + update check.
+        // Version, author, links + update check.
         let versionLabel = NSTextField(labelWithString: "infinitty \(Updater.currentVersion ?? "dev build")")
         versionLabel.font = .systemFont(ofSize: 11, weight: .medium)
         versionLabel.textColor = .secondaryLabelColor
+        let byLabel = NSTextField(labelWithString: "by Jason Kneen")
+        byLabel.font = .systemFont(ofSize: 11)
+        byLabel.textColor = .tertiaryLabelColor
+        func linkButton(_ title: String, _ url: String) -> NSButton {
+            let b = NSButton(title: title, target: nil, action: nil)
+            b.isBordered = false
+            b.contentTintColor = .linkColor
+            b.font = .systemFont(ofSize: 11)
+            b.attributedTitle = NSAttributedString(string: title, attributes: [
+                .foregroundColor: NSColor.linkColor, .font: NSFont.systemFont(ofSize: 11),
+                .link: url,
+            ])
+            b.target = SettingsWindowController.linkOpener
+            b.action = #selector(LinkOpener.open(_:))
+            b.toolTip = url
+            objc_setAssociatedObject(b, &SettingsWindowController.urlKey, url, .OBJC_ASSOCIATION_RETAIN)
+            return b
+        }
         let updateButton = NSButton(title: "Check for Updates…", target: nil,
             action: Selector(("checkForUpdates:")))
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .small
-        let versionRow = NSStackView(views: [versionLabel, updateButton])
+        let versionRow = NSStackView(views: [
+            versionLabel, byLabel,
+            linkButton("GitHub", "https://github.com/jasonkneen"),
+            linkButton("X", "https://x.com/jasonkneen"),
+            NSView(), updateButton,
+        ])
         versionRow.orientation = .horizontal
-        versionRow.spacing = 12
+        versionRow.spacing = 10
         versionRow.alignment = .centerY
 
         let stack = NSStackView(views: [
