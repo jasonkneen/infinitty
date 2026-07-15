@@ -1,5 +1,6 @@
 .build/
 .swiftpm/
+.foglamp/
 *.xcodeproj
 .DS_Store
 dist-local/

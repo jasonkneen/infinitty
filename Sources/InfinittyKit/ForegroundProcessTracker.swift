@@ -99,13 +99,15 @@ public final class ForegroundProcessTracker {
         // 1) find direct children of the shell
         var buf = [pid_t](repeating: 0, count: 256)
         let n = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            // proc_listchildpids returns the count of PIDs, not bytes — pass the
+            // full buffer's bytes for capacity but ignore the size when decoding.
             proc_listchildpids(shellPid, ptr.baseAddress, Int32(MemoryLayout<pid_t>.stride * ptr.count))
         }
-        guard n > 0 else {
-            // shell at prompt — report the shell itself
+        if n <= 0 {
+            // shell at prompt, or transient ETIMEDOUT — report the shell itself
             return makeInfo(pid: shellPid)
         }
-        let childCount = Int(n) / MemoryLayout<pid_t>.stride
+        let childCount = Int(n)
         // 2) pick the highest-pid direct child — that's usually the foreground job
         var bestPid: pid_t = 0
         for i in 0..<childCount where buf[i] > 1 {

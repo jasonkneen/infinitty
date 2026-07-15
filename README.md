@@ -210,6 +210,12 @@ Font to use one everywhere.
   or **double-click the titlebar** (the area where the active tab's title
   is drawn). An inline field pops over the titlebar — ⏎ commits, ⎋ cancels,
   empty restores the automatic title.
+- **Running-process indicator** (native titlebar): the active pane's
+  foreground process (e.g. `vim`, `node`, `Safari`) is shown as the window
+  subtitle and as a small icon in the trailing edge of the titlebar. The
+  icon updates within ~2 s of a command starting/ending, or instantly when
+  OSC 133 `C`/`D` markers fire. ⌃-click the icon to refocus the pane it
+  describes after a tab switch.
 - **⌘-click a .md path** opens it via `markdown-command` (default `glow -p`)
 - **Agent glow**: a pulsing inner border while an agent drives the pane over
   the control socket (disable with `agent-glow = false`)

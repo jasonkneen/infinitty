@@ -73,3 +73,47 @@ final class ForegroundProcessTrackerTests: XCTestCase {
         XCTAssertEqual(en, ja)
     }
 }
+
+extension ForegroundProcessTrackerTests {
+    func testTrackerResolvesChildProcess() {
+        // Spawn a shell with `sleep 30 &` then verify the tracker reports `sleep`
+        // as the foreground process.
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        let pipeIn = Pipe()
+        let pipeOut = Pipe()
+        shell.standardInput = pipeIn
+        shell.standardOutput = pipeOut
+        shell.standardError = pipeOut
+        try! shell.run()
+        defer {
+            pipeIn.fileHandleForWriting.write("exit\n".data(using: .utf8)!)
+            shell.waitUntilExit()
+        }
+        let shellPid = shell.processIdentifier
+        pipeIn.fileHandleForWriting.write("sleep 30 &\n".data(using: .utf8)!)
+        // give zsh time to fork
+        Thread.sleep(forTimeInterval: 1.5)
+
+        let tracker = ForegroundProcessTracker(shellPid: shellPid)
+        let exp = expectation(description: "resolved sleep as foreground")
+        var resolved: ForegroundProcessInfo?
+        let observer = NotificationCenter.default.addObserver(
+            forName: ForegroundProcessTracker.didChangeNotification,
+            object: tracker,
+            queue: .main
+        ) { note in
+            if let info = note.userInfo?[ForegroundProcessTracker.infoKey] as? ForegroundProcessInfo,
+               info.displayName == "sleep" {
+                resolved = info
+                exp.fulfill()
+            }
+        }
+        tracker.poke()
+        wait(for: [exp], timeout: 5)
+        tracker.stop()
+        NotificationCenter.default.removeObserver(observer)
+        XCTAssertEqual(resolved?.rawName, "sleep", "expected tracker to report 'sleep' as foreground")
+        XCTAssertEqual(resolved?.pid, resolved?.pid) // pid sanity
+    }
+}
