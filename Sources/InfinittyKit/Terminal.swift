@@ -1616,6 +1616,108 @@ final class Terminal {
         if markers.count > 512 {
             markers.removeFirst(markers.count - 256)
         }
+
+        // Auto markdown: at command completion, if the output looks like
+        // markdown and is on-screen, re-render it through glow in place.
+        if kind == UInt8(ascii: "D"), markdownAuto, !usingAlt {
+            renderCommandOutputAsMarkdown()
+        }
+    }
+
+    // MARK: - auto markdown rendering (opt-in, guarded)
+
+    var markdownAuto = false
+    var markdownCommand = "glow -p"
+
+    private func looksLikeMarkdown(_ s: String) -> Bool {
+        var score = 0
+        for line in s.split(separator: "\n", omittingEmptySubsequences: false) {
+            let t = line.drop { $0 == " " }
+            if t.hasPrefix("# ") || t.hasPrefix("## ") || t.hasPrefix("### ") { score += 2 }
+            if t.hasPrefix("```") { score += 2 }
+            if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("+ ") { score += 1 }
+            if t.hasPrefix("> ") { score += 1 }
+            if line.contains("**") || line.contains("__") { score += 1 }
+            if score >= 3 { return true }
+        }
+        return false
+    }
+
+    private func renderCommandOutputAsMarkdown() {
+        guard let dIdx = markers.lastIndex(where: { $0.kind == UInt8(ascii: "D") }),
+              let cIdx = markers[..<dIdx].lastIndex(where: { $0.kind == UInt8(ascii: "C") })
+        else { return }
+        let c = markers[cIdx]
+        let d = markers[dIdx]
+
+        // Output must still be fully on-screen (not scrolled into history).
+        let startRow = c.line - sbAppended
+        guard startRow >= 0, startRow < rows, d.line - c.line <= 300 else { return }
+
+        let text = textBetween(startLine: c.line, startCol: c.col, endLine: d.line, endCol: d.col)
+        if ProcessInfo.processInfo.environment["INFINITTY_MD_DEBUG"] != nil {
+            FileHandle.standardError.write(Data("MD: startRow=\(startRow) len=\(text.count) md=\(looksLikeMarkdown(text))\n".utf8))
+        }
+        guard !text.isEmpty, looksLikeMarkdown(text) else { return }
+        guard let rendered = Terminal.runGlow(markdownCommand, input: text) else {
+            if ProcessInfo.processInfo.environment["INFINITTY_MD_DEBUG"] != nil {
+                FileHandle.standardError.write(Data("MD: glow returned nil\n".utf8))
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["INFINITTY_MD_DEBUG"] != nil {
+            FileHandle.standardError.write(Data("MD: glow ok, \(rendered.count) bytes\n".utf8))
+        }
+
+        // Erase the raw output region and re-emit glow's ANSI at its start.
+        // We're being called mid-OSC-dispatch, so force the parser back to
+        // ground before re-feeding, else glow's bytes get eaten as OSC data.
+        pstate = .ground
+        cy = min(max(startRow, 0), rows - 1)
+        cx = 0
+        wrapPending = false
+        eraseInDisplay(0)
+        for b in rendered { process(b) }
+    }
+
+    /// Run the markdown command with `input` on stdin; return its ANSI stdout.
+    /// Synchronous — called on the PTY read thread, bounded by a short timeout.
+    private static func runGlow(_ command: String, input: String) -> [UInt8]? {
+        // Drop interactive pager flags — we capture stdout, not a TTY pager.
+        let parts = command.split(separator: " ").map(String.init)
+            .filter { $0 != "-p" && $0 != "--pager" }
+        guard let exe = parts.first else { return nil }
+        let proc = Process()
+        // Resolve via /usr/bin/env so PATH is respected without a login shell.
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = [exe] + parts.dropFirst()
+        // GUI apps inherit a minimal PATH; add the common Homebrew locations.
+        var env = ProcessInfo.processInfo.environment
+        let extra = "/opt/homebrew/bin:/usr/local/bin"
+        env["PATH"] = env["PATH"].map { "\(extra):\($0)" } ?? extra
+        proc.environment = env
+        let stdin = Pipe(), stdout = Pipe()
+        proc.standardInput = stdin
+        proc.standardOutput = stdout
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+        stdin.fileHandleForWriting.write(Data(input.utf8))
+        stdin.fileHandleForWriting.closeFile()
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0, !data.isEmpty else { return nil }
+        // Normalize LF -> CRLF so the terminal advances columns correctly.
+        var out: [UInt8] = []
+        out.reserveCapacity(data.count + 64)
+        for b in data {
+            if b == 0x0A { out.append(0x0D) }
+            out.append(b)
+        }
+        return out
     }
 
     // MARK: - agent/tooling text extraction (control socket)

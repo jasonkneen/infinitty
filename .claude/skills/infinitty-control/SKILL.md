@@ -120,3 +120,22 @@ echo 'source /path/to/infinitty/shell-integration/infinitty.zsh' >> ~/.zshrc
 ```
 
 infinitty tracks the markers (prompt start, input start, output start, exit) by absolute line number, so "the last command's output" is an exact O(1) lookup — not a heuristic. Without integration those three commands return `error:`; `screen`/`history` always work.
+
+
+## Background control (no focus stealing)
+
+Socket commands (`send`, `send-line`, `screen`, `run`) write straight to the
+pty and read the cell grid — they NEVER require infinitty to be focused or
+frontmost. You can drive a pane while the user types in another app.
+
+- Launch without stealing focus: `open -g -a Infinitty` or `INFINITTY_NO_ACTIVATE=1`.
+- Agent-created panes (`new-tab` / `new-window` on the app socket) appear
+  without taking keyboard focus. Only the explicit `focus <pane>` command
+  brings a pane forward — use it only when the user asked to see it.
+
+## Rendered markdown
+
+With `markdown-render = auto` in the config, a completed command whose output
+looks like markdown is auto-rendered through `glow` in place (guarded: skips
+interactive/alt-screen apps, non-markdown output, and anything large). Off by
+default; agents can rely on plain `cmd | glow` regardless.

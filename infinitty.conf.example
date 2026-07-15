@@ -37,3 +37,8 @@
 # notch-display    = builtin       # builtin | external | primary | all
 # markdown-command = glow -p       # cmd-click on .md files
 # pet-mode         = window        # window (one, bottom-right pane) | pane
+
+# markdown & focus
+# markdown-render  = auto          # auto-render markdown command output via glow
+#                                   # (guarded: only completed, markdown-looking,
+#                                   #  on-screen output; skips TUIs/alt-screen)

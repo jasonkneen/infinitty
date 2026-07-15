@@ -133,12 +133,13 @@ swift build -c release
 
 ### Releasing
 
-Releases are automated: push a version tag and CI runs the tests, builds
-universal (arm64 + x86_64) binaries, publishes a GitHub release with the
-tarball + sha256, and publishes `@jasonkneen/infinitty` to npm.
+Signed + notarized releases are cut locally with one command; the full
+process, one-time setup, and cert-recovery steps are in
+**[RELEASING.md](RELEASING.md)**.
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+swift build -c release --arch arm64 --arch x86_64
+./scripts/ship-signed.sh 0.1.1
 ```
 
 Requires macOS 14+ and Xcode command line tools. `$SHELL` is spawned as a

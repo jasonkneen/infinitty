@@ -58,6 +58,13 @@ final class TerminalSession: NSObject {
             DispatchQueue.main.async { view?.showAgentGlow() }
         }
         control.start()
+        applyMarkdownConfig(config)
+    }
+
+    /// Push markdown-render settings into the terminal (launch + live reload).
+    func applyMarkdownConfig(_ config: AppConfig) {
+        terminal.markdownAuto = config.markdownRender == "auto"
+        terminal.markdownCommand = config.markdownCommand
     }
 
     /// Call once the view is inside a window (display link needs it).

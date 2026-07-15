@@ -48,6 +48,8 @@ struct AppConfig {
     var notch = false // live-activity widget beside the MacBook notch
     var notchDisplay = "builtin" // builtin | external | primary | all
     var markdownCommand = "glow -p" // cmd-click on a .md path runs this
+    var markdownRender = "off" // off | auto — auto-render command output via glow
+    var autoUpdate = "check" // check | off — daily background update check
     var agentGlow = true // pulsing inner glow while an agent drives the pane
     var sourcePath: String? // config file in use (for live reload)
 
@@ -199,6 +201,11 @@ struct AppConfig {
                 }
             case "markdown-command", "markdown-viewer":
                 markdownCommand = value
+            case "markdown-render", "auto-markdown":
+                let v = value.lowercased()
+                markdownRender = (v == "auto" || v == "on" || v == "true") ? "auto" : "off"
+            case "auto-update", "updates":
+                autoUpdate = AppConfig.parseBool(value) || value.lowercased() == "check" ? "check" : "off"
             case "agent-glow":
                 agentGlow = AppConfig.parseBool(value)
             default:
@@ -264,6 +271,7 @@ struct AppConfig {
         }
         if !agentGlow { out += "agent-glow = false\n" }
         if markdownCommand != "glow -p" { out += "markdown-command = \(markdownCommand)\n" }
+        if markdownRender != "off" { out += "markdown-render = \(markdownRender)\n" }
         if notch {
             out += "notch = true\n"
             if notchDisplay != "builtin" { out += "notch-display = \(notchDisplay)\n" }

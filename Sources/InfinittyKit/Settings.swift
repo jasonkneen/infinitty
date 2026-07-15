@@ -179,6 +179,19 @@ final class SettingsWindowController: NSWindowController {
         footer.spacing = 16
         footer.alignment = .centerY
 
+        // Version + update check.
+        let versionLabel = NSTextField(labelWithString: "infinitty \(Updater.currentVersion ?? "dev build")")
+        versionLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        versionLabel.textColor = .secondaryLabelColor
+        let updateButton = NSButton(title: "Check for Updates…", target: nil,
+            action: Selector(("checkForUpdates:")))
+        updateButton.bezelStyle = .rounded
+        updateButton.controlSize = .small
+        let versionRow = NSStackView(views: [versionLabel, updateButton])
+        versionRow.orientation = .horizontal
+        versionRow.spacing = 12
+        versionRow.alignment = .centerY
+
         let stack = NSStackView(views: [
             section("Font"),
             row("Family", fontCombo),
@@ -202,6 +215,8 @@ final class SettingsWindowController: NSWindowController {
             row("", glowCheck),
             section("Colors"),
             colorRow(),
+            section("About"),
+            versionRow,
             footer,
         ])
         stack.orientation = .vertical

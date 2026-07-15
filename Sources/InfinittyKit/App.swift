@@ -15,6 +15,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let notch = NotchActivityController()
     private let appControl = AppControlServer()
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
+    private let updater = Updater()
+    private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
@@ -28,7 +30,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
             openSettings(nil) // UI testing hook
         }
-        NSApp.activate(ignoringOtherApps: true)
+        // Background launch: `open -g` or INFINITTY_NO_ACTIVATE keeps focus on
+        // whatever you're doing — infinitty runs and is socket-drivable without
+        // ever coming to the foreground.
+        if ProcessInfo.processInfo.environment["INFINITTY_NO_ACTIVATE"] == nil {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        // Auto-check for updates (quiet — only lights the top-right indicator),
+        // throttled to once per day.
+        updater.onUpdateAvailable = { [weak self] release in
+            self?.showUpdateIndicator(version: release.version)
+        }
+        let last = UserDefaults.standard.double(forKey: "lastUpdateCheck")
+        let now = Date().timeIntervalSince1970
+        if config.autoUpdate != "off", now - last > 86_400 {
+            UserDefaults.standard.set(now, forKey: "lastUpdateCheck")
+            updater.check(userInitiated: false)
+        }
+    }
+
+    @objc func checkForUpdates(_ sender: Any?) {
+        updater.check(userInitiated: true)
+    }
+
+    private func showUpdateIndicator(version: String) {
+        for win in NSApp.windows where win.tabbingIdentifier == "infinitty" {
+            guard let content = win.contentView,
+                  updateIndicators[ObjectIdentifier(win)] == nil else { continue }
+            let pill = UpdateIndicatorView(version: version)
+            pill.onClick = { [weak self] in self?.updater.showPendingPrompt() }
+            let topInset = sessions.first { $0.view.window === win }?.renderer.topInsetPoints ?? 0
+            pill.place(in: content, topInset: topInset)
+            content.addSubview(pill)
+            updateIndicators[ObjectIdentifier(win)] = pill
+        }
     }
 
     @objc func openSettings(_ sender: Any?) {
@@ -469,7 +505,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "new-window":
             let id = onMain { () -> Int in
                 let (window, session) = self.makeTerminalWindow()
-                window.makeKeyAndOrderFront(nil)
+                // orderFront, NOT makeKey: an agent creating a pane must never
+                // steal keyboard focus from whatever the user is typing in.
+                window.orderFront(nil)
                 session.launch()
                 DispatchQueue.main.async {
                     self.refreshPets()
@@ -480,12 +518,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return id.map(String.init) ?? "error: could not create window"
         case "new-tab":
             let id = onMain { () -> Int? in
-                guard let key = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else {
+                guard let host = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else {
                     return nil
                 }
                 let (window, session) = self.makeTerminalWindow()
-                key.addTabbedWindow(window, ordered: .above)
-                window.makeKeyAndOrderFront(nil)
+                host.addTabbedWindow(window, ordered: .above)
+                // Do not select/key the new tab — keep the user's focus put.
                 session.launch()
                 DispatchQueue.main.async {
                     self.refreshPets()
@@ -594,6 +632,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let scale = s.view.window?.backingScaleFactor
                 ?? NSScreen.main?.backingScaleFactor ?? 2
             s.renderer.applyConfig(config, scale: scale)
+            s.applyMarkdownConfig(config)
             s.view.needsLayout = true // re-derives cols/rows from new metrics
             s.terminal.touch()
             if let win = s.view.window { windows.insert(win) }
@@ -657,6 +696,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(
+            withTitle: "Check for Updates…",
+            action: #selector(AppDelegate.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Settings…",
             action: #selector(AppDelegate.openSettings(_:)),

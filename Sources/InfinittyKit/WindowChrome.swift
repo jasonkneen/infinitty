@@ -1,5 +1,61 @@
 import AppKit
 
+/// Subtle "update available" pill, top-right of the window. Muted until
+/// hovered; click to open the update prompt.
+final class UpdateIndicatorView: NSView {
+    var onClick: (() -> Void)?
+    private let label = NSTextField(labelWithString: "")
+    private var hovering = false
+
+    init(version: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 96, height: 22))
+        wantsLayer = true
+        layer?.cornerRadius = 11
+        layer?.borderWidth = 1
+
+        label.stringValue = "↑ \(version)"
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.alignment = .center
+        label.frame = bounds
+        label.autoresizingMask = [.width, .height]
+        label.isEditable = false
+        label.isBezeled = false
+        label.drawsBackground = false
+        addSubview(label)
+        applyStyle()
+        toolTip = "Update available — click to install"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func applyStyle() {
+        let accent = NSColor(srgbRed: 0.36, green: 0.72, blue: 0.55, alpha: 1) // soft green
+        layer?.backgroundColor = accent.withAlphaComponent(hovering ? 0.28 : 0.14).cgColor
+        layer?.borderColor = accent.withAlphaComponent(hovering ? 0.9 : 0.45).cgColor
+        label.textColor = accent.withAlphaComponent(hovering ? 1.0 : 0.85)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; applyStyle() }
+    override func mouseExited(with event: NSEvent) { hovering = false; applyStyle() }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+
+    /// Position in the top-right of a host content view, below the titlebar inset.
+    func place(in host: NSView, topInset: CGFloat) {
+        frame.origin = NSPoint(
+            x: host.bounds.width - frame.width - 10,
+            y: host.bounds.height - frame.height - max(topInset, 6) - 4
+        )
+        autoresizingMask = [.minXMargin, .minYMargin]
+    }
+}
+
 /// Pulsing inner glow shown while an agent drives the pane through the
 /// control socket — an Apple-Intelligence-style rotating conic gradient ring.
 final class AgentGlowView: NSView {
