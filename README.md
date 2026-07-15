@@ -260,3 +260,7 @@ Sources/infinitty/
   App.swift, main.swift  windows, native tabs, split panes, menu
 shell-integration/       OSC 133 zsh hook
 ```
+
+## License
+
+MIT © [Jason Kneen](https://github.com/jasonkneen) · [infinitty.ai](https://infinitty.ai)

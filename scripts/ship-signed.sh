@@ -50,7 +50,7 @@ xcrun stapler staple dist/Infinitty.app
 
 STAGE="infinitty-$VERSION"; rm -rf pkg; mkdir -p "pkg/$STAGE"
 cp -R dist/Infinitty.app "pkg/$STAGE/"; cp dist/infinitty-mcp "pkg/$STAGE/"
-cp -R shell-integration "pkg/$STAGE/"; cp infinitty.conf.example README.md "pkg/$STAGE/"
+cp -R shell-integration "pkg/$STAGE/"; cp infinitty.conf.example README.md LICENSE "pkg/$STAGE/"
 tar -czf "infinitty-$VERSION-macos.tar.gz" -C pkg "$STAGE"
 shasum -a 256 "Infinitty-$VERSION.dmg" > "Infinitty-$VERSION.dmg.sha256"
 shasum -a 256 "infinitty-$VERSION-macos.tar.gz" > "infinitty-$VERSION-macos.tar.gz.sha256"

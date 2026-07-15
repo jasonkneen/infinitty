@@ -36,6 +36,8 @@ final class SettingsWindowController: NSWindowController {
     private let opacityValue = NSTextField(labelWithString: "")
     private let blurCheck = NSButton(checkboxWithTitle: "Frosted blur behind window", target: nil, action: nil)
     private let glowCheck = NSButton(checkboxWithTitle: "Glow while an agent is in control", target: nil, action: nil)
+    private let hintsCheck = NSButton(checkboxWithTitle: "Inline AI hints (ghost text)", target: nil, action: nil)
+    private let hintsWarning = NSTextField(wrappingLabelWithString: "")
     private let titlebarPopup = NSPopUpButton()
     private let lightsPopup = NSPopUpButton()
     private let petPopup = NSPopUpButton()
@@ -177,6 +179,13 @@ final class SettingsWindowController: NSWindowController {
         let notchGroup = NSStackView(views: [notchCheck, notchPopup])
         notchGroup.orientation = .horizontal
         notchGroup.spacing = 10
+
+        hintsWarning.stringValue = "⚠ Disable your shell's autosuggestions (zsh-autosuggestions, fish) to avoid overlapping ghost text. Uses on-device Apple Intelligence by default; set an AI endpoint via Edit Config."
+        hintsWarning.font = .systemFont(ofSize: 10)
+        hintsWarning.textColor = .tertiaryLabelColor
+        hintsWarning.lineBreakMode = .byWordWrapping
+        hintsWarning.maximumNumberOfLines = 3
+        hintsWarning.preferredMaxLayoutWidth = Self.controlWidth
         notchPopup.widthAnchor.constraint(equalToConstant: 110).isActive = true
 
         let apply = NSButton(title: "Apply", target: self, action: #selector(applyPressed))
@@ -253,6 +262,8 @@ final class SettingsWindowController: NSWindowController {
             section("Agents"),
             row("Notch", notchGroup),
             row("", glowCheck),
+            row("", hintsCheck),
+            row("", hintsWarning),
             section("Colors"),
             colorRow(),
             section("About"),
@@ -297,6 +308,7 @@ final class SettingsWindowController: NSWindowController {
         opacitySlider.doubleValue = Double(current.backgroundOpacity)
         blurCheck.state = current.backgroundBlur ? .on : .off
         glowCheck.state = current.agentGlow ? .on : .off
+        hintsCheck.state = current.hints ? .on : .off
         notchCheck.state = current.notch ? .on : .off
         titlebarPopup.selectItem(withTitle: current.titlebarStyle)
         lightsPopup.selectItem(withTitle: current.trafficLights)
@@ -376,6 +388,7 @@ final class SettingsWindowController: NSWindowController {
         c.backgroundOpacity = CGFloat((opacitySlider.doubleValue * 100).rounded() / 100)
         c.backgroundBlur = blurCheck.state == .on
         c.agentGlow = glowCheck.state == .on
+        c.hints = hintsCheck.state == .on
         c.notch = notchCheck.state == .on
         c.notchDisplay = notchPopup.titleOfSelectedItem ?? "builtin"
         c.titlebarStyle = titlebarPopup.titleOfSelectedItem ?? "native"

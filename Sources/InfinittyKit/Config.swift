@@ -50,7 +50,7 @@ struct AppConfig {
     var markdownCommand = "glow -p" // cmd-click on a .md path runs this
     var markdownRender = "off" // off | auto — auto-render command output via glow
     var autoUpdate = "check" // check | off — daily background update check
-    var hints = true // inline ghost-text command suggestions
+    var hints = false // inline ghost-text command suggestions (opt-in — conflicts with shell autosuggestions)
     var hintCommand: String? // custom async hint provider (script)
     var aiBaseURL: String? // OpenAI-compatible endpoint for hints
     var aiKey: String?
@@ -285,7 +285,7 @@ struct AppConfig {
             if petMode != "window" { out += "pet-mode = pane\n" }
         }
         if !agentGlow { out += "agent-glow = false\n" }
-        if !hints { out += "hints = false\n" }
+        if hints { out += "hints = true\n" }
         if let v = hintCommand, !v.isEmpty { out += "hint-command = \(v)\n" }
         if let v = aiBaseURL, !v.isEmpty { out += "ai-base-url = \(v)\n" }
         if let v = aiKey, !v.isEmpty { out += "ai-key = \(v)\n" }
