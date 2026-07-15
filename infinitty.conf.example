@@ -1,0 +1,39 @@
+# infinitty configuration
+# Copy to ~/.config/infinitty/infinitty.conf (or ~/.infinitty.conf) and edit.
+# Changes apply LIVE — the file is watched. Also: ⌘R, or `reload` on the
+# control socket. Env vars (INFINITTY_FONT, INFINITTY_FONT_SIZE, INFINITTY_MARGIN,
+# INFINITTY_LINE_SPACING, INFINITTY_KERNING) override the file.
+#
+# Ghostty key names are accepted too (font-family, window-padding-x/y,
+# adjust-cell-width/-height with 10% or pixel values, font-thicken).
+# With no infinitty config at all, known keys are read from
+# ~/.config/ghostty/config as a fallback.
+
+# font         = Berkeley Mono
+# font-style   = Thin              # face: Thin, Light, Medium, SemiBold, ...
+# font-thicken = false             # ghostty-style stroke thickening
+# font-size    = 13
+# margin       = 8                 # window content margin, points
+# line-spacing = 1.0               # line height multiplier (1.1 = 10% taller)
+# kerning      = 1.0               # cell width multiplier  (1.05 = 5% wider)
+
+# foreground   = #D7DAE0           # hex or basic color name
+# background   = #0F1216
+# cursor-color = #AEB8C4
+
+# window chrome
+# titlebar       = transparent     # native | transparent | hidden
+# traffic-lights = square          # circle | square | rectangle | diamond
+# background-opacity = 0.92
+# background-blur    = true        # frosted blur behind the window
+# notch          = true            # live activity beside the MacBook notch
+
+# codex pets (~/.codex/pets)
+# pet       = r2d2
+# pet-scale = 0.5
+
+# agents & extras
+# agent-glow       = true          # pulsing border while socket-driven
+# notch-display    = builtin       # builtin | external | primary | all
+# markdown-command = glow -p       # cmd-click on .md files
+# pet-mode         = window        # window (one, bottom-right pane) | pane

@@ -1,0 +1,294 @@
+import CoreGraphics
+import Foundation
+
+/// Runtime configuration. Loaded from a config file, then overridden by
+/// environment variables. Applied at launch (restart to pick up changes).
+///
+/// Config file (first found wins):
+///   $INFINITTY_CONFIG (explicit path)
+///   ~/.config/infinitty/infinitty.conf
+///   ~/.infinitty.conf
+///   ~/.config/ghostty/config          (known keys only, as a fallback)
+///   ~/Library/Application Support/com.mitchellh.ghostty/config
+///
+/// Format: `key = value`, `#` comments. Native keys and their Ghostty
+/// aliases are both accepted:
+///   font / font-family
+///   font-size
+///   margin / padding / window-padding-x / window-padding-y
+///   line-spacing / line-height / adjust-cell-height  (1.1 | 10% | 3)
+///   kerning / letter-spacing / cell-width / adjust-cell-width
+///
+/// adjust-cell-* accepts Ghostty forms: `10%` (relative) or a bare number
+/// (extra points added to the cell).
+///
+/// Environment overrides: INFINITTY_FONT, INFINITTY_FONT_SIZE, INFINITTY_MARGIN,
+/// INFINITTY_LINE_SPACING, INFINITTY_KERNING.
+struct AppConfig {
+    var fontName: String?
+    var fontStyle: String? // face style: Thin, Light, Medium, ... (font-style)
+    var fontThicken = false // ghostty font-thicken: stroke glyphs slightly
+    var fontSize: CGFloat = 13
+    var margin: CGFloat = 8
+    var lineSpacing: CGFloat = 1.0
+    var kerning: CGFloat = 1.0
+    var cellWidthExtra: CGFloat = 0 // points added to cell width
+    var cellHeightExtra: CGFloat = 0 // points added to cell height
+    var foreground: UInt32? // 0xRRGGBB overrides
+    var background: UInt32?
+    var cursorColor: UInt32?
+    var selectionBackground: UInt32?
+    var titlebarStyle = "native" // native | transparent | hidden
+    var trafficLights = "circle" // circle | square | rectangle | diamond
+    var pet: String? // codex pet name (~/.codex/pets/<name>) or directory path
+    var petScale: CGFloat = 0.5
+    var petMode = "window" // window = one pet (follows focus) | pane = every split
+    var backgroundOpacity: CGFloat = 1.0
+    var backgroundBlur = false // frosted behind-window blur
+    var notch = false // live-activity widget beside the MacBook notch
+    var notchDisplay = "builtin" // builtin | external | primary | all
+    var markdownCommand = "glow -p" // cmd-click on a .md path runs this
+    var agentGlow = true // pulsing inner glow while an agent drives the pane
+    var sourcePath: String? // config file in use (for live reload)
+
+    var atlasKey: String {
+        "\(fontName ?? "SF Mono")|\(fontStyle ?? "")|\(fontThicken)|\(fontSize)|" +
+        "\(lineSpacing)|\(kerning)|\(cellWidthExtra)|\(cellHeightExtra)"
+    }
+
+    static func load() -> AppConfig {
+        var c = AppConfig()
+        let env = ProcessInfo.processInfo.environment
+
+        var candidates: [String] = []
+        if let explicit = env["INFINITTY_CONFIG"] ?? env["TITERM_CONFIG"], !explicit.isEmpty {
+            candidates.append(explicit)
+        }
+        candidates += [
+            "~/.config/infinitty/infinitty.conf",
+            "~/.infinitty.conf",
+            "~/.config/titerm/titerm.conf", // legacy name
+            "~/.titerm.conf",
+            "~/.config/ghostty/config",
+            "~/Library/Application Support/com.mitchellh.ghostty/config",
+        ]
+        for path in candidates {
+            let expanded = NSString(string: path).expandingTildeInPath
+            if let text = try? String(contentsOfFile: expanded, encoding: .utf8) {
+                c.apply(fileContents: text)
+                c.sourcePath = expanded
+                break
+            }
+        }
+
+        func envValue(_ key: String) -> String? {
+            env["INFINITTY_\(key)"] ?? env["TITERM_\(key)"] // legacy fallback
+        }
+        if let v = envValue("FONT"), !v.isEmpty { c.fontName = v }
+        if let v = envValue("FONT_SIZE").flatMap(Double.init) { c.fontSize = CGFloat(v) }
+        if let v = envValue("MARGIN").flatMap(Double.init) { c.margin = CGFloat(v) }
+        if let v = envValue("LINE_SPACING").flatMap(Double.init) { c.lineSpacing = CGFloat(v) }
+        if let v = envValue("KERNING").flatMap(Double.init) { c.kerning = CGFloat(v) }
+
+        c.clamp()
+        return c
+    }
+
+    private mutating func apply(fileContents: String) {
+        var fontSet = false
+        var paddingX: CGFloat?
+        var paddingY: CGFloat?
+
+        for rawLine in fileContents.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("#") { continue } // full-line comment
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            var value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("#") {
+                // hex color, not a comment: value is the first token
+                if let sp = value.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+                    value = String(value[..<sp])
+                }
+            } else if let hash = value.firstIndex(of: "#") {
+                // trailing comment
+                value = value[..<hash].trimmingCharacters(in: .whitespaces)
+            }
+            if value.count >= 2,
+               (value.hasPrefix("\"") && value.hasSuffix("\"")) ||
+               (value.hasPrefix("'") && value.hasSuffix("'")) {
+                value = String(value.dropFirst().dropLast())
+            }
+            guard !value.isEmpty else { continue }
+
+            switch key {
+            case "font", "font-family":
+                // Ghostty repeats font-family for fallbacks; first one wins.
+                if !fontSet {
+                    fontName = value
+                    fontSet = true
+                }
+            case "font-size", "fontsize", "size":
+                if let v = Double(value) { fontSize = CGFloat(v) }
+            case "margin", "padding":
+                if let v = Double(value) { margin = CGFloat(v) }
+            case "window-padding-x":
+                if let v = Double(value) { paddingX = CGFloat(v) }
+            case "window-padding-y":
+                if let v = Double(value) { paddingY = CGFloat(v) }
+            case "line-spacing", "linespacing", "line-height":
+                if let v = Double(value) { lineSpacing = CGFloat(v) }
+            case "adjust-cell-height":
+                if let (mult, extra) = AppConfig.parseAdjust(value) {
+                    lineSpacing = mult
+                    cellHeightExtra = extra
+                }
+            case "kerning", "letter-spacing", "letterspacing", "cell-width":
+                if let v = Double(value) { kerning = CGFloat(v) }
+            case "adjust-cell-width":
+                if let (mult, extra) = AppConfig.parseAdjust(value) {
+                    kerning = mult
+                    cellWidthExtra = extra
+                }
+            case "font-style", "font-weight":
+                fontStyle = value
+            case "font-thicken":
+                fontThicken = AppConfig.parseBool(value)
+            case "foreground":
+                foreground = AppConfig.parseColor(value)
+            case "background":
+                background = AppConfig.parseColor(value)
+            case "cursor-color", "cursor":
+                cursorColor = AppConfig.parseColor(value)
+            case "selection-background":
+                selectionBackground = AppConfig.parseColor(value)
+            case "titlebar", "macos-titlebar-style":
+                switch value.lowercased() {
+                case "transparent", "tabs": titlebarStyle = "transparent"
+                case "hidden": titlebarStyle = "hidden"
+                default: titlebarStyle = "native"
+                }
+            case "traffic-lights", "trafficlights":
+                let v = value.lowercased()
+                if ["circle", "square", "rectangle", "diamond"].contains(v) {
+                    trafficLights = v
+                }
+            case "pet", "codex-pet":
+                pet = value
+            case "pet-scale":
+                if let v = Double(value) { petScale = CGFloat(v) }
+            case "pet-mode", "petmode":
+                switch value.lowercased() {
+                case "pane", "all", "every": petMode = "pane"
+                default: petMode = "window"
+                }
+            case "background-opacity", "opacity", "transparency":
+                if let v = Double(value) { backgroundOpacity = CGFloat(v) }
+            case "background-blur", "background-blur-radius", "blur":
+                if let v = Double(value) {
+                    backgroundBlur = v > 0
+                } else {
+                    backgroundBlur = AppConfig.parseBool(value)
+                }
+            case "notch", "live-activity":
+                notch = AppConfig.parseBool(value)
+            case "notch-display", "notch-screen":
+                let v = value.lowercased()
+                if ["builtin", "external", "primary", "focused", "all", "both"].contains(v) {
+                    notchDisplay = v == "both" ? "all" : v
+                }
+            case "markdown-command", "markdown-viewer":
+                markdownCommand = value
+            case "agent-glow":
+                agentGlow = AppConfig.parseBool(value)
+            default:
+                break // unknown keys (themes, cursor styles, ...) ignored
+            }
+        }
+
+        if paddingX != nil || paddingY != nil {
+            margin = max(paddingX ?? 0, paddingY ?? 0)
+        }
+    }
+
+    private static func parseBool(_ value: String) -> Bool {
+        ["true", "yes", "on", "1"].contains(value.lowercased())
+    }
+
+    /// Hex (#RRGGBB / RRGGBB) or a basic color name.
+    static func parseColor(_ value: String) -> UInt32? {
+        let names: [String: UInt32] = [
+            "black": 0x000000, "white": 0xFFFFFF, "red": 0xFF0000,
+            "green": 0x00FF00, "blue": 0x0000FF, "yellow": 0xFFFF00,
+            "cyan": 0x00FFFF, "magenta": 0xFF00FF, "orange": 0xFFA500,
+            "gray": 0x808080, "grey": 0x808080, "purple": 0x800080,
+            "pink": 0xFFC0CB,
+        ]
+        var v = value.lowercased()
+        if let named = names[v] { return named }
+        if v.hasPrefix("#") { v.removeFirst() }
+        guard v.count == 6, let n = UInt32(v, radix: 16) else { return nil }
+        return n
+    }
+
+    /// Ghostty adjust-cell-* values: "10%" -> multiplier, "3" -> extra points.
+    private static func parseAdjust(_ value: String) -> (multiplier: CGFloat, extra: CGFloat)? {
+        if value.hasSuffix("%") {
+            guard let pct = Double(value.dropLast()) else { return nil }
+            return (CGFloat(1.0 + pct / 100.0), 0)
+        }
+        guard let pts = Double(value) else { return nil }
+        return (1.0, CGFloat(pts))
+    }
+
+    /// Serialize for the Settings window. Regenerates the whole file.
+    func serialize() -> String {
+        func hex(_ c: UInt32) -> String { String(format: "#%06X", c) }
+        var out = "# infinitty configuration — written by infinitty Settings (⌘,)\n"
+        out += "# Edits apply live. See infinitty.conf.example for all keys.\n\n"
+        if let f = fontName { out += "font = \(f)\n" }
+        if let s = fontStyle, !s.isEmpty { out += "font-style = \(s)\n" }
+        out += "font-size = \(Double(fontSize))\n"
+        if fontThicken { out += "font-thicken = true\n" }
+        out += "margin = \(Double(margin))\n"
+        out += "line-spacing = \(Double(lineSpacing))\n"
+        out += "kerning = \(Double(kerning))\n"
+        if backgroundOpacity < 1 { out += "background-opacity = \(Double(backgroundOpacity))\n" }
+        if backgroundBlur { out += "background-blur = true\n" }
+        out += "titlebar = \(titlebarStyle)\n"
+        out += "traffic-lights = \(trafficLights)\n"
+        if let p = pet, !p.isEmpty {
+            out += "pet = \(p)\n"
+            out += "pet-scale = \(Double(petScale))\n"
+            if petMode != "window" { out += "pet-mode = pane\n" }
+        }
+        if !agentGlow { out += "agent-glow = false\n" }
+        if markdownCommand != "glow -p" { out += "markdown-command = \(markdownCommand)\n" }
+        if notch {
+            out += "notch = true\n"
+            if notchDisplay != "builtin" { out += "notch-display = \(notchDisplay)\n" }
+        }
+        if let c = foreground { out += "foreground = \(hex(c))\n" }
+        if let c = background { out += "background = \(hex(c))\n" }
+        if let c = cursorColor { out += "cursor-color = \(hex(c))\n" }
+        if let c = selectionBackground { out += "selection-background = \(hex(c))\n" }
+        return out
+    }
+
+    /// The path the Settings window writes to (the loaded file, or the
+    /// default location when no config exists yet).
+    var writePath: String {
+        sourcePath ?? NSString(string: "~/.config/infinitty/infinitty.conf").expandingTildeInPath
+    }
+
+    private mutating func clamp() {
+        fontSize = min(max(fontSize, 6), 72)
+        margin = min(max(margin, 0), 64)
+        lineSpacing = min(max(lineSpacing, 0.7), 3)
+        kerning = min(max(kerning, 0.7), 2)
+        cellWidthExtra = min(max(cellWidthExtra, -10), 40)
+        cellHeightExtra = min(max(cellHeightExtra, -10), 40)
+        petScale = min(max(petScale, 0.1), 2)
+        backgroundOpacity = min(max(backgroundOpacity, 0.15), 1)
+    }
+}
