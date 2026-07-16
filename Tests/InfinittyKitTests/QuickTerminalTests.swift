@@ -98,7 +98,7 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertTrue(second.superview === tabsView.pageHost)
     }
 
-    func testQuickTabStripShowsTitlesAndAddButton() {
+    func testQuickTabStripShowsTitlesAndAddButton() throws {
         let strip = QuickTerminalTabStripView(
             frame: NSRect(x: 0, y: 0, width: 500, height: 34))
         strip.update(titles: ["one", "two"], selectedIndex: 1)
@@ -109,10 +109,42 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertTrue(titles.contains("two"))
         XCTAssertTrue(titles.contains("+"))
         let tabButtons = strip.subviews.compactMap { $0 as? NSButton }
-            .filter { $0.title != "+" }
+            .filter { $0.title != "+" && $0.title != "×" }
         XCTAssertEqual(tabButtons.map(\.alignment), [.center, .center])
         XCTAssertEqual(tabButtons[0].frame.width, tabButtons[1].frame.width)
         XCTAssertGreaterThan(tabButtons.reduce(0) { $0 + $1.frame.width }, 400)
+        let close = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "×" })
+        var closedIndex: Int?
+        strip.onClose = { closedIndex = $0 }
+        close.performClick(nil)
+        XCTAssertEqual(closedIndex, 1)
+
+        var doubleClickedIndex: Int?
+        strip.onRenameRequest = { doubleClickedIndex = $0 }
+        strip.handleTabClick(at: 0, clickCount: 2)
+        XCTAssertEqual(doubleClickedIndex, 0)
+
+        var renamedValue: String?
+        strip.onRenameCommit = { renamedValue = $0 }
+        XCTAssertTrue(strip.beginRename(at: 1, currentName: "two"))
+        strip.layoutSubtreeIfNeeded()
+        let editor = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        XCTAssertEqual(editor.frame.midX, tabButtons[1].frame.midX, accuracy: 0.5)
+        XCTAssertEqual(editor.frame.midY, tabButtons[1].frame.midY, accuracy: 0.5)
+        editor.string = "renamed"
+        editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(renamedValue, "renamed")
+        XCTAssertFalse(strip.subviews.contains { $0 === editor })
+
+        var cancelled = false
+        strip.onRenameCancel = { cancelled = true }
+        XCTAssertTrue(strip.beginRename(at: 0, currentName: "one"))
+        let cancelEditor = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        cancelEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        XCTAssertTrue(cancelled)
     }
 
     func testQuickTabControllerKeepsSessionsAttachedAcrossTabs() throws {
@@ -151,15 +183,62 @@ final class QuickTerminalTests: XCTestCase {
         _ = try XCTUnwrap(controller.ensureWindow())
         XCTAssertEqual(controller.tabCount, 1)
         XCTAssertEqual(controller.activeSessions.map(\.id), [first.id])
+        let firstTabID = try XCTUnwrap(controller.activeTabID)
+        controller.setTitle("automatic one", for: first)
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(controller.beginRenamingActiveTab())
+        let tabsView = try XCTUnwrap(window.contentView as? QuickTerminalTabsView)
+        let inlineEditor = try XCTUnwrap(
+            tabsView.strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        XCTAssertTrue(window.firstResponder === inlineEditor)
+        XCTAssertFalse(controller.toggleRenamingActiveTab())
+        XCTAssertFalse(inlineEditor.superview === tabsView.strip)
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "automatic one")
+
+        XCTAssertTrue(controller.toggleRenamingActiveTab())
+        let toggledEditor = try XCTUnwrap(
+            tabsView.strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        XCTAssertTrue(window.firstResponder === toggledEditor)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        XCTAssertTrue(toggledEditor.superview === tabsView.strip)
+        XCTAssertTrue(window.firstResponder === toggledEditor)
+        controller.setShowsShortcutHints(true)
+        controller.setShowsShortcutHints(false)
+        XCTAssertTrue(toggledEditor.superview === tabsView.strip)
+        XCTAssertTrue(window.firstResponder === toggledEditor)
+        var focusLossCancelled = false
+        tabsView.strip.onRenameCancel = { focusLossCancelled = true }
+        XCTAssertTrue(window.makeFirstResponder(tabsView.pageHost))
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        XCTAssertTrue(focusLossCancelled)
+        XCTAssertFalse(toggledEditor.superview === tabsView.strip)
+
+        XCTAssertTrue(controller.beginRenamingActiveTab())
+        let committedEditor = try XCTUnwrap(
+            tabsView.strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        committedEditor.string = "Project One"
+        committedEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "Project One")
+        XCTAssertTrue(window.firstResponder === first.view)
+        controller.setTitle("changed automatically", for: first)
+        controller.setFocusedSession(first)
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "Project One")
 
         let second = try XCTUnwrap(controller.newTab())
+        let secondTabID = try XCTUnwrap(controller.activeTabID)
+        XCTAssertNotEqual(secondTabID, firstTabID)
+        controller.setCustomTitle("Project Two", for: secondTabID)
         XCTAssertEqual(controller.tabCount, 2)
         XCTAssertEqual(controller.activeSessions.map(\.id), [second.id])
         XCTAssertTrue(first.view.window === window)
         XCTAssertTrue(second.view.window === window)
 
-        XCTAssertTrue(controller.selectPreviousTab())
+        XCTAssertTrue(controller.selectTab(containing: first))
         XCTAssertEqual(controller.activeSessions.map(\.id), [first.id])
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "Project One")
+        XCTAssertEqual(controller.baseTitle(for: secondTabID), "Project Two")
+        controller.setCustomTitle(nil, for: firstTabID)
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "changed automatically")
         XCTAssertFalse(controller.removeTab(containing: second))
         XCTAssertEqual(controller.tabCount, 1)
         XCTAssertEqual(controller.activeSessions.map(\.id), [first.id])

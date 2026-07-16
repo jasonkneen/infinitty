@@ -196,11 +196,70 @@ final class QuickTerminalTabPageView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+final class QuickTabRenameTextView: NSTextView {
+    var onCommit: (() -> Void)?
+    var onCancel: (() -> Void)?
+
+    private var windowResignObserver: Any?
+
+    deinit {
+        if let windowResignObserver {
+            NotificationCenter.default.removeObserver(windowResignObserver)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let windowResignObserver {
+            NotificationCenter.default.removeObserver(windowResignObserver)
+            self.windowResignObserver = nil
+        }
+        guard let window else { return }
+        windowResignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in self?.onCancel?() }
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        guard resigned else { return false }
+        // Let AppKit complete its first-responder transition before removing
+        // this editor from the tab strip. Commit/cancel clears the callback,
+        // so its own focus restoration cannot trigger a second cancellation.
+        DispatchQueue.main.async { [weak self] in self?.onCancel?() }
+        return true
+    }
+
+    override func doCommand(by commandSelector: Selector) {
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            onCommit?()
+        case #selector(NSResponder.cancelOperation(_:)):
+            onCancel?()
+        default:
+            super.doCommand(by: commandSelector)
+        }
+    }
+}
+
 final class QuickTerminalTabStripView: NSView {
     var onSelect: ((Int) -> Void)?
+    var onRenameRequest: ((Int) -> Void)?
     var onNewTab: (() -> Void)?
+    var onClose: ((Int) -> Void)?
+    var onRenameCommit: ((String) -> Void)?
+    var onRenameCancel: (() -> Void)?
     private var buttons: [NSButton] = []
+    private var selectedIndex = 0
+    private var renamingIndex: Int?
+    private weak var renameEditor: QuickTabRenameTextView?
+    private var endingRename = false
     private let addButton = NSButton(title: "+", target: nil, action: nil)
+    private let closeButton = NSButton(title: "×", target: nil, action: nil)
+
+    var isRenaming: Bool { renameEditor != nil }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -216,32 +275,105 @@ final class QuickTerminalTabStripView: NSView {
         addButton.contentTintColor = .secondaryLabelColor
         addButton.toolTip = "New Quick Tab (⌘T)"
         addSubview(addButton)
+
+        closeButton.target = self
+        closeButton.action = #selector(closePressed(_:))
+        closeButton.isBordered = false
+        closeButton.font = .systemFont(ofSize: 15, weight: .regular)
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.toolTip = "Close Quick Tab"
+        addSubview(closeButton)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func update(titles: [String], selectedIndex: Int) {
-        buttons.forEach { $0.removeFromSuperview() }
-        buttons = titles.enumerated().map { index, title in
-            let button = NSButton(title: title, target: self, action: #selector(tabPressed(_:)))
-            button.tag = index
-            button.isBordered = false
-            button.alignment = .center
-            button.lineBreakMode = .byTruncatingTail
-            button.font = .systemFont(ofSize: 12, weight: index == selectedIndex ? .semibold : .regular)
-            button.contentTintColor = index == selectedIndex ? .labelColor : .secondaryLabelColor
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 6
+        self.selectedIndex = selectedIndex
+        if buttons.count != titles.count {
+            buttons.forEach { $0.removeFromSuperview() }
+            buttons = titles.indices.map { index in
+                let button = NSButton(
+                    title: "",
+                    target: self,
+                    action: #selector(tabPressed(_:)))
+                button.tag = index
+                button.isBordered = false
+                button.alignment = .center
+                button.lineBreakMode = .byTruncatingTail
+                button.wantsLayer = true
+                button.layer?.cornerRadius = 6
+                button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+                addSubview(button)
+                return button
+            }
+        }
+        for (index, title) in titles.enumerated() {
+            let button = buttons[index]
+            button.title = title
+            button.font = .systemFont(
+                ofSize: 12,
+                weight: index == selectedIndex ? .semibold : .regular)
+            button.contentTintColor = index == selectedIndex
+                ? .labelColor
+                : .secondaryLabelColor
             button.layer?.backgroundColor = index == selectedIndex
                 ? NSColor.white.withAlphaComponent(0.14).cgColor
                 : NSColor.clear.cgColor
             button.layer?.borderWidth = index == selectedIndex ? 1 : 0
-            button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
             button.toolTip = title
-            addSubview(button)
-            return button
         }
+        closeButton.isHidden = !titles.indices.contains(selectedIndex)
+        if let renamingIndex, buttons.indices.contains(renamingIndex) {
+            buttons[renamingIndex].isHidden = true
+            closeButton.isHidden = true
+        }
+        addSubview(closeButton, positioned: .above, relativeTo: nil)
         needsLayout = true
+    }
+
+    @discardableResult
+    func beginRename(at index: Int, currentName: String) -> Bool {
+        guard renameEditor == nil, buttons.indices.contains(index) else { return false }
+        layoutSubtreeIfNeeded()
+        renamingIndex = index
+        buttons[index].isHidden = true
+        closeButton.isHidden = true
+
+        let editor = QuickTabRenameTextView(
+            frame: buttons[index].frame.insetBy(dx: 6, dy: 2))
+        editor.string = currentName
+        editor.alignment = .center
+        editor.font = .systemFont(ofSize: 12, weight: .semibold)
+        editor.textColor = .labelColor
+        editor.insertionPointColor = .labelColor
+        editor.drawsBackground = false
+        editor.isRichText = false
+        editor.isVerticallyResizable = false
+        editor.isHorizontallyResizable = false
+        editor.textContainerInset = NSSize(width: 6, height: 4)
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.wantsLayer = true
+        editor.layer?.cornerRadius = 5
+        editor.layer?.zPosition = 10
+        editor.layer?.borderWidth = 1
+        editor.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        editor.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
+        editor.onCommit = { [weak self] in self?.finishRename(committing: true) }
+        editor.onCancel = { [weak self] in self?.finishRename(committing: false) }
+        addSubview(editor, positioned: .above, relativeTo: nil)
+        renameEditor = editor
+
+        window?.makeFirstResponder(editor)
+        editor.setSelectedRange(NSRange(
+            location: 0, length: (editor.string as NSString).length))
+        return true
+    }
+
+    @discardableResult
+    func cancelRename() -> Bool {
+        guard renameEditor != nil else { return false }
+        finishRename(committing: false)
+        return true
     }
 
     override func layout() {
@@ -263,10 +395,54 @@ final class QuickTerminalTabStripView: NSView {
                 width: max(width - 3, 1),
                 height: max(bounds.height - 6, 0))
         }
+        if buttons.indices.contains(selectedIndex) {
+            let selectedFrame = buttons[selectedIndex].frame
+            closeButton.frame = NSRect(
+                x: selectedFrame.maxX - 25,
+                y: selectedFrame.minY,
+                width: 22,
+                height: selectedFrame.height)
+        }
+        if let renamingIndex,
+           buttons.indices.contains(renamingIndex),
+           let renameEditor {
+            renameEditor.frame = buttons[renamingIndex].frame.insetBy(dx: 6, dy: 2)
+        }
     }
 
-    @objc private func tabPressed(_ sender: NSButton) { onSelect?(sender.tag) }
+    private func finishRename(committing: Bool) {
+        guard !endingRename, let editor = renameEditor else { return }
+        endingRename = true
+        let value = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let index = renamingIndex
+        renameEditor = nil
+        renamingIndex = nil
+        editor.onCommit = nil
+        editor.onCancel = nil
+        editor.removeFromSuperview()
+        if let index, buttons.indices.contains(index) { buttons[index].isHidden = false }
+        closeButton.isHidden = !buttons.indices.contains(selectedIndex)
+        endingRename = false
+        if committing {
+            onRenameCommit?(value)
+        } else {
+            onRenameCancel?()
+        }
+    }
+
+    func handleTabClick(at index: Int, clickCount: Int) {
+        if clickCount >= 2 {
+            onRenameRequest?(index)
+        } else {
+            onSelect?(index)
+        }
+    }
+
+    @objc private func tabPressed(_ sender: NSButton) {
+        handleTabClick(at: sender.tag, clickCount: NSApp.currentEvent?.clickCount ?? 1)
+    }
     @objc private func addPressed(_ sender: Any?) { onNewTab?() }
+    @objc private func closePressed(_ sender: Any?) { onClose?(selectedIndex) }
 }
 
 final class QuickTerminalTabsView: NSView {
@@ -303,6 +479,13 @@ final class QuickTerminalTabsView: NSView {
     }
 }
 
+/// Stable identity for an internal quick-terminal tab. Rename UI captures this
+/// value so committing still targets the tab that was active when editing
+/// began, even if the user switches tabs before pressing Return.
+struct QuickTerminalTabID: Hashable {
+    fileprivate let rawValue = UUID()
+}
+
 /// Manages one persistent quick-terminal window. `orderOut` hides it without
 /// touching its live TerminalSession, so scrollback and child processes survive.
 final class QuickTerminalController: NSObject, NSWindowDelegate {
@@ -311,11 +494,16 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     typealias SessionsProvider = (NSView) -> [TerminalSession]
 
     private final class Tab {
+        let id = QuickTerminalTabID()
         let page: QuickTerminalTabPageView
-        var title = "Terminal"
+        var automaticTitle: String
+        var customTitle: String?
         weak var lastFocusedView: TerminalView?
 
-        init(page: QuickTerminalTabPageView) { self.page = page }
+        init(page: QuickTerminalTabPageView, automaticTitle: String) {
+            self.page = page
+            self.automaticTitle = automaticTitle
+        }
     }
 
     private let makeWindow: WindowFactory
@@ -329,6 +517,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private var tabs: [Tab] = []
     private var selectedIndex = 0
     private var showShortcutHints = false
+    private var renamingTabID: QuickTerminalTabID?
     private var previousApp: NSRunningApplication?
     private var transition: UInt64 = 0
     private(set) var visible = false
@@ -370,6 +559,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     var tabCount: Int { tabs.count }
+    var activeTabID: QuickTerminalTabID? {
+        tabs.indices.contains(selectedIndex) ? tabs[selectedIndex].id : nil
+    }
     var activeRootView: NSView? { tabs.indices.contains(selectedIndex) ? tabs[selectedIndex].page : nil }
     var activeSessions: [TerminalSession] {
         guard let activeRootView else { return [] }
@@ -379,6 +571,22 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     func sessions(inTabContaining session: TerminalSession) -> [TerminalSession] {
         guard let tab = tab(containing: session) else { return [] }
         return sessionsInPage(tab.page)
+    }
+
+    func baseTitle(for id: QuickTerminalTabID) -> String? {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return nil }
+        return tab.customTitle ?? tab.automaticTitle
+    }
+
+    func displayTitle(for id: QuickTerminalTabID) -> String? {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return nil }
+        return displayTitle(for: tab)
+    }
+
+    func setCustomTitle(_ title: String?, for id: QuickTerminalTabID) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        tab.customTitle = title
+        renderTabStrip()
     }
 
     func setTitle(_ title: String, for session: TerminalSession) {
@@ -396,21 +604,45 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
            lastFocusedView !== session.view {
             return
         }
-        tab.title = title
+        tab.automaticTitle = title
         renderTabStrip()
     }
 
     func setFocusedSession(_ session: TerminalSession) {
         guard let tab = tab(containing: session) else { return }
         tab.lastFocusedView = session.view
-        tab.title = session.title
-        renderTabStrip()
     }
 
     func setShowsShortcutHints(_ visible: Bool) {
         guard showShortcutHints != visible else { return }
         showShortcutHints = visible
         renderTabStrip()
+    }
+
+    @discardableResult
+    func beginRenamingActiveTab() -> Bool {
+        guard tabs.indices.contains(selectedIndex),
+              let strip = tabsView?.strip
+        else { return false }
+        let tab = tabs[selectedIndex]
+        renamingTabID = tab.id
+        let began = strip.beginRename(
+            at: selectedIndex,
+            currentName: tab.customTitle ?? tab.automaticTitle)
+        if !began { renamingTabID = nil }
+        return began
+    }
+
+    /// Toggles the active tab's rename editor. Toggling it off always cancels
+    /// so a partially typed name is never saved accidentally.
+    @discardableResult
+    func toggleRenamingActiveTab() -> Bool {
+        guard let strip = tabsView?.strip else { return false }
+        if strip.isRenaming {
+            _ = strip.cancelRename()
+            return false
+        }
+        return beginRenamingActiveTab()
     }
 
     func toggle() {
@@ -421,7 +653,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     func newTab() -> TerminalSession? {
         guard let window, let (content, session) = makeTab(window) else { return nil }
         let page = QuickTerminalTabPageView(content: content)
-        let tab = Tab(page: page)
+        let tab = Tab(page: page, automaticTitle: session.title)
         tabs.append(tab)
         tabsView?.install(page)
         selectTab(at: tabs.count - 1)
@@ -448,6 +680,30 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             return false
         }
         return selectTab(at: index)
+    }
+
+    @discardableResult
+    func selectTab(containing session: TerminalSession) -> Bool {
+        guard let index = tabs.firstIndex(where: { contains(session.view, in: $0.page) })
+        else { return false }
+        return selectTab(at: index)
+    }
+
+    /// Selects and focuses a pane even when it belongs to a hidden internal
+    /// tab. If the panel is hidden, `show()` preserves this responder through
+    /// the slide-down animation.
+    @discardableResult
+    func focus(_ session: TerminalSession) -> Bool {
+        guard selectTab(containing: session), let window else { return false }
+        window.makeFirstResponder(session.view)
+        if visible {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(session.view)
+        } else {
+            show()
+        }
+        return true
     }
 
     /// Removes the tab owning `session`. Returns true when it was the final
@@ -566,7 +822,11 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard visible, config.quickTerminalAutohide, window?.attachedSheet == nil else { return }
+        guard visible,
+              config.quickTerminalAutohide,
+              window?.attachedSheet == nil,
+              window?.childWindows?.contains(where: \.isVisible) != true
+        else { return }
         hide(reason: .focusLoss)
     }
 
@@ -596,14 +856,34 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         window.contentView = tabsView
         let firstPage = QuickTerminalTabPageView(content: initialContent)
         tabsView.install(firstPage)
-        tabs = [Tab(page: firstPage)]
+        tabs = [Tab(page: firstPage, automaticTitle: session.title)]
         selectedIndex = 0
         self.tabsView = tabsView
         tabsView.strip.onSelect = { [weak self] index in
             _ = self?.selectTab(at: index)
         }
+        tabsView.strip.onRenameRequest = { [weak self, weak strip = tabsView.strip] index in
+            guard let self else { return }
+            if strip?.isRenaming == true { _ = strip?.cancelRename() }
+            guard self.selectTab(at: index) else { return }
+            _ = self.beginRenamingActiveTab()
+        }
         tabsView.strip.onNewTab = { [weak self] in
             _ = self?.newTab()
+        }
+        tabsView.strip.onClose = { [weak self] index in
+            self?.closeTab(at: index)
+        }
+        tabsView.strip.onRenameCommit = { [weak self] name in
+            guard let self, let id = self.renamingTabID else { return }
+            self.renamingTabID = nil
+            self.setCustomTitle(name.isEmpty ? nil : name, for: id)
+            self.onTabsChanged?()
+            self.restoreActiveResponder()
+        }
+        tabsView.strip.onRenameCancel = { [weak self] in
+            self?.renamingTabID = nil
+            self?.restoreActiveResponder()
         }
         self.window = window
         showTab(at: 0)
@@ -638,15 +918,36 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         if let responder { window.makeFirstResponder(responder) }
     }
 
+    private func restoreActiveResponder() {
+        guard tabs.indices.contains(selectedIndex), let window else { return }
+        let tab = tabs[selectedIndex]
+        let responder = tab.lastFocusedView ?? sessionsInPage(tab.page).first?.view
+        if let responder { window.makeFirstResponder(responder) }
+    }
+
+    private func closeTab(at index: Int) {
+        guard tabs.indices.contains(index) else { return }
+        for session in sessionsInPage(tabs[index].page) {
+            session.terminate()
+        }
+    }
+
     private func renderTabStrip() {
         let titles = tabs.enumerated().map { index, tab in
+            let title = displayTitle(for: tab)
             guard showShortcutHints,
                   let number = TabNavigation.shortcutNumber(
                     forTabIndex: index, tabCount: tabs.count)
-            else { return tab.title }
-            return "⌘\(number)  \(tab.title)"
+            else { return title }
+            return "⌘\(number)  \(title)"
         }
         tabsView?.strip.update(titles: titles, selectedIndex: selectedIndex)
+    }
+
+    private func displayTitle(for tab: Tab) -> String {
+        let base = tab.customTitle ?? tab.automaticTitle
+        let count = sessionsInPage(tab.page).count
+        return count > 1 ? "\(base) (\(count))" : base
     }
 
     private func tab(containing session: TerminalSession) -> Tab? {

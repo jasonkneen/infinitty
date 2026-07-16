@@ -85,7 +85,12 @@ final class NavigationTests: XCTestCase {
     func testMenuExposesTabAndPaneShortcuts() throws {
         _ = NSApplication.shared
         let main = AppDelegate.buildMenu()
+        let file = try XCTUnwrap(main.items.compactMap(\.submenu).first { $0.title == "File" })
         let window = try XCTUnwrap(main.items.compactMap(\.submenu).first { $0.title == "Window" })
+
+        let rename = try XCTUnwrap(file.item(withTitle: "Rename Tab…"))
+        XCTAssertEqual(rename.keyEquivalent, "t")
+        XCTAssertEqual(rename.keyEquivalentModifierMask, [.command, .shift])
 
         let previous = try XCTUnwrap(window.item(withTitle: "Previous Tab"))
         XCTAssertEqual(previous.keyEquivalent, "\u{F702}")
@@ -107,6 +112,69 @@ final class NavigationTests: XCTestCase {
         let paneOne = try XCTUnwrap(panes.item(withTitle: "Pane 1"))
         XCTAssertEqual(paneOne.keyEquivalent, "1")
         XCTAssertEqual(paneOne.keyEquivalentModifierMask, [.shift, .option])
+    }
+
+    func testNativeTabRenameTakesFocusThenCancelsWhenItLosesFocus() {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false)
+        let rename = TabRenameField(hostWindow: window, currentName: "Terminal")
+        let otherWindow = NSWindow(
+            contentRect: NSRect(x: 40, y: 40, width: 300, height: 200),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false)
+        var cancelled = false
+        rename.onCancel = { cancelled = true }
+        defer {
+            rename.dismiss(committed: false)
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            otherWindow.close()
+            window.close()
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        rename.present()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        XCTAssertTrue(rename.isAcceptingInput)
+        otherWindow.makeKeyAndOrderFront(nil)
+        let outsideClick = try! XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: 10, y: 10),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: otherWindow.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1))
+        NSApp.sendEvent(outsideClick)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        XCTAssertTrue(cancelled)
+        XCTAssertFalse(rename.isAcceptingInput)
+    }
+
+    func testNativeRenamePopoverAnchorsBelowSelectedTabSegment() {
+        let anchorX = TabRenameField.fallbackAnchorX(
+            availableWidth: 1_000,
+            tabCount: 2,
+            selectedIndex: 1)
+        let usableWidth: CGFloat = 1_000 - 14 - 76
+        let expectedMidX = 14 + usableWidth / 2 * 1.5
+        XCTAssertEqual(anchorX, expectedMidX, accuracy: 0.5)
+        XCTAssertGreaterThan(anchorX, 500)
+
+        XCTAssertEqual(
+            TabRenameField.fallbackAnchorX(
+                availableWidth: 1_000,
+                tabCount: 1,
+                selectedIndex: 0),
+            120)
     }
 
     func testPaneFocusHighlightStartsTransientAnimation() {
