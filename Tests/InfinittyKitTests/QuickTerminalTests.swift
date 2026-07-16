@@ -243,7 +243,14 @@ final class QuickTerminalTests: XCTestCase {
         controller.setFocusedSession(first)
         XCTAssertEqual(controller.baseTitle(for: firstTabID), "Project One")
 
+        // The controller path is used by Cmd+T and must save the rename before
+        // changing the tab count, just like the strip's "+" button does.
+        XCTAssertTrue(controller.beginRenamingActiveTab())
+        let newTabEditor = try XCTUnwrap(
+            tabsView.strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        newTabEditor.string = "Saved Before New Tab"
         let second = try XCTUnwrap(controller.newTab())
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "Saved Before New Tab")
         let secondTabID = try XCTUnwrap(controller.activeTabID)
         XCTAssertNotEqual(secondTabID, firstTabID)
         controller.setCustomTitle("Project Two", for: secondTabID)
@@ -254,7 +261,7 @@ final class QuickTerminalTests: XCTestCase {
 
         XCTAssertTrue(controller.selectTab(containing: first))
         XCTAssertEqual(controller.activeSessions.map(\.id), [first.id])
-        XCTAssertEqual(controller.baseTitle(for: firstTabID), "Project One")
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "Saved Before New Tab")
         XCTAssertEqual(controller.baseTitle(for: secondTabID), "Project Two")
         controller.setCustomTitle(nil, for: firstTabID)
         XCTAssertEqual(controller.baseTitle(for: firstTabID), "changed automatically")

@@ -61,7 +61,11 @@ final class TerminalView: NSView {
         if let focusHighlightView { return focusHighlightView }
         let highlight = PaneFocusHighlightView(frame: bounds)
         highlight.autoresizingMask = [.width, .height]
-        addSubview(highlight, positioned: .above, relativeTo: nil)
+        if let hint = paneShortcutHintView {
+            addSubview(highlight, positioned: .below, relativeTo: hint)
+        } else {
+            addSubview(highlight, positioned: .above, relativeTo: nil)
+        }
         focusHighlightView = highlight
         return highlight
     }

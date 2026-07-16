@@ -179,6 +179,52 @@ final class NavigationTests: XCTestCase {
         XCTAssertFalse(rename.isAcceptingInput)
     }
 
+    func testNativeTabRenameCommitsWhenHostWindowIsClicked() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false)
+        let rename = TabRenameField(hostWindow: window, currentName: "Terminal")
+        var committedNames: [String] = []
+        var cancelCount = 0
+        rename.onCommit = { committedNames.append($0) }
+        rename.onCancel = { cancelCount += 1 }
+        defer {
+            rename.dismiss(committed: false)
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            window.close()
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        rename.present()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        XCTAssertTrue(rename.isAcceptingInput)
+
+        let editor = try XCTUnwrap(
+            NSApp.windows.compactMap { $0.firstResponder as? TabRenameTextView }.first)
+        editor.string = "Renamed Tab"
+        let hostClick = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: 10, y: 10),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1))
+        NSApp.sendEvent(hostClick)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+
+        XCTAssertEqual(committedNames, ["Renamed Tab"])
+        XCTAssertEqual(cancelCount, 0)
+        XCTAssertFalse(rename.isAcceptingInput)
+    }
+
     func testNativeRenamePopoverAnchorsBelowSelectedTabSegment() {
         let anchorX = TabRenameField.fallbackAnchorX(
             availableWidth: 1_000,

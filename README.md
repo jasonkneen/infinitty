@@ -247,10 +247,12 @@ Font to use one everywhere.
   right-click menu, or double-click its tab title (double-click the window
   title when there is no visible tab strip). Quick-terminal titles become
   editable directly in their tab; native tabs use an anchored rename popover.
-  ⏎ or clicking away commits (Finder-style), ⎋ cancels, and
-  empty restores the automatic title. Custom names are kept in memory for the
-  lifetime of their native or quick-terminal tab; they are not restored after
-  the tab closes or the app restarts.
+  ⏎ commits. Clicking away also commits a quick-terminal rename; for a native
+  tab, clicking elsewhere in the same terminal window commits while clicking
+  outside it cancels. ⎋ or pressing ⇧⌘T again cancels and discards any
+  typed text; an empty name restores the automatic title. Custom names are
+  kept in memory for the lifetime of their native or quick-terminal tab; they
+  are not restored after the tab closes or the app restarts.
 - **Running-process indicator** (native titlebar): the active pane's
   foreground process (e.g. `vim`, `node`, `Safari`) is shown as the window
   subtitle and as a small icon in the trailing edge of the titlebar. The

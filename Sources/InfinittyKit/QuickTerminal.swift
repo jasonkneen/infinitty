@@ -681,6 +681,11 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
 
     @discardableResult
     func newTab() -> TerminalSession? {
+        // All new-tab entry points (the strip's "+", Cmd+T, and callers such
+        // as the control socket) save an in-flight rename before changing the
+        // tab count. The strip's update fallback still cancels unexpected
+        // structural changes where its positional rename target is ambiguous.
+        _ = tabsView?.strip.commitRename()
         guard let window, let (content, session) = makeTab(window) else { return nil }
         let page = QuickTerminalTabPageView(content: content)
         let tab = Tab(page: page, automaticTitle: session.title)
