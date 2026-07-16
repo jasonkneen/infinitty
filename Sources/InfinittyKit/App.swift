@@ -457,7 +457,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Transparency / frosted blur.
         if config.backgroundOpacity < 1 || config.backgroundBlur {
             window.isOpaque = false
-            window.backgroundColor = .clear
+            // A fully clear backing color can make AppKit briefly substitute
+            // an opaque backing store while activating a titled window. Keep
+            // a visually imperceptible alpha so the window remains classified
+            // as translucent throughout the activation transition.
+            window.backgroundColor = .white.withAlphaComponent(0.001)
         }
         session.view.frame = NSRect(origin: .zero, size: contentSize)
         session.view.autoresizingMask = [.width, .height]
