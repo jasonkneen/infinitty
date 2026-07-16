@@ -198,9 +198,10 @@ final class QuickTerminalTabPageView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-/// The strip editor also abandons the rename whenever keyboard focus leaves
-/// it — the strip lives inside the panel, so any other click target or the
-/// panel losing key status means the user moved on.
+/// The strip editor commits whenever keyboard focus leaves it — clicking
+/// into the terminal grid or the panel losing key status both save the typed
+/// name, mirroring Finder's rename-in-place. Only ⎋ (and the ⇧⌘T toggle)
+/// discards it.
 final class QuickTabRenameTextView: TabRenameTextView {
     private var windowResignObserver: Any?
 
@@ -221,7 +222,7 @@ final class QuickTabRenameTextView: TabRenameTextView {
             forName: NSWindow.didResignKeyNotification,
             object: window,
             queue: .main
-        ) { [weak self] _ in self?.onCancel?() }
+        ) { [weak self] _ in self?.onCommit?() }
     }
 
     override func resignFirstResponder() -> Bool {
@@ -229,8 +230,8 @@ final class QuickTabRenameTextView: TabRenameTextView {
         guard resigned else { return false }
         // Let AppKit complete its first-responder transition before removing
         // this editor from the tab strip. Commit/cancel clears the callback,
-        // so its own focus restoration cannot trigger a second cancellation.
-        DispatchQueue.main.async { [weak self] in self?.onCancel?() }
+        // so its own focus restoration cannot trigger a second commit.
+        DispatchQueue.main.async { [weak self] in self?.onCommit?() }
         return true
     }
 }
@@ -371,6 +372,13 @@ final class QuickTerminalTabStripView: NSView {
         return true
     }
 
+    @discardableResult
+    func commitRename() -> Bool {
+        guard renameEditor != nil else { return false }
+        finishRename(committing: true)
+        return true
+    }
+
     override func layout() {
         super.layout()
         let padding: CGFloat = 6
@@ -429,6 +437,10 @@ final class QuickTerminalTabStripView: NSView {
         if clickCount >= 2 {
             onRenameRequest?(index)
         } else {
+            // Button clicks don't move first responder, so the editor's
+            // commit-on-focus-loss never fires; save the typed name before
+            // switching, as Finder does when another item is clicked.
+            commitRename()
             onSelect?(index)
         }
     }
@@ -436,7 +448,10 @@ final class QuickTerminalTabStripView: NSView {
     @objc private func tabPressed(_ sender: NSButton) {
         handleTabClick(at: sender.tag, clickCount: NSApp.currentEvent?.clickCount ?? 1)
     }
-    @objc private func addPressed(_ sender: Any?) { onNewTab?() }
+    @objc private func addPressed(_ sender: Any?) {
+        commitRename() // ditto: "+" mid-rename saves the typed name first
+        onNewTab?()
+    }
     @objc private func closePressed(_ sender: Any?) { onClose?(selectedIndex) }
 }
 
@@ -861,7 +876,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         }
         tabsView.strip.onRenameRequest = { [weak self, weak strip = tabsView.strip] index in
             guard let self else { return }
-            if strip?.isRenaming == true { _ = strip?.cancelRename() }
+            // Double-clicking another tab saves the in-flight rename first,
+            // then opens the editor on the clicked tab.
+            if strip?.isRenaming == true { _ = strip?.commitRename() }
             guard self.selectTab(at: index) else { return }
             _ = self.beginRenamingActiveTab()
         }

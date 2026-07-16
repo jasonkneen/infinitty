@@ -247,7 +247,7 @@ Font to use one everywhere.
   right-click menu, or double-click its tab title (double-click the window
   title when there is no visible tab strip). Quick-terminal titles become
   editable directly in their tab; native tabs use an anchored rename popover.
-  ⏎ commits, ⎋ cancels, and
+  ⏎ or clicking away commits (Finder-style), ⎋ cancels, and
   empty restores the automatic title. Custom names are kept in memory for the
   lifetime of their native or quick-terminal tab; they are not restored after
   the tab closes or the app restarts.

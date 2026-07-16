@@ -206,12 +206,12 @@ final class QuickTerminalTests: XCTestCase {
         controller.setShowsShortcutHints(false)
         XCTAssertTrue(toggledEditor.superview === tabsView.strip)
         XCTAssertTrue(window.firstResponder === toggledEditor)
-        var focusLossCancelled = false
-        tabsView.strip.onRenameCancel = { focusLossCancelled = true }
+        // Focus loss commits the typed name, mirroring Finder rename-in-place.
+        toggledEditor.string = "Saved On Focus Loss"
         XCTAssertTrue(window.makeFirstResponder(tabsView.pageHost))
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
-        XCTAssertTrue(focusLossCancelled)
         XCTAssertFalse(toggledEditor.superview === tabsView.strip)
+        XCTAssertEqual(controller.baseTitle(for: firstTabID), "Saved On Focus Loss")
 
         XCTAssertTrue(controller.beginRenamingActiveTab())
         let committedEditor = try XCTUnwrap(
@@ -284,6 +284,43 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertTrue(text.contains("quick-terminal-screen = mouse"))
         XCTAssertTrue(text.contains("quick-terminal-autohide = false"))
         XCTAssertTrue(text.contains("quick-terminal-animation-duration = 0.15"))
+    }
+
+    func testQuickTabStripCommitsRenameOnTabSwitchAndNewTab() throws {
+        let strip = QuickTerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 500, height: 34))
+        strip.update(titles: ["one", "two"], selectedIndex: 0)
+        strip.layoutSubtreeIfNeeded()
+
+        var committed: String?
+        var selected: Int?
+        var newTabRequested = false
+        strip.onRenameCommit = { committed = $0 }
+        strip.onSelect = { selected = $0 }
+        strip.onNewTab = { newTabRequested = true }
+
+        // Clicking another tab saves the typed name before selecting it.
+        XCTAssertTrue(strip.beginRename(at: 0, currentName: "one"))
+        var editor = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        editor.string = "renamed one"
+        strip.handleTabClick(at: 1, clickCount: 1)
+        XCTAssertEqual(committed, "renamed one")
+        XCTAssertEqual(selected, 1)
+        XCTAssertFalse(strip.isRenaming)
+
+        // The "+" button saves the typed name before opening the new tab.
+        committed = nil
+        XCTAssertTrue(strip.beginRename(at: 1, currentName: "two"))
+        editor = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
+        editor.string = "renamed two"
+        let addButton = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "+" })
+        addButton.performClick(nil)
+        XCTAssertEqual(committed, "renamed two")
+        XCTAssertTrue(newTabRequested)
+        XCTAssertFalse(strip.isRenaming)
     }
 
     func testQuickTabStripAbandonsRenameWhenTabCountChanges() {
