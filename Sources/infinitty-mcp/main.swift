@@ -80,6 +80,12 @@ let tools: [Tool] = [
         invoke: { _ in infinittyRequest("list") }
     ),
     Tool(
+        name: "infinitty_toggle_quick_terminal",
+        description: "Show or hide infinitty's persistent quick terminal.",
+        schema: ["type": "object", "properties": [:]],
+        invoke: { _ in infinittyRequest("toggle-quick-terminal") }
+    ),
+    Tool(
         name: "infinitty_run",
         description: "Run a shell command in a pane and wait for it to finish. "
             + "Returns JSON with exitCode and the command's exact output. "

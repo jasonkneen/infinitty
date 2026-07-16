@@ -132,6 +132,8 @@ frontmost. You can drive a pane while the user types in another app.
 - Agent-created panes (`new-tab` / `new-window` on the app socket) appear
   without taking keyboard focus. Only the explicit `focus <pane>` command
   brings a pane forward — use it only when the user asked to see it.
+- `toggle-quick-terminal` shows or hides the persistent quick-terminal panel.
+  It is intentionally user-visible; invoke it only when the user asks.
 
 ## Rendered markdown
 

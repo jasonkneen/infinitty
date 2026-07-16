@@ -1,5 +1,10 @@
 import AppKit
 
+private enum TerminalWindowRole {
+    case standard
+    case quickTerminal
+}
+
 /// Manages windows, native tabs, and split panes. Every pane is a
 /// self-contained TerminalSession; the delegate only does plumbing.
 public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -50,6 +55,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
+    private var quickTerminalHotKey: GlobalHotKey?
+    private lazy var quickTerminal = QuickTerminalController(
+        config: config,
+        makeWindow: { [weak self] in
+            self?.makeTerminalWindow(role: .quickTerminal)
+        },
+        sessionsInWindow: { [weak self] window in
+            self?.sessions.filter { $0.view.window === window } ?? []
+        })
     /// Currently visible rename UI, if any. Capped to one at a time so the
     /// gestures can't stack.
     private var activeRename: TabRenameField?
@@ -70,6 +84,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         openWindow(cwd: initialWorkingDirectory)
         launchCompleted = true
         watchConfigFile()
+        configureQuickTerminalHotKey()
         if config.notch { notch.show(display: config.notchDisplay) }
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
             openSettings(nil) // UI testing hook
@@ -159,7 +174,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        // Keep a hidden session alive even when it is controlled only through
+        // the menu or socket rather than a registered global shortcut.
+        QuickTerminalResidency.shouldTerminateAfterLastWindowClosed(
+            hasRegisteredHotKey: quickTerminalHotKey != nil,
+            hasLiveSession: quickTerminal.hasLiveSession)
+    }
+
+    public func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag {
+            openWindow(cwd: nil)
+            return false
+        }
+        return true
     }
 
     /// Finder / `open -a Infinitty <folder>` / folder dropped on the Dock
@@ -182,6 +212,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        quickTerminalHotKey = nil
         appControl.stop()
         for s in sessions { s.shutdown() }
     }
@@ -365,12 +396,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func sessionDidExit(_ s: TerminalSession) {
+        let wasQuickTerminal = quickTerminal.contains(s)
         s.shutdown()
         sessions.removeAll { $0 === s }
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
         guard let win = v.window else { return }
+
+        if wasQuickTerminal,
+           !sessions.contains(where: { $0.view.window === win }) {
+            quickTerminal.lastSessionDidExit()
+            refreshPets()
+            return
+        }
 
         if let split = v.superview as? NSSplitView {
             v.removeFromSuperview()
@@ -407,7 +446,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     // MARK: - windows & tabs
 
     @discardableResult
-    private func makeTerminalWindow(cwd: String? = nil) -> (NSWindow, TerminalSession) {
+    private func makeTerminalWindow(
+        cwd: String? = nil,
+        role: TerminalWindowRole = .standard
+    ) -> (NSWindow, TerminalSession) {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let session = createSession(scale: scale)
         session.workingDirectory = cwd
@@ -418,12 +460,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             width: CGFloat(120) * cell.width + inset * 2,
             height: CGFloat(32) * cell.height + inset * 2
         )
-        let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: contentSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
+        let contentRect = NSRect(origin: .zero, size: contentSize)
+        let window: NSWindow
+        switch role {
+        case .standard:
+            window = NSWindow(
+                contentRect: contentRect,
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false)
+        case .quickTerminal:
+            window = QuickTerminalPanel(
+                contentRect: contentRect,
+                styleMask: [.borderless, .resizable, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false)
+        }
         window.title = "infinitty"
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)
@@ -432,12 +484,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1
         )
         window.contentResizeIncrements = cell
-        window.tabbingIdentifier = "infinitty"
-        window.delegate = self
+        if role == .standard {
+            window.tabbingIdentifier = "infinitty"
+            window.delegate = self
+        }
 
         // Titlebar & traffic-light chrome.
-        let customLights = config.trafficLights != "circle"
-        let bareTitlebar = config.titlebarStyle != "native" || customLights
+        let customLights = role == .standard && config.trafficLights != "circle"
+        let bareTitlebar = role == .quickTerminal
+            || config.titlebarStyle != "native" || customLights
         if bareTitlebar {
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
@@ -481,13 +536,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             window.contentView?.addSubview(lights)
         }
 
-        window.center()
+        if role == .standard { window.center() }
 
         // Process-icon accessory: only when the OS titlebar is actually visible.
         // Bare-titlebar modes (transparent / hidden / custom traffic lights) make
         // the titlebar invisible, so an accessory there would either be invisible
         // or, worse, fight with the cell grid.
-        let useAccessory = !bareTitlebar && config.titlebarStyle == "native"
+        let useAccessory = role == .standard
+            && !bareTitlebar && config.titlebarStyle == "native"
         if useAccessory {
             let acc = TabIconAccessory()
             acc.titlebarShowsTitle = true
@@ -641,6 +697,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func closePane(_ sender: Any?) {
         if let session = focusedSession() {
+            if quickTerminal.contains(session),
+               let window = session.view.window,
+               sessions.filter({ $0.view.window === window }).count == 1 {
+                quickTerminal.hide()
+                return
+            }
             session.terminate() // EOF path handles pane/tab teardown
         } else {
             NSApp.keyWindow?.performClose(sender)
@@ -648,7 +710,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func closeWindow(_ sender: Any?) {
+        if NSApp.keyWindow === quickTerminal.window {
+            quickTerminal.hide()
+            return
+        }
         NSApp.keyWindow?.performClose(sender)
+    }
+
+    @objc func toggleQuickTerminal(_ sender: Any?) {
+        quickTerminal.toggle()
     }
 
     // MARK: - app control API (external apps / MCP)
@@ -735,7 +805,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 cwd = dir
             }
             let id = onMain { () -> Int? in
-                guard let host = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else {
+                let key = NSApp.keyWindow.flatMap {
+                    $0.tabbingIdentifier == "infinitty" ? $0 : nil
+                }
+                guard let host = key ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else {
                     return nil
                 }
                 let (window, session) = self.makeTerminalWindow(cwd: cwd)
@@ -769,9 +842,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "focus":
             guard let (s, _) = paneAndText(arg) else { return "error: focus <id>" }
             _ = onMain {
-                s.view.window?.makeKeyAndOrderFront(nil)
-                s.view.window?.makeFirstResponder(s.view)
-                NSApp.activate(ignoringOtherApps: true)
+                if self.quickTerminal.contains(s) {
+                    self.quickTerminal.show()
+                } else {
+                    s.view.window?.makeKeyAndOrderFront(nil)
+                    s.view.window?.makeFirstResponder(s.view)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
             return "ok"
         case "close":
@@ -829,14 +906,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "activity":
             _ = onMain { self.notch.showCustom(text: arg) }
             return "ok"
+        case "toggle-quick-terminal":
+            _ = onMain { self.quickTerminal.toggle() }
+            return "ok"
         default:
             return "error: unknown command '\(cmd)' (ping | version | list | new-window | new-tab | "
                 + "split | focus | close | send | send-line | screen | history | last-output | "
-                + "last-command | exit-code | run | activity | subscribe)"
+                + "last-command | exit-code | run | activity | toggle-quick-terminal | subscribe)"
         }
     }
 
     // MARK: - config reload
+
+    private func configureQuickTerminalHotKey() {
+        quickTerminalHotKey = nil
+        guard let value = config.quickTerminalKey, !value.isEmpty else { return }
+        guard let spec = GlobalHotKeySpec.parse(value) else {
+            let message = "infinitty: invalid quick-terminal-key '\(value)'\n"
+            FileHandle.standardError.write(Data(message.utf8))
+            return
+        }
+        quickTerminalHotKey = GlobalHotKey(spec: spec) { [weak self] in
+            self?.quickTerminal.toggle()
+        }
+        if quickTerminalHotKey == nil {
+            let message = "infinitty: quick-terminal-key '\(value)' is unavailable or already in use\n"
+            FileHandle.standardError.write(Data(message.utf8))
+        }
+    }
 
     @objc func reloadConfiguration(_ sender: Any?) {
         reloadConfig()
@@ -844,6 +941,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func reloadConfig() {
         config = AppConfig.load()
+        quickTerminal.applyConfig(config)
+        configureQuickTerminalHotKey()
         var windows = Set<NSWindow>()
         for s in sessions {
             let scale = s.view.window?.backingScaleFactor
@@ -950,6 +1049,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "New Window", action: #selector(AppDelegate.newWindow(_:)), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "New Tab", action: #selector(AppDelegate.newTab(_:)), keyEquivalent: "t")
+        fileMenu.addItem(
+            withTitle: "Toggle Quick Terminal",
+            action: #selector(AppDelegate.toggleQuickTerminal(_:)),
+            keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Split Right", action: #selector(AppDelegate.splitRight(_:)), keyEquivalent: "d")
         fileMenu.addItem(withTitle: "Split Down", action: #selector(AppDelegate.splitDown(_:)), keyEquivalent: "D")
