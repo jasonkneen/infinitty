@@ -218,10 +218,12 @@ Font to use one everywhere.
   pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly
 - **Quick terminal**: set `quick-terminal-key = cmd+shift+space` for a persistent,
   global Quake-style terminal that slides down from the top. Its shell,
-  scrollback, and splits stay alive while hidden; it can autohide on focus loss
-  and target the main screen, mouse screen, or menu-bar screen. The global key
-  uses the macOS hot-key API and does not require Accessibility permission.
-  Drag its bottom edge to resize it; the height is remembered across launches.
+  scrollback, splits, and internal tabs stay alive while hidden. Its always-visible
+  tab strip supports the `+` button, ⌘T, ⇧⌘←/→, and ⌘1–9. It can autohide on
+  focus loss and target the main screen, mouse screen, or menu-bar screen. The
+  global key uses the macOS hot-key API and does not require Accessibility
+  permission. Drag its bottom edge to resize it; the height is remembered across
+  launches.
 - **Mouse reporting**: click/drag/motion/scroll forwarded to apps that ask
   (vim, tmux, htop, lazygit; modes 9/1000/1002/1003, SGR + legacy encoding).
   Hold **Shift** to scroll local scrollback or select while an app owns the mouse.

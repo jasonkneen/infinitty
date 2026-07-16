@@ -85,14 +85,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
     private var quickTerminalHotKey: GlobalHotKey?
-    private lazy var quickTerminal = QuickTerminalController(
-        config: config,
-        makeWindow: { [weak self] in
-            self?.makeTerminalWindow(role: .quickTerminal)
-        },
-        sessionsInWindow: { [weak self] window in
-            self?.sessions.filter { $0.view.window === window } ?? []
-        })
+    private lazy var quickTerminal: QuickTerminalController = {
+        let controller = QuickTerminalController(
+            config: config,
+            makeWindow: { [weak self] in
+                self?.makeTerminalWindow(role: .quickTerminal)
+            },
+            makeTab: { [weak self] window in
+                self?.makeQuickTerminalTabContent(in: window)
+            },
+            sessionsInPage: { [weak self] page in
+                self?.sessions.filter {
+                    $0.view === page || $0.view.isDescendant(of: page)
+                } ?? []
+            })
+        controller.onTabsChanged = { [weak self, weak controller] in
+            guard let self, let window = controller?.window else { return }
+            self.updateTitle(for: window)
+            self.refreshPets()
+            self.refreshShortcutHints()
+        }
+        return controller
+    }()
     /// Currently visible rename UI, if any. Capped to one at a time so the
     /// gestures can't stack.
     private var activeRename: TabRenameField?
@@ -273,11 +287,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         s.onExited = { [weak self] session in self?.sessionDidExit(session) }
         s.onTitleChanged = { [weak self] session in
             guard let win = session.view.window else { return }
+            self?.quickTerminal.setTitle(session.title, for: session)
             self?.updateTitle(for: win)
             self?.appControl.broadcast(["event": "title", "pane": session.id, "title": session.title])
         }
         s.view.onFocus = { [weak self, weak s] in
             guard let s, let win = s.view.window else { return }
+            self?.quickTerminal.setFocusedSession(s)
             self?.updateTitle(for: win)
         }
         s.terminal.onMarker = { [weak self, weak s] kind, exit in
@@ -313,6 +329,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return sessions.first { $0.view === view }
     }
 
+    private func activeSessions(in win: NSWindow) -> [TerminalSession] {
+        if win === quickTerminal.window { return quickTerminal.activeSessions }
+        return sessions.filter { $0.view.window === win }
+    }
+
     /// Bring `session`'s pane to the front within its window and make it first
     /// responder. Used by the titlebar process-icon accessory to refocus the
     /// pane the icon is describing after a tab switch.
@@ -335,7 +356,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 view.subviews.forEach { collect(from: $0) }
             }
         }
-        if let content = win.contentView { collect(from: content) }
+        let root = win === quickTerminal.window
+            ? quickTerminal.activeRootView
+            : win.contentView
+        if let root { collect(from: root) }
         return views.compactMap { view in sessions.first { $0.view === view } }
     }
 
@@ -414,7 +438,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func focusPane(in direction: PaneFocusDirection) {
         guard let current = focusedSession(), let win = current.view.window else { return }
-        let panes = sessions.filter { $0.view.window === win }
+        let panes = panesInVisualOrder(in: win)
         guard let currentIndex = panes.firstIndex(where: { $0 === current }) else { return }
         let frames = panes.map { $0.view.convert($0.view.bounds, to: nil) }
         guard let target = PaneNavigation.targetIndex(
@@ -426,17 +450,33 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func selectPreviousTab(_ sender: Any?) {
+        if NSApp.keyWindow === quickTerminal.window {
+            _ = quickTerminal.selectPreviousTab()
+            refreshShortcutHints()
+            return
+        }
         NSApp.keyWindow?.selectPreviousTab(sender)
         DispatchQueue.main.async { self.refreshShortcutHints() }
     }
 
     @objc func selectNextTab(_ sender: Any?) {
+        if NSApp.keyWindow === quickTerminal.window {
+            _ = quickTerminal.selectNextTab()
+            refreshShortcutHints()
+            return
+        }
         NSApp.keyWindow?.selectNextTab(sender)
         DispatchQueue.main.async { self.refreshShortcutHints() }
     }
 
     @objc func selectTabByNumber(_ sender: Any?) {
-        guard let item = sender as? NSMenuItem,
+        guard let item = sender as? NSMenuItem else { return }
+        if NSApp.keyWindow === quickTerminal.window {
+            _ = quickTerminal.selectTab(shortcutNumber: item.tag)
+            refreshShortcutHints()
+            return
+        }
+        guard
               let current = NSApp.keyWindow,
               current.tabbingIdentifier == "infinitty" else { return }
         let tabs = current.tabbedWindows ?? [current]
@@ -475,7 +515,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// Tab/window title: custom name if renamed, else the focused pane's
     /// title, plus the pane count when the tab holds more than one shell.
     private func updateTitle(for win: NSWindow) {
-        let inWindow = sessions.filter { $0.view.window === win }
+        let inWindow = activeSessions(in: win)
         guard !inWindow.isEmpty else { return }
         let base: String
         if let custom = titleOverrides[ObjectIdentifier(win)] {
@@ -484,8 +524,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
             base = focused.title
         }
+        let tabTitle = inWindow.count > 1 ? "\(base) (\(inWindow.count))" : base
         let hintedBase: String
-        if showTabShortcutHints,
+        if win === quickTerminal.window {
+            if let focused = inWindow.first(where: { win.firstResponder === $0.view })
+                ?? inWindow.first {
+                quickTerminal.setTitle(tabTitle, for: focused)
+            }
+            quickTerminal.setShowsShortcutHints(showTabShortcutHints)
+            hintedBase = tabTitle
+        } else if showTabShortcutHints,
            let tabs = win.tabbedWindows,
            let index = tabs.firstIndex(where: { $0 === win }),
            let number = TabNavigation.shortcutNumber(
@@ -494,7 +542,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else {
             hintedBase = base
         }
-        win.title = inWindow.count > 1 ? "\(hintedBase) (\(inWindow.count))" : hintedBase
+        win.title = win === quickTerminal.window
+            ? hintedBase
+            : (inWindow.count > 1 ? "\(hintedBase) (\(inWindow.count))" : hintedBase)
         win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
         // also poke the accessory if the title changed in a way that affects it
         tabIconAccessories[ObjectIdentifier(win)]?.refreshFromHost()
@@ -503,7 +553,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// The foreground process for the focused pane in `win`, if any session
     /// in the window is currently tracking one.
     func foregroundProcessInfo(for win: NSWindow) -> ForegroundProcessInfo? {
-        let inWindow = sessions.filter { $0.view.window === win }
+        let inWindow = activeSessions(in: win)
         let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow.first
         return focused?.processTracker?.current
     }
@@ -578,7 +628,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         var chosen = Set<ObjectIdentifier>()
         let windows = Set(sessions.compactMap { $0.view.window })
         for win in windows {
-            let inWindow = sessions.filter { $0.view.window === win }
+            let inWindow = activeSessions(in: win)
             let host = inWindow.max { a, b in
                 let fa = a.view.convert(a.view.bounds, to: nil)
                 let fb = b.view.convert(b.view.bounds, to: nil)
@@ -603,24 +653,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func sessionDidExit(_ s: TerminalSession) {
         let wasQuickTerminal = quickTerminal.contains(s)
+        let quickTabSessions = wasQuickTerminal
+            ? quickTerminal.sessions(inTabContaining: s)
+            : []
+        let win = s.view.window
         s.shutdown()
         sessions.removeAll { $0 === s }
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
-        guard let win = v.window else { return }
+        guard let win else { return }
 
-        if wasQuickTerminal,
-           !sessions.contains(where: { $0.view.window === win }) {
-            quickTerminal.lastSessionDidExit()
+        if wasQuickTerminal, quickTabSessions.count == 1 {
+            _ = quickTerminal.removeTab(containing: s)
             refreshPets()
+            refreshShortcutHints()
             return
         }
 
         if let split = v.superview as? NSSplitView {
             v.removeFromSuperview()
             collapse(split, in: win)
-            if let next = sessions.first(where: { $0.view.window === win }) {
+            if let next = activeSessions(in: win).first {
                 win.makeFirstResponder(next.view)
             }
             updateTitle(for: win)
@@ -765,6 +819,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return (window, session)
     }
 
+    /// Creates a page payload for the existing quick-terminal panel. The
+    /// controller wraps this in a stable tab page before launching the shell.
+    private func makeQuickTerminalTabContent(
+        in window: NSWindow
+    ) -> (NSView, TerminalSession) {
+        let session = createSession(scale: window.backingScaleFactor)
+        let size = quickTerminal.activeRootView?.bounds.size
+            ?? window.contentView?.bounds.size
+            ?? window.contentLayoutRect.size
+        session.view.frame = NSRect(origin: .zero, size: size)
+        session.view.autoresizingMask = [.width, .height]
+        if config.backgroundBlur {
+            let blur = NSVisualEffectView(frame: session.view.frame)
+            blur.material = .hudWindow
+            blur.blendingMode = .behindWindow
+            blur.state = .active
+            blur.autoresizingMask = [.width, .height]
+            blur.addSubview(session.view)
+            return (blur, session)
+        }
+        return (session.view, session)
+    }
+
     private func applyPet(to session: TerminalSession) {
         guard let name = config.pet,
               let texture = Pet.loadTexture(name, device: Renderer.sharedDevice) else {
@@ -819,6 +896,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func newTab(_ sender: Any?) {
+        if NSApp.keyWindow === quickTerminal.window {
+            _ = quickTerminal.newTab()
+            return
+        }
         guard let key = NSApp.keyWindow, key.tabbingIdentifier == "infinitty" else {
             newWindow(sender)
             return
@@ -908,12 +989,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func closePane(_ sender: Any?) {
         if let session = focusedSession() {
-            if quickTerminal.contains(session),
-               let window = session.view.window,
-               sessions.filter({ $0.view.window === window }).count == 1 {
-                quickTerminal.hide()
-                return
-            }
             session.terminate() // EOF path handles pane/tab teardown
         } else {
             NSApp.keyWindow?.performClose(sender)
