@@ -406,6 +406,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     // MARK: - windows & tabs
 
+    private func applyWindowBacking(to window: NSWindow, renderer: Renderer) {
+        let translucent = config.backgroundOpacity < 1 || config.backgroundBlur
+        window.isOpaque = !translucent
+
+        if translucent {
+            // A fully clear backing color can make AppKit briefly substitute
+            // an opaque backing store while activating a titled window. Keep
+            // a visually imperceptible alpha so the window remains classified
+            // as translucent throughout the activation transition.
+            window.backgroundColor = .white.withAlphaComponent(0.001)
+        } else {
+            let bg = renderer.backgroundColor
+            window.backgroundColor = NSColor(
+                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1
+            )
+        }
+    }
+
     @discardableResult
     private func makeTerminalWindow(cwd: String? = nil) -> (NSWindow, TerminalSession) {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
@@ -427,10 +445,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         window.title = "infinitty"
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)
-        let bg = session.renderer.backgroundColor
-        window.backgroundColor = NSColor(
-            srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1
-        )
+        applyWindowBacking(to: window, renderer: session.renderer)
         window.contentResizeIncrements = cell
         window.tabbingIdentifier = "infinitty"
         window.delegate = self
@@ -454,15 +469,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Top inset is derived per-layout from contentLayoutRect in
         // TerminalView.updateGeometry (tracks titlebar + tab bar).
 
-        // Transparency / frosted blur.
-        if config.backgroundOpacity < 1 || config.backgroundBlur {
-            window.isOpaque = false
-            // A fully clear backing color can make AppKit briefly substitute
-            // an opaque backing store while activating a titled window. Keep
-            // a visually imperceptible alpha so the window remains classified
-            // as translucent throughout the activation transition.
-            window.backgroundColor = .white.withAlphaComponent(0.001)
-        }
         session.view.frame = NSRect(origin: .zero, size: contentSize)
         session.view.autoresizingMask = [.width, .height]
         if config.backgroundBlur {
@@ -860,9 +866,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         for win in windows {
             if let s = sessions.first(where: { $0.view.window === win }) {
-                let bg = s.renderer.backgroundColor
-                win.backgroundColor = NSColor(
-                    srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1)
+                applyWindowBacking(to: win, renderer: s.renderer)
                 win.contentResizeIncrements = s.renderer.cellSizePoints
             }
         }
