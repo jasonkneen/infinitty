@@ -17,6 +17,13 @@ enum PaneFocusDirection {
 }
 
 struct PaneNavigation {
+    /// Pane-navigation arrows remain application shortcuts while a terminal
+    /// owns focus, even when there is no pane in that direction. Other
+    /// responders should receive the key so normal text selection still works.
+    static func shouldForwardUnmatchedArrow(terminalHasFocus: Bool) -> Bool {
+        !terminalHasFocus
+    }
+
     static func shortcutNumber(
         keyCode: UInt16,
         modifiers: NSEvent.ModifierFlags
@@ -137,6 +144,12 @@ struct TabNavigation {
         case 124: return 1  // right arrow
         default: return nil
         }
+    }
+
+    static func cycledIndex(from index: Int, offset: Int, tabCount: Int) -> Int? {
+        guard tabCount > 0, (0..<tabCount).contains(index) else { return nil }
+        let normalizedOffset = offset % tabCount
+        return (index + normalizedOffset + tabCount) % tabCount
     }
 
     /// Command-1...8 select that position; Command-9 follows the common macOS

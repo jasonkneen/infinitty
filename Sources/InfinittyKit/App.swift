@@ -468,10 +468,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func focusPane(in direction: PaneFocusDirection) {
         guard let target = paneTarget(in: direction) else {
             // The ⇧⌥arrow menu equivalents match even when there is nothing
-            // to focus (single pane, or a text editor owns the keyboard).
-            // Give the keystroke back: terminals encode it for the pty,
-            // editors keep their word-selection commands.
-            forwardCurrentKeyEventToFirstResponder()
+            // to focus. Terminal panes still own this application shortcut,
+            // so suppress it at an edge rather than leaking an escape sequence
+            // to the pty. Non-terminal editors retain their selection command.
+            if PaneNavigation.shouldForwardUnmatchedArrow(
+                terminalHasFocus: NSApp.keyWindow?.firstResponder is TerminalView
+            ) {
+                forwardCurrentKeyEventToFirstResponder()
+            }
             return
         }
         focusPane(for: target)
@@ -501,35 +505,52 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func selectPreviousTab(_ sender: Any?) {
-        guard let win = NSApp.keyWindow else { return }
-        if let quickWindow = quickTerminal.window, win === quickWindow {
+        guard let current = NSApp.keyWindow else { return }
+        if let quickWindow = quickTerminal.window, current === quickWindow {
             _ = quickTerminal.selectPreviousTab()
             refreshShortcutHints()
             return
         }
         // In a non-tabbed key window (Settings fields, the rename popover)
         // ⇧⌘←/→ is the select-to-line-edge editing command, not tab cycling.
-        guard win.tabbingIdentifier == "infinitty" else {
+        guard current.tabbingIdentifier == "infinitty" else {
             forwardCurrentKeyEventToFirstResponder()
             return
         }
-        win.selectPreviousTab(sender)
-        DispatchQueue.main.async { self.refreshShortcutHints() }
+        selectNativeTab(offset: -1, from: current, sender: sender)
     }
 
     @objc func selectNextTab(_ sender: Any?) {
-        guard let win = NSApp.keyWindow else { return }
-        if let quickWindow = quickTerminal.window, win === quickWindow {
+        guard let current = NSApp.keyWindow else { return }
+        if let quickWindow = quickTerminal.window, current === quickWindow {
             _ = quickTerminal.selectNextTab()
             refreshShortcutHints()
             return
         }
-        guard win.tabbingIdentifier == "infinitty" else {
+        guard current.tabbingIdentifier == "infinitty" else {
             forwardCurrentKeyEventToFirstResponder()
             return
         }
-        win.selectNextTab(sender)
-        DispatchQueue.main.async { self.refreshShortcutHints() }
+        selectNativeTab(offset: 1, from: current, sender: sender)
+    }
+
+    /// Select native tabs directly instead of calling NSWindow's
+    /// selectPreviousTab/selectNextTab actions. Those actions traverse the
+    /// responder chain and can route straight back to this delegate selector,
+    /// causing unbounded recursion.
+    private func selectNativeTab(offset: Int, from current: NSWindow, sender: Any?) {
+        let tabs = current.tabbedWindows ?? [current]
+        guard let currentIndex = tabs.firstIndex(where: { $0 === current }),
+              let targetIndex = TabNavigation.cycledIndex(
+                from: currentIndex,
+                offset: offset,
+                tabCount: tabs.count),
+              targetIndex != currentIndex
+        else { return }
+        let target = tabs[targetIndex]
+        current.tabGroup?.selectedWindow = target
+        target.makeKeyAndOrderFront(sender)
+        refreshShortcutHints()
     }
 
     @objc func selectTabByNumber(_ sender: Any?) {

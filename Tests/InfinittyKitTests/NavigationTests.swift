@@ -52,6 +52,19 @@ final class NavigationTests: XCTestCase {
             keyCode: 126, modifiers: [.command, .shift]))
     }
 
+    func testTabCyclingWrapsWithoutResponderChainActions() {
+        XCTAssertEqual(TabNavigation.cycledIndex(
+            from: 0, offset: -1, tabCount: 3), 2)
+        XCTAssertEqual(TabNavigation.cycledIndex(
+            from: 2, offset: 1, tabCount: 3), 0)
+        XCTAssertEqual(TabNavigation.cycledIndex(
+            from: 1, offset: 1, tabCount: 3), 2)
+        XCTAssertEqual(TabNavigation.cycledIndex(
+            from: 0, offset: 1, tabCount: 1), 0)
+        XCTAssertNil(TabNavigation.cycledIndex(
+            from: 0, offset: 1, tabCount: 0))
+    }
+
     func testPaneNumberSelectionDoesNotAliasNineToLast() {
         XCTAssertEqual(PaneNavigation.index(for: 1, paneCount: 12), 0)
         XCTAssertEqual(PaneNavigation.index(for: 9, paneCount: 12), 8)
@@ -80,6 +93,13 @@ final class NavigationTests: XCTestCase {
             keyCode: 20, modifiers: [.shift, .option, .command]))
         XCTAssertNil(PaneNavigation.shortcutNumber(
             keyCode: 0, modifiers: [.shift, .option]))
+    }
+
+    func testUnmatchedPaneArrowIsSuppressedForTerminalOnly() {
+        XCTAssertFalse(PaneNavigation.shouldForwardUnmatchedArrow(
+            terminalHasFocus: true))
+        XCTAssertTrue(PaneNavigation.shouldForwardUnmatchedArrow(
+            terminalHasFocus: false))
     }
 
     func testMenuExposesTabAndPaneShortcuts() throws {
