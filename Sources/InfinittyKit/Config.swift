@@ -50,6 +50,10 @@ struct AppConfig {
     var markdownCommand = "glow -p" // cmd-click on a .md path runs this
     var markdownRender = "off" // off | auto — auto-render command output via glow
     var autoUpdate = "check" // check | off — daily background update check
+    var quickTerminalKey: String? // e.g. cmd+shift+space; nil disables global registration
+    var quickTerminalScreen: QuickTerminalScreen = .main
+    var quickTerminalAutohide = true
+    var quickTerminalAnimationDuration = 0.2
     var hints = false // inline ghost-text command suggestions (opt-in — conflicts with shell autosuggestions)
     var hintCommand: String? // custom async hint provider (script)
     var aiBaseURL: String? // OpenAI-compatible endpoint for hints
@@ -211,6 +215,16 @@ struct AppConfig {
                 markdownRender = (v == "auto" || v == "on" || v == "true") ? "auto" : "off"
             case "auto-update", "updates":
                 autoUpdate = AppConfig.parseBool(value) || value.lowercased() == "check" ? "check" : "off"
+            case "quick-terminal-key", "quick-terminal-shortcut":
+                quickTerminalKey = value
+            case "quick-terminal-screen":
+                if let screen = QuickTerminalScreen(rawValue: value.lowercased()) {
+                    quickTerminalScreen = screen
+                }
+            case "quick-terminal-autohide":
+                quickTerminalAutohide = AppConfig.parseBool(value)
+            case "quick-terminal-animation-duration":
+                if let duration = Double(value) { quickTerminalAnimationDuration = duration }
             case "hints":
                 hints = AppConfig.parseBool(value)
             case "hint-command":
@@ -285,6 +299,18 @@ struct AppConfig {
             if petMode != "window" { out += "pet-mode = pane\n" }
         }
         if !agentGlow { out += "agent-glow = false\n" }
+        // Settings rewrites the managed config. Do not perpetuate a malformed
+        // shortcut that can never be registered; valid-but-currently-busy
+        // shortcuts still serialize because registration availability is
+        // transient.
+        if let key = quickTerminalKey, GlobalHotKeySpec.parse(key) != nil {
+            out += "quick-terminal-key = \(key)\n"
+            out += "quick-terminal-screen = \(quickTerminalScreen.rawValue)\n"
+            if !quickTerminalAutohide { out += "quick-terminal-autohide = false\n" }
+            if quickTerminalAnimationDuration != 0.2 {
+                out += "quick-terminal-animation-duration = \(quickTerminalAnimationDuration)\n"
+            }
+        }
         if hints { out += "hints = true\n" }
         if let v = hintCommand, !v.isEmpty { out += "hint-command = \(v)\n" }
         if let v = aiBaseURL, !v.isEmpty { out += "ai-base-url = \(v)\n" }
@@ -318,5 +344,6 @@ struct AppConfig {
         cellHeightExtra = min(max(cellHeightExtra, -10), 40)
         petScale = min(max(petScale, 0.1), 2)
         backgroundOpacity = min(max(backgroundOpacity, 0.15), 1)
+        quickTerminalAnimationDuration = min(max(quickTerminalAnimationDuration, 0), 2)
     }
 }

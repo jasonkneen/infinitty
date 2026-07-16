@@ -92,6 +92,7 @@ printf 'list\n'                | nc -U /tmp/infinitty-current.sock  # panes as J
 printf 'run 1 make test\n'     | nc -U /tmp/infinitty-current.sock  # sync: {"exitCode":0,"output":…}
 printf 'new-tab\n'             | nc -U /tmp/infinitty-current.sock  # returns new pane id
 printf 'split 1 right\n'       | nc -U /tmp/infinitty-current.sock
+printf 'toggle-quick-terminal\n' | nc -U /tmp/infinitty-current.sock
 printf 'focus 2\n'             | nc -U /tmp/infinitty-current.sock
 printf 'activity deploying…\n' | nc -U /tmp/infinitty-current.sock  # post to the notch widget
 printf 'subscribe\n'           | nc -U /tmp/infinitty-current.sock  # JSON event stream
@@ -211,6 +212,12 @@ Font to use one everywhere.
 - **Tabs**: native macOS tabs — ⌘T new tab, ⌘N new window, tab bar "+" works
 - **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
   the focused pane (tab closes when its last pane exits)
+- **Quick terminal**: set `quick-terminal-key = cmd+shift+space` for a persistent,
+  global Quake-style terminal that slides down from the top. Its shell,
+  scrollback, and splits stay alive while hidden; it can autohide on focus loss
+  and target the main screen, mouse screen, or menu-bar screen. The global key
+  uses the macOS hot-key API and does not require Accessibility permission.
+  Drag its bottom edge to resize it; the height is remembered across launches.
 - **Mouse reporting**: click/drag/motion/scroll forwarded to apps that ask
   (vim, tmux, htop, lazygit; modes 9/1000/1002/1003, SGR + legacy encoding).
   Hold **Shift** to scroll local scrollback or select while an app owns the mouse.

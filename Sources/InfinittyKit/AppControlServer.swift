@@ -24,6 +24,7 @@ import Foundation
 ///   last-command <id>        -> last command line (OSC 133)
 ///   exit-code <id>           -> last exit code (OSC 133)
 ///   activity <text>          -> show text in the notch live-activity widget
+///   toggle-quick-terminal    -> show or hide the persistent quick terminal
 ///   subscribe                -> connection stays open; JSON events stream in:
 ///                               pane-opened, pane-closed, title, marker
 final class AppControlServer {
