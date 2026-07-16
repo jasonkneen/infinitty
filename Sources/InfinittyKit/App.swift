@@ -14,24 +14,38 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         installModifierHintMonitor()
     }
 
-    /// Install a local mouse monitor that turns double-clicks on an infinitty
-    /// window's titlebar into the inline rename UI. (We can't hook the system
-    /// tab bar directly — modern macOS native tabs don't expose hit-testing —
-    /// but the active tab's title is rendered into the titlebar strip in
-    /// both native and bare-titlebar modes, so this is the natural place.)
+    /// Install a local mouse monitor that turns a native-tab double-click (or
+    /// a single-window titlebar double-click) into the rename UI.
     private func installTitlebarDoubleClickMonitor() {
         titlebarClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
             [weak self] event in
             guard let self else { return event }
-            guard event.clickCount == 2,
-                  let win = event.window,
-                  win.tabbingIdentifier == "infinitty",
-                  self.eventIsInTitlebar(event, of: win)
+            guard event.clickCount == 2, let sourceWindow = event.window else { return event }
+
+            let screenPoint = sourceWindow.convertPoint(toScreen: event.locationInWindow)
+            let normalWindows = NSApp.windows.filter { $0.tabbingIdentifier == "infinitty" }
+            for host in normalWindows {
+                guard let hit = host.nativeTabButton(atScreenPoint: screenPoint),
+                      let tabs = host.tabbedWindows,
+                      tabs.indices.contains(hit.index)
+                else { continue }
+                let target = tabs[hit.index]
+                host.tabGroup?.selectedWindow = target
+                target.makeKeyAndOrderFront(nil)
+                DispatchQueue.main.async { [weak self, weak target] in
+                    guard let self, let target else { return }
+                    self.beginInlineRename(for: target)
+                }
+                return nil
+            }
+
+            // No native tab button means this is a single-window/bare-titlebar
+            // layout. Preserve the documented titlebar double-click gesture.
+            guard sourceWindow.tabbingIdentifier == "infinitty",
+                  sourceWindow.nativeTabButtonsInVisualOrder().isEmpty,
+                  self.eventIsInTitlebar(event, of: sourceWindow)
             else { return event }
-            // Consume the event so the system doesn't also treat it as a
-            // window-drag start (native tabs use double-click for nothing,
-            // but bare-titlebar drags would otherwise kick off).
-            self.beginInlineRename(for: win)
+            self.beginInlineRename(for: sourceWindow)
             return nil
         }
     }
@@ -69,8 +83,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// the top inset of the content view occupies the same role.
     private func eventIsInTitlebar(_ event: NSEvent, of win: NSWindow) -> Bool {
         let p = event.locationInWindow
-        guard win.frame.contains(p) else { return false }
-        let contentTop = win.frame.maxY - win.contentLayoutRect.maxY
+        guard p.x >= 0, p.x <= win.frame.width,
+              p.y >= 0, p.y <= win.frame.height
+        else { return false }
+        let contentTop = win.contentLayoutRect.maxY
         return p.y >= contentTop
     }
 
@@ -517,6 +533,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func updateTitle(for win: NSWindow) {
         let inWindow = activeSessions(in: win)
         guard !inWindow.isEmpty else { return }
+        if win === quickTerminal.window {
+            let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
+            quickTerminal.setTitle(focused.title, for: focused)
+            quickTerminal.setShowsShortcutHints(showTabShortcutHints)
+            win.title = quickTerminal.activeTabID
+                .flatMap { quickTerminal.displayTitle(for: $0) }
+                ?? focused.title
+            win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
+            return
+        }
+
         let base: String
         if let custom = titleOverrides[ObjectIdentifier(win)] {
             base = custom
@@ -524,16 +551,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
             base = focused.title
         }
-        let tabTitle = inWindow.count > 1 ? "\(base) (\(inWindow.count))" : base
         let hintedBase: String
-        if win === quickTerminal.window {
-            if let focused = inWindow.first(where: { win.firstResponder === $0.view })
-                ?? inWindow.first {
-                quickTerminal.setTitle(tabTitle, for: focused)
-            }
-            quickTerminal.setShowsShortcutHints(showTabShortcutHints)
-            hintedBase = tabTitle
-        } else if showTabShortcutHints,
+        if showTabShortcutHints,
            let tabs = win.tabbedWindows,
            let index = tabs.firstIndex(where: { $0 === win }),
            let number = TabNavigation.shortcutNumber(
@@ -542,9 +561,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else {
             hintedBase = base
         }
-        win.title = win === quickTerminal.window
-            ? hintedBase
-            : (inWindow.count > 1 ? "\(hintedBase) (\(inWindow.count))" : hintedBase)
+        win.title = inWindow.count > 1 ? "\(hintedBase) (\(inWindow.count))" : hintedBase
         win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
         // also poke the accessory if the title changed in a way that affects it
         tabIconAccessories[ObjectIdentifier(win)]?.refreshFromHost()
@@ -578,18 +595,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func renameTab(_ sender: Any?) {
-        guard let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
-              win.tabbingIdentifier == "infinitty" else { return }
+        // Treat the shortcut as a mode toggle. Repeating it while an editor
+        // is open abandons the pending value instead of replacing the editor.
+        if let activeRename {
+            activeRename.dismiss(committed: false)
+            self.activeRename = nil
+            return
+        }
+        guard let win = NSApp.keyWindow
+                ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
+              win === quickTerminal.window || win.tabbingIdentifier == "infinitty"
+        else { return }
+        if win === quickTerminal.window {
+            _ = quickTerminal.toggleRenamingActiveTab()
+            return
+        }
         beginInlineRename(for: win)
     }
 
     /// Show the inline rename UI over `win`'s titlebar. If a rename is
-    /// already in flight for some other window, commit it and replace it
+    /// already in flight for some other window, cancel it and replace it
     /// rather than stack two UIs fighting over first responder.
     func beginInlineRename(for win: NSWindow) {
-        // Dismiss any previous rename by committing — the user is now
-        // expressing intent on a (possibly different) target.
-        activeRename?.dismiss(committed: true)
+        // A new rename supersedes any unfinished edit without saving it.
+        activeRename?.dismiss(committed: false)
         activeRename = nil
 
         // Use the stored override if set, otherwise derive the bare title
@@ -613,7 +642,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             if self.activeRename === field { self.activeRename = nil }
         }
         field.onCancel = { [weak self, weak field] in
-            if self?.activeRename === field { self?.activeRename = nil }
+            guard let self else { return }
+            if self.activeRename === field { self.activeRename = nil }
         }
         activeRename = field
         field.present()
@@ -653,6 +683,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func sessionDidExit(_ s: TerminalSession) {
         let wasQuickTerminal = quickTerminal.contains(s)
+        let quickTabWasActive = wasQuickTerminal
+            && quickTerminal.activeSessions.contains { $0 === s }
         let quickTabSessions = wasQuickTerminal
             ? quickTerminal.sessions(inTabContaining: s)
             : []
@@ -674,7 +706,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let split = v.superview as? NSSplitView {
             v.removeFromSuperview()
             collapse(split, in: win)
-            if let next = activeSessions(in: win).first {
+            let next: TerminalSession?
+            if wasQuickTerminal {
+                next = quickTabWasActive
+                    ? quickTabSessions.first { $0 !== s }
+                    : nil
+            } else {
+                next = activeSessions(in: win).first
+            }
+            if let next {
                 win.makeFirstResponder(next.view)
             }
             updateTitle(for: win)
@@ -1131,7 +1171,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let (s, _) = paneAndText(arg) else { return "error: focus <id>" }
             _ = onMain {
                 if self.quickTerminal.contains(s) {
-                    self.quickTerminal.show()
+                    _ = self.quickTerminal.focus(s)
                 } else {
                     s.view.window?.makeKeyAndOrderFront(nil)
                     s.view.window?.makeFirstResponder(s.view)
@@ -1346,7 +1386,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         fileMenu.addItem(withTitle: "Split Down", action: #selector(AppDelegate.splitDown(_:)), keyEquivalent: "D")
         fileMenu.addItem(withTitle: "Split Left", action: #selector(AppDelegate.splitLeft(_:)), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Split Up", action: #selector(AppDelegate.splitUp(_:)), keyEquivalent: "")
-        fileMenu.addItem(withTitle: "Rename Tab…", action: #selector(AppDelegate.renameTab(_:)), keyEquivalent: "")
+        let renameTab = fileMenu.addItem(
+            withTitle: "Rename Tab…",
+            action: #selector(AppDelegate.renameTab(_:)),
+            keyEquivalent: "t")
+        renameTab.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Reload Configuration", action: #selector(AppDelegate.reloadConfiguration(_:)), keyEquivalent: "r")
         fileMenu.addItem(.separator())
