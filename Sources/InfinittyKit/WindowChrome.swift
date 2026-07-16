@@ -140,6 +140,89 @@ final class AgentGlowView: NSView {
     }
 }
 
+/// A brief, non-interactive border flash used to make keyboard pane focus
+/// changes immediately visible without leaving permanent chrome on the grid.
+final class PaneFocusHighlightView: NSView {
+    private(set) var isPersistentlyVisible = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.08).cgColor
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.95).cgColor
+        layer?.borderWidth = 2
+        layer?.cornerRadius = 7
+        layer?.opacity = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func setPersistentlyVisible(_ visible: Bool) {
+        isPersistentlyVisible = visible
+        layer?.removeAnimation(forKey: "focusFlash")
+        layer?.opacity = visible ? 1 : 0
+    }
+
+    func flash() {
+        guard let layer else { return }
+        guard !isPersistentlyVisible else {
+            layer.opacity = 1
+            return
+        }
+        layer.removeAnimation(forKey: "focusFlash")
+        let animation = CAKeyframeAnimation(keyPath: "opacity")
+        animation.values = [0, 1, 1, 0]
+        animation.keyTimes = [0, 0.08, 0.28, 1]
+        animation.duration = 0.38
+        animation.timingFunctions = [
+            CAMediaTimingFunction(name: .easeOut),
+            CAMediaTimingFunction(name: .linear),
+            CAMediaTimingFunction(name: .easeIn),
+        ]
+        layer.add(animation, forKey: "focusFlash")
+    }
+}
+
+/// Number badge shown while Option is held so direct pane shortcuts are
+/// discoverable without permanently consuming terminal space.
+final class PaneShortcutHintView: NSView {
+    private let label = NSTextField(labelWithString: "")
+    var shortcutText: String { label.stringValue }
+
+    init(number: Int) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 50, height: 30))
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.76).cgColor
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.9).cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = 9
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.3
+        layer?.shadowRadius = 8
+        layer?.shadowOffset = .zero
+
+        label.alignment = .center
+        label.font = .monospacedSystemFont(ofSize: 15, weight: .semibold)
+        label.textColor = .white
+        addSubview(label)
+        setNumber(number)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func setNumber(_ number: Int) {
+        label.stringValue = "⇧⌥\(number)"
+        label.sizeToFit()
+        label.frame.origin = NSPoint(
+            x: floor((bounds.width - label.frame.width) / 2),
+            y: floor((bounds.height - label.frame.height) / 2))
+    }
+}
+
 /// Custom traffic-light buttons (square / rectangle / diamond). Replaces the
 /// hidden native buttons; clicks map to close / miniaturize / zoom.
 final class TrafficLightsView: NSView {

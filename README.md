@@ -208,9 +208,13 @@ Font to use one everywhere.
 
 ### Tabs, splits, mouse, selection
 
-- **Tabs**: native macOS tabs — ⌘T new tab, ⌘N new window, tab bar "+" works
+- **Tabs**: native macOS tabs — ⌘T new tab, ⇧⌘←/→ previous/next tab,
+  ⌘1–8 select by position, ⌘9 selects the last tab, and the tab bar "+" works;
+  hold ⌘ to reveal the numbers in tab titles
 - **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
-  the focused pane (tab closes when its last pane exits)
+  the focused pane (tab closes when its last pane exits); ⇧⌥←/→/↑/↓ focuses
+  and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
+  pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly
 - **Mouse reporting**: click/drag/motion/scroll forwarded to apps that ask
   (vim, tmux, htop, lazygit; modes 9/1000/1002/1003, SGR + legacy encoding).
   Hold **Shift** to scroll local scrollback or select while an app owns the mouse.

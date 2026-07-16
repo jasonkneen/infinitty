@@ -6,6 +6,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     override public init() {
         super.init()
         installTitlebarDoubleClickMonitor()
+        installModifierHintMonitor()
     }
 
     /// Install a local mouse monitor that turns double-clicks on an infinitty
@@ -27,6 +28,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             // but bare-titlebar drags would otherwise kick off).
             self.beginInlineRename(for: win)
             return nil
+        }
+    }
+
+    private func installModifierHintMonitor() {
+        modifierHintMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) {
+            [weak self] event in
+            self?.setShortcutHintModifiers(event.modifierFlags)
+            return event
+        }
+        paneShortcutKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard let self else { return event }
+            if let offset = TabNavigation.cycleOffset(
+                keyCode: event.keyCode,
+                modifiers: event.modifierFlags),
+               NSApp.keyWindow?.firstResponder is TerminalView {
+                if offset < 0 {
+                    self.selectPreviousTab(event)
+                } else {
+                    self.selectNextTab(event)
+                }
+                return nil
+            }
+            guard let number = PaneNavigation.shortcutNumber(
+                    keyCode: event.keyCode,
+                    modifiers: event.modifierFlags)
+            else { return event }
+            return self.selectPane(number: number, requireTerminalFocus: true) ? nil : event
         }
     }
 
@@ -55,6 +84,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var activeRename: TabRenameField?
     /// Local mouse monitor that turns titlebar double-clicks into inline rename.
     private var titlebarClickMonitor: Any?
+    private var modifierHintMonitor: Any?
+    private var paneShortcutKeyMonitor: Any?
+    private var commandModifierHeld = false
+    private var paneModifiersHeld = false
+    private var showTabShortcutHints = false
+    private var showPaneShortcutHints = false
+    private var pendingTabHint: DispatchWorkItem?
+    private var pendingPaneHint: DispatchWorkItem?
     /// Shell cwd for the first window — set from a folder argv (GitHub
     /// Desktop et al.) before run(), or by an open-folder event that arrives
     /// during launch.
@@ -182,8 +219,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        pendingTabHint?.cancel()
+        pendingPaneHint?.cancel()
+        if let titlebarClickMonitor { NSEvent.removeMonitor(titlebarClickMonitor) }
+        if let modifierHintMonitor { NSEvent.removeMonitor(modifierHintMonitor) }
+        if let paneShortcutKeyMonitor { NSEvent.removeMonitor(paneShortcutKeyMonitor) }
         appControl.stop()
         for s in sessions { s.shutdown() }
+    }
+
+    public func applicationWillResignActive(_ notification: Notification) {
+        setShortcutHintModifiers([])
     }
 
     // MARK: - session plumbing
@@ -245,6 +291,153 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         win.makeKeyAndOrderFront(nil)
     }
 
+    private func panesInVisualOrder(in win: NSWindow) -> [TerminalSession] {
+        var views: [TerminalView] = []
+        func collect(from view: NSView) {
+            if let terminal = view as? TerminalView {
+                views.append(terminal)
+                return
+            }
+            if let split = view as? NSSplitView {
+                split.arrangedSubviews.forEach { collect(from: $0) }
+            } else {
+                view.subviews.forEach { collect(from: $0) }
+            }
+        }
+        if let content = win.contentView { collect(from: content) }
+        return views.compactMap { view in sessions.first { $0.view === view } }
+    }
+
+    private func setShortcutHintModifiers(_ modifiers: NSEvent.ModifierFlags) {
+        let relevant = modifiers
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection([.command, .option, .control, .shift])
+        let tabHints = relevant == .command
+        let paneHints = relevant == [.shift, .option]
+        if tabHints != commandModifierHeld {
+            commandModifierHeld = tabHints
+            pendingTabHint?.cancel()
+            pendingTabHint = nil
+            if tabHints {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.commandModifierHeld else { return }
+                    self.showTabShortcutHints = true
+                    self.refreshShortcutHints()
+                }
+                pendingTabHint = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+            } else if showTabShortcutHints {
+                showTabShortcutHints = false
+                refreshShortcutHints()
+            }
+        }
+        if paneHints != paneModifiersHeld {
+            paneModifiersHeld = paneHints
+            pendingPaneHint?.cancel()
+            pendingPaneHint = nil
+            if paneHints {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.paneModifiersHeld else { return }
+                    self.showPaneShortcutHints = true
+                    self.refreshShortcutHints()
+                }
+                pendingPaneHint = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+            } else if showPaneShortcutHints {
+                showPaneShortcutHints = false
+                refreshShortcutHints()
+            }
+        }
+    }
+
+    private func refreshShortcutHints() {
+        var windows: [NSWindow] = []
+        var seen = Set<ObjectIdentifier>()
+        for session in sessions {
+            session.view.setPaneShortcutHint(number: nil)
+            session.view.setPaneShortcutSelectionHighlighted(false)
+            if let win = session.view.window,
+               seen.insert(ObjectIdentifier(win)).inserted {
+                windows.append(win)
+            }
+        }
+        windows.forEach(updateTitle)
+
+        guard showPaneShortcutHints, let win = NSApp.keyWindow else { return }
+        for (index, pane) in panesInVisualOrder(in: win).prefix(9).enumerated() {
+            pane.view.setPaneShortcutHint(number: index + 1)
+        }
+        (win.firstResponder as? TerminalView)?
+            .setPaneShortcutSelectionHighlighted(true)
+    }
+
+    public func windowDidBecomeKey(_ notification: Notification) {
+        guard showPaneShortcutHints else { return }
+        refreshShortcutHints()
+    }
+
+    @objc func focusPaneLeft(_ sender: Any?) { focusPane(in: .left) }
+    @objc func focusPaneRight(_ sender: Any?) { focusPane(in: .right) }
+    @objc func focusPaneUp(_ sender: Any?) { focusPane(in: .up) }
+    @objc func focusPaneDown(_ sender: Any?) { focusPane(in: .down) }
+
+    private func focusPane(in direction: PaneFocusDirection) {
+        guard let current = focusedSession(), let win = current.view.window else { return }
+        let panes = sessions.filter { $0.view.window === win }
+        guard let currentIndex = panes.firstIndex(where: { $0 === current }) else { return }
+        let frames = panes.map { $0.view.convert($0.view.bounds, to: nil) }
+        guard let target = PaneNavigation.targetIndex(
+            from: currentIndex, frames: frames, direction: direction)
+        else { return }
+        focusPane(for: panes[target])
+        if showPaneShortcutHints { refreshShortcutHints() }
+        panes[target].view.showFocusHighlight()
+    }
+
+    @objc func selectPreviousTab(_ sender: Any?) {
+        NSApp.keyWindow?.selectPreviousTab(sender)
+        DispatchQueue.main.async { self.refreshShortcutHints() }
+    }
+
+    @objc func selectNextTab(_ sender: Any?) {
+        NSApp.keyWindow?.selectNextTab(sender)
+        DispatchQueue.main.async { self.refreshShortcutHints() }
+    }
+
+    @objc func selectTabByNumber(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let current = NSApp.keyWindow,
+              current.tabbingIdentifier == "infinitty" else { return }
+        let tabs = current.tabbedWindows ?? [current]
+        guard let index = TabNavigation.index(for: item.tag, tabCount: tabs.count) else { return }
+        let target = tabs[index]
+        current.tabGroup?.selectedWindow = target
+        target.makeKeyAndOrderFront(sender)
+        refreshShortcutHints()
+    }
+
+    @objc func selectPaneByNumber(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        _ = selectPane(number: item.tag)
+    }
+
+    @discardableResult
+    private func selectPane(number: Int, requireTerminalFocus: Bool = false) -> Bool {
+        guard let win = NSApp.keyWindow else { return false }
+        let panes = panesInVisualOrder(in: win)
+        let index = requireTerminalFocus
+            ? PaneNavigation.shortcutTargetIndex(
+                for: number,
+                paneCount: panes.count,
+                terminalHasFocus: win.firstResponder is TerminalView)
+            : PaneNavigation.index(for: number, paneCount: panes.count)
+        guard let index else { return false }
+        focusPane(for: panes[index])
+        if showPaneShortcutHints { refreshShortcutHints() }
+        panes[index].view.showFocusHighlight()
+        return true
+    }
+
     private var titleOverrides: [ObjectIdentifier: String] = [:]
     private var tabIconAccessories: [ObjectIdentifier: TabIconAccessory] = [:]
 
@@ -260,7 +453,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
             base = focused.title
         }
-        win.title = inWindow.count > 1 ? "\(base) (\(inWindow.count))" : base
+        let hintedBase: String
+        if showTabShortcutHints,
+           let tabs = win.tabbedWindows,
+           let index = tabs.firstIndex(where: { $0 === win }),
+           let number = TabNavigation.shortcutNumber(
+                forTabIndex: index, tabCount: tabs.count) {
+            hintedBase = "⌘\(number) \(base)"
+        } else {
+            hintedBase = base
+        }
+        win.title = inWindow.count > 1 ? "\(hintedBase) (\(inWindow.count))" : hintedBase
         win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
         // also poke the accessory if the title changed in a way that affects it
         tabIconAccessories[ObjectIdentifier(win)]?.refreshFromHost()
@@ -283,7 +486,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let override = titleOverrides[ObjectIdentifier(win)] {
             return override
         }
-        let t = win.title
+        var t = win.title
+        if let r = t.range(of: "^⌘[1-9] ", options: .regularExpression) {
+            t.removeSubrange(r)
+        }
         if let r = t.range(of: " \\(\\d+\\)$", options: .regularExpression) {
             return String(t[..<r.lowerBound])
         }
@@ -380,6 +586,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
             updateTitle(for: win)
             refreshPets()
+            refreshShortcutHints()
         } else {
             win.close() // last pane: closes this window/tab
         }
@@ -528,6 +735,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
+            self.refreshShortcutHints()
         }
         return session
     }
@@ -549,6 +757,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
+            self.refreshShortcutHints()
         }
         return session
     }
@@ -565,6 +774,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
+            self.refreshShortcutHints()
         }
     }
 
@@ -635,6 +845,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             win.makeFirstResponder(newSession.view)
             self.refreshPets()
             self.updateTitle(for: win)
+            self.refreshShortcutHints()
         }
         newSession.launch()
     }
@@ -721,6 +932,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 DispatchQueue.main.async {
                     self.refreshPets()
                     self.updateTitle(for: window)
+                    self.refreshShortcutHints()
                 }
                 return session.id
             }
@@ -745,6 +957,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 DispatchQueue.main.async {
                     self.refreshPets()
                     self.updateTitle(for: window)
+                    self.refreshShortcutHints()
                 }
                 return session.id
             } ?? nil
@@ -982,6 +1195,60 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         main.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(.separator())
+
+        let previousTab = windowMenu.addItem(
+            withTitle: "Previous Tab",
+            action: #selector(AppDelegate.selectPreviousTab(_:)),
+            keyEquivalent: "\u{F702}")
+        previousTab.keyEquivalentModifierMask = [.command, .shift]
+        let nextTab = windowMenu.addItem(
+            withTitle: "Next Tab",
+            action: #selector(AppDelegate.selectNextTab(_:)),
+            keyEquivalent: "\u{F703}")
+        nextTab.keyEquivalentModifierMask = [.command, .shift]
+
+        let selectTabItem = NSMenuItem(title: "Select Tab", action: nil, keyEquivalent: "")
+        let selectTabMenu = NSMenu(title: "Select Tab")
+        for number in 1...9 {
+            let title = number == 9 ? "Last Tab" : "Tab \(number)"
+            let item = selectTabMenu.addItem(
+                withTitle: title,
+                action: #selector(AppDelegate.selectTabByNumber(_:)),
+                keyEquivalent: String(number))
+            item.tag = number
+        }
+        selectTabItem.submenu = selectTabMenu
+        windowMenu.addItem(selectTabItem)
+
+        let focusPaneItem = NSMenuItem(title: "Focus Pane", action: nil, keyEquivalent: "")
+        let focusPaneMenu = NSMenu(title: "Focus Pane")
+        let paneBindings: [(String, Selector, String)] = [
+            ("Left", #selector(AppDelegate.focusPaneLeft(_:)), "\u{F702}"),
+            ("Right", #selector(AppDelegate.focusPaneRight(_:)), "\u{F703}"),
+            ("Up", #selector(AppDelegate.focusPaneUp(_:)), "\u{F700}"),
+            ("Down", #selector(AppDelegate.focusPaneDown(_:)), "\u{F701}"),
+        ]
+        for (title, action, key) in paneBindings {
+            let item = focusPaneMenu.addItem(
+                withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = [.shift, .option]
+        }
+        focusPaneMenu.addItem(.separator())
+        // AppKit displays these equivalents in the menu, but shifted Option
+        // digits become symbols before menu matching. The local key monitor
+        // above uses physical number-key codes for that keyboard path and only
+        // consumes the event when a pane selection can be performed.
+        for number in 1...9 {
+            let item = focusPaneMenu.addItem(
+                withTitle: "Pane \(number)",
+                action: #selector(AppDelegate.selectPaneByNumber(_:)),
+                keyEquivalent: String(number))
+            item.tag = number
+            item.keyEquivalentModifierMask = [.shift, .option]
+        }
+        focusPaneItem.submenu = focusPaneMenu
+        windowMenu.addItem(focusPaneItem)
         windowItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
 
