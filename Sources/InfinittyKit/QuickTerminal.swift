@@ -122,6 +122,10 @@ enum QuickTerminalHideReason: Equatable {
     case focusLoss
 
     var restoresPreviousApplication: Bool { self == .explicit }
+
+    func shouldRestorePreviousApplication(windowIsKey: Bool) -> Bool {
+        restoresPreviousApplication && windowIsKey
+    }
 }
 
 enum QuickTerminalResidency {
@@ -248,6 +252,8 @@ final class QuickTerminalTabStripView: NSView {
     private var renamingIndex: Int?
     private weak var renameEditor: QuickTabRenameTextView?
     private var endingRename = false
+    private let backgroundEffect = NSVisualEffectView()
+    private let backgroundTint = NSView()
     private let addButton = NSButton(title: "+", target: nil, action: nil)
     private let closeButton = NSButton(title: "×", target: nil, action: nil)
 
@@ -256,9 +262,21 @@ final class QuickTerminalTabStripView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.34).cgColor
         layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
         layer?.borderWidth = 1
+
+        backgroundEffect.frame = bounds
+        backgroundEffect.autoresizingMask = [.width, .height]
+        backgroundEffect.material = .hudWindow
+        backgroundEffect.blendingMode = .behindWindow
+        backgroundEffect.state = .active
+        addSubview(backgroundEffect)
+
+        backgroundTint.frame = backgroundEffect.bounds
+        backgroundTint.autoresizingMask = [.width, .height]
+        backgroundTint.wantsLayer = true
+        backgroundTint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.46).cgColor
+        backgroundEffect.addSubview(backgroundTint)
 
         addButton.target = self
         addButton.action = #selector(addPressed(_:))
@@ -790,8 +808,10 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         } ?? window.frame
 
         let appToRestore = previousApp
+        let shouldRestorePreviousApp =
+            reason.shouldRestorePreviousApplication(windowIsKey: window.isKeyWindow)
         previousApp = nil
-        if reason.restoresPreviousApplication, let previousApp = appToRestore {
+        if shouldRestorePreviousApp, let previousApp = appToRestore {
             if !previousApp.isTerminated { _ = previousApp.activate(options: []) }
         }
 

@@ -24,6 +24,12 @@ final class QuickTerminalTests: XCTestCase {
     func testAutohideDoesNotRestorePreviouslyFocusedApplication() {
         XCTAssertTrue(QuickTerminalHideReason.explicit.restoresPreviousApplication)
         XCTAssertFalse(QuickTerminalHideReason.focusLoss.restoresPreviousApplication)
+        XCTAssertTrue(QuickTerminalHideReason.explicit.shouldRestorePreviousApplication(
+            windowIsKey: true))
+        XCTAssertFalse(QuickTerminalHideReason.explicit.shouldRestorePreviousApplication(
+            windowIsKey: false))
+        XCTAssertFalse(QuickTerminalHideReason.focusLoss.shouldRestorePreviousApplication(
+            windowIsKey: true))
     }
 
     func testLiveSessionKeepsAppResidentWithoutHotKey() {
@@ -75,6 +81,19 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertEqual(page.frame, tabsView.pageHost.bounds)
         XCTAssertTrue(content.superview === page)
         XCTAssertEqual(content.frame, page.bounds)
+    }
+
+    func testQuickTabStripUsesDarkFrostedBackground() throws {
+        let strip = QuickTerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 500, height: 34))
+        let effect = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? NSVisualEffectView }.first)
+
+        XCTAssertEqual(effect.material, .hudWindow)
+        XCTAssertEqual(effect.blendingMode, .behindWindow)
+        XCTAssertEqual(effect.state, .active)
+        let tint = try XCTUnwrap(effect.subviews.first)
+        XCTAssertNotNil(tint.layer?.backgroundColor)
     }
 
     func testQuickTabPagesStayAttachedWhileSelectionChanges() {
