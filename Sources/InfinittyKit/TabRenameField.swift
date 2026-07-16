@@ -1,8 +1,26 @@
 import AppKit
 
-private final class NativeTabRenameTextView: NSTextView {
+/// Single-line rename editor shared by the native-tab popover and the
+/// quick-terminal tab strip: ⏎ commits, ⎋ cancels.
+class TabRenameTextView: NSTextView {
     var onCommit: (() -> Void)?
     var onCancel: (() -> Void)?
+
+    /// The main menu claims ⇧⌘←/→ for tab cycling, and key equivalents are
+    /// matched before the responder chain runs. While this editor is being
+    /// typed in, command-arrow chords must stay the standard line-edge
+    /// movement/selection commands; the key window's view hierarchy sees key
+    /// equivalents before the menu bar, so reclaim them here.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self,
+           event.modifierFlags.contains(.command),
+           let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first,
+           scalar.value == 0xF702 || scalar.value == 0xF703 { // ←/→ arrows
+            keyDown(with: event)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func doCommand(by commandSelector: Selector) {
         switch commandSelector {
@@ -26,7 +44,7 @@ final class TabRenameField: NSObject, NSPopoverDelegate {
 
     private weak var hostWindow: NSWindow?
     private let popover = NSPopover()
-    private let editor: NativeTabRenameTextView
+    private let editor: TabRenameTextView
     private var isPresented = false
     private var clickMonitor: Any?
 
@@ -47,7 +65,7 @@ final class TabRenameField: NSObject, NSPopoverDelegate {
         content.addSubview(title)
 
         let editorFrame = NSRect(x: 0, y: 0, width: 244, height: 27)
-        let editor = NativeTabRenameTextView(frame: editorFrame)
+        let editor = TabRenameTextView(frame: editorFrame)
         editor.string = currentName
         editor.font = .systemFont(ofSize: 13, weight: .regular)
         editor.textColor = .labelColor
@@ -181,7 +199,7 @@ final class TabRenameField: NSObject, NSPopoverDelegate {
         guard tabCount > 1 else {
             // With no visible tab strip, place the popover beneath the normal
             // left-side window title instead of floating in empty center space.
-            return min(max(120, 1), max(availableWidth - 1, 1))
+            return min(120, max(availableWidth - 1, 1))
         }
         let leadingInset: CGFloat = 14
         let trailingControlsWidth: CGFloat = 76
@@ -200,15 +218,27 @@ final class TabRenameField: NSObject, NSPopoverDelegate {
         ) { [weak self] event in
             guard let self, self.isPresented else { return event }
             if event.window === self.editor.window { return event }
-            DispatchQueue.main.async { [weak self] in self?.dismiss(committed: false) }
+            // A click back into the host window saves the typed name — the
+            // behavior of Finder's rename-in-place. Clicks anywhere else
+            // abandon it. Both run synchronously: the transient popover closes
+            // itself on this same click, and popoverDidClose would otherwise
+            // record a cancel before a deferred commit could run.
+            if event.window === self.hostWindow {
+                self.commit()
+            } else {
+                self.dismiss(committed: false)
+            }
             return event
         }
     }
 
     private func removeClickMonitor() {
         guard let clickMonitor else { return }
-        NSEvent.removeMonitor(clickMonitor)
         self.clickMonitor = nil
+        // Deferred: the outside-click commit reaches here from inside the
+        // monitor's own handler, where synchronous removal is not documented
+        // as safe.
+        DispatchQueue.main.async { NSEvent.removeMonitor(clickMonitor) }
     }
 
     private func commit() {

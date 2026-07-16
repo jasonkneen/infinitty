@@ -20,17 +20,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         titlebarClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
             [weak self] event in
             guard let self else { return event }
-            guard event.clickCount == 2, let sourceWindow = event.window else { return event }
+            guard event.clickCount == 2,
+                  let sourceWindow = event.window,
+                  sourceWindow.tabbingIdentifier == "infinitty"
+            else { return event }
 
+            // Only the clicked window's own tab strip is hit-tested: matching
+            // other windows' buttons by raw screen geometry would hit occluded
+            // windows or windows on another Space.
             let screenPoint = sourceWindow.convertPoint(toScreen: event.locationInWindow)
-            let normalWindows = NSApp.windows.filter { $0.tabbingIdentifier == "infinitty" }
-            for host in normalWindows {
-                guard let hit = host.nativeTabButton(atScreenPoint: screenPoint),
-                      let tabs = host.tabbedWindows,
-                      tabs.indices.contains(hit.index)
-                else { continue }
+            if let hit = sourceWindow.nativeTabButton(atScreenPoint: screenPoint),
+               let tabs = sourceWindow.tabbedWindows,
+               tabs.indices.contains(hit.index) {
                 let target = tabs[hit.index]
-                host.tabGroup?.selectedWindow = target
+                sourceWindow.tabGroup?.selectedWindow = target
                 target.makeKeyAndOrderFront(nil)
                 DispatchQueue.main.async { [weak self, weak target] in
                     guard let self, let target else { return }
@@ -41,8 +44,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
             // No native tab button means this is a single-window/bare-titlebar
             // layout. Preserve the documented titlebar double-click gesture.
-            guard sourceWindow.tabbingIdentifier == "infinitty",
-                  sourceWindow.nativeTabButtonsInVisualOrder().isEmpty,
+            guard sourceWindow.nativeTabButtonsInVisualOrder().isEmpty,
                   self.eventIsInTitlebar(event, of: sourceWindow)
             else { return event }
             self.beginInlineRename(for: sourceWindow)
@@ -70,7 +72,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
                 return nil
             }
-            guard let number = PaneNavigation.shortcutNumber(
+            // Digits act only while the hint overlay is up (the documented
+            // hold-⇧⌥-then-press flow). A quick ⇧⌥digit chord is text input
+            // on many layouts (€, °, …) and must keep reaching the pty.
+            guard self.showPaneShortcutHints,
+                  let number = PaneNavigation.shortcutNumber(
                     keyCode: event.keyCode,
                     modifiers: event.modifierFlags)
             else { return event }
@@ -380,48 +386,55 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func setShortcutHintModifiers(_ modifiers: NSEvent.ModifierFlags) {
-        let relevant = modifiers
-            .intersection(.deviceIndependentFlagsMask)
-            .intersection([.command, .option, .control, .shift])
-        let tabHints = relevant == .command
-        let paneHints = relevant == [.shift, .option]
-        if tabHints != commandModifierHeld {
-            commandModifierHeld = tabHints
-            pendingTabHint?.cancel()
-            pendingTabHint = nil
-            if tabHints {
-                let work = DispatchWorkItem { [weak self] in
-                    guard let self, self.commandModifierHeld else { return }
-                    self.showTabShortcutHints = true
-                    self.refreshShortcutHints()
-                }
-                pendingTabHint = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
-            } else if showTabShortcutHints {
-                showTabShortcutHints = false
-                refreshShortcutHints()
+        let relevant = modifiers.shortcutModifiers
+        setHintChordHeld(
+            relevant == .command,
+            held: \.commandModifierHeld,
+            pending: \.pendingTabHint,
+            show: \.showTabShortcutHints)
+        setHintChordHeld(
+            relevant == [.shift, .option],
+            held: \.paneModifiersHeld,
+            pending: \.pendingPaneHint,
+            show: \.showPaneShortcutHints)
+    }
+
+    /// Hints appear after a short hold (so plain shortcut chords don't
+    /// flash them) and clear the moment the chord is released.
+    private func setHintChordHeld(
+        _ nowHeld: Bool,
+        held: ReferenceWritableKeyPath<AppDelegate, Bool>,
+        pending: ReferenceWritableKeyPath<AppDelegate, DispatchWorkItem?>,
+        show: ReferenceWritableKeyPath<AppDelegate, Bool>
+    ) {
+        guard nowHeld != self[keyPath: held] else { return }
+        self[keyPath: held] = nowHeld
+        self[keyPath: pending]?.cancel()
+        self[keyPath: pending] = nil
+        if nowHeld {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self[keyPath: held] else { return }
+                self[keyPath: show] = true
+                self.refreshShortcutHints()
             }
-        }
-        if paneHints != paneModifiersHeld {
-            paneModifiersHeld = paneHints
-            pendingPaneHint?.cancel()
-            pendingPaneHint = nil
-            if paneHints {
-                let work = DispatchWorkItem { [weak self] in
-                    guard let self, self.paneModifiersHeld else { return }
-                    self.showPaneShortcutHints = true
-                    self.refreshShortcutHints()
-                }
-                pendingPaneHint = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
-            } else if showPaneShortcutHints {
-                showPaneShortcutHints = false
-                refreshShortcutHints()
-            }
+            self[keyPath: pending] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+        } else if self[keyPath: show] {
+            self[keyPath: show] = false
+            refreshShortcutHints()
         }
     }
 
+    /// Tracks whether the last refresh left hint chrome (pane badges, ⌘N
+    /// title prefixes) applied somewhere, so the app-wide clearing sweep can
+    /// be skipped on the frequent tab/pane churn that happens with no
+    /// modifiers held.
+    private var shortcutHintsApplied = false
+
     private func refreshShortcutHints() {
+        let showingAny = showTabShortcutHints || showPaneShortcutHints
+        guard showingAny || shortcutHintsApplied else { return }
+        shortcutHintsApplied = showingAny
         var windows: [NSWindow] = []
         var seen = Set<ObjectIdentifier>()
         for session in sessions {
@@ -453,41 +466,75 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc func focusPaneDown(_ sender: Any?) { focusPane(in: .down) }
 
     private func focusPane(in direction: PaneFocusDirection) {
-        guard let current = focusedSession(), let win = current.view.window else { return }
-        let panes = panesInVisualOrder(in: win)
-        guard let currentIndex = panes.firstIndex(where: { $0 === current }) else { return }
-        let frames = panes.map { $0.view.convert($0.view.bounds, to: nil) }
-        guard let target = PaneNavigation.targetIndex(
-            from: currentIndex, frames: frames, direction: direction)
-        else { return }
-        focusPane(for: panes[target])
+        guard let target = paneTarget(in: direction) else {
+            // The ⇧⌥arrow menu equivalents match even when there is nothing
+            // to focus (single pane, or a text editor owns the keyboard).
+            // Give the keystroke back: terminals encode it for the pty,
+            // editors keep their word-selection commands.
+            forwardCurrentKeyEventToFirstResponder()
+            return
+        }
+        focusPane(for: target)
         if showPaneShortcutHints { refreshShortcutHints() }
-        panes[target].view.showFocusHighlight()
+        target.view.showFocusHighlight()
+    }
+
+    private func paneTarget(in direction: PaneFocusDirection) -> TerminalSession? {
+        guard let current = focusedSession(), let win = current.view.window else { return nil }
+        let panes = panesInVisualOrder(in: win)
+        guard let currentIndex = panes.firstIndex(where: { $0 === current }) else { return nil }
+        let frames = panes.map { $0.view.convert($0.view.bounds, to: nil) }
+        guard let index = PaneNavigation.targetIndex(
+            from: currentIndex, frames: frames, direction: direction)
+        else { return nil }
+        return panes[index]
+    }
+
+    /// A matched menu key equivalent consumes its keyDown even when the
+    /// action cannot act. Re-deliver the event to the key window's first
+    /// responder so the keystroke is not silently dropped.
+    private func forwardCurrentKeyEventToFirstResponder() {
+        guard let event = NSApp.currentEvent, event.type == .keyDown,
+              let responder = NSApp.keyWindow?.firstResponder
+        else { return }
+        responder.keyDown(with: event)
     }
 
     @objc func selectPreviousTab(_ sender: Any?) {
-        if NSApp.keyWindow === quickTerminal.window {
+        guard let win = NSApp.keyWindow else { return }
+        if let quickWindow = quickTerminal.window, win === quickWindow {
             _ = quickTerminal.selectPreviousTab()
             refreshShortcutHints()
             return
         }
-        NSApp.keyWindow?.selectPreviousTab(sender)
+        // In a non-tabbed key window (Settings fields, the rename popover)
+        // ⇧⌘←/→ is the select-to-line-edge editing command, not tab cycling.
+        guard win.tabbingIdentifier == "infinitty" else {
+            forwardCurrentKeyEventToFirstResponder()
+            return
+        }
+        win.selectPreviousTab(sender)
         DispatchQueue.main.async { self.refreshShortcutHints() }
     }
 
     @objc func selectNextTab(_ sender: Any?) {
-        if NSApp.keyWindow === quickTerminal.window {
+        guard let win = NSApp.keyWindow else { return }
+        if let quickWindow = quickTerminal.window, win === quickWindow {
             _ = quickTerminal.selectNextTab()
             refreshShortcutHints()
             return
         }
-        NSApp.keyWindow?.selectNextTab(sender)
+        guard win.tabbingIdentifier == "infinitty" else {
+            forwardCurrentKeyEventToFirstResponder()
+            return
+        }
+        win.selectNextTab(sender)
         DispatchQueue.main.async { self.refreshShortcutHints() }
     }
 
     @objc func selectTabByNumber(_ sender: Any?) {
         guard let item = sender as? NSMenuItem else { return }
-        if NSApp.keyWindow === quickTerminal.window {
+        if let quickWindow = quickTerminal.window, NSApp.keyWindow === quickWindow {
             _ = quickTerminal.selectTab(shortcutNumber: item.tag)
             refreshShortcutHints()
             return
@@ -817,16 +864,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         session.view.frame = NSRect(origin: .zero, size: contentSize)
         session.view.autoresizingMask = [.width, .height]
-        if config.backgroundBlur {
-            let blur = NSVisualEffectView(frame: NSRect(origin: .zero, size: contentSize))
-            blur.material = .hudWindow
-            blur.blendingMode = .behindWindow
-            blur.state = .active
-            blur.addSubview(session.view)
-            window.contentView = blur
-        } else {
-            window.contentView = session.view
-        }
+        window.contentView = config.backgroundBlur
+            ? wrapInBackgroundBlur(session.view)
+            : session.view
 
         if customLights, let shape = TrafficLightsView.Shape(rawValue: config.trafficLights) {
             let lights = TrafficLightsView(shape: shape)
@@ -871,15 +911,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         session.view.frame = NSRect(origin: .zero, size: size)
         session.view.autoresizingMask = [.width, .height]
         if config.backgroundBlur {
-            let blur = NSVisualEffectView(frame: session.view.frame)
-            blur.material = .hudWindow
-            blur.blendingMode = .behindWindow
-            blur.state = .active
-            blur.autoresizingMask = [.width, .height]
-            blur.addSubview(session.view)
-            return (blur, session)
+            return (wrapInBackgroundBlur(session.view), session)
         }
         return (session.view, session)
+    }
+
+    /// Hosts `view` inside a behind-window blur so translucent backgrounds
+    /// pick up the frosted look.
+    private func wrapInBackgroundBlur(_ view: NSView) -> NSVisualEffectView {
+        let blur = NSVisualEffectView(frame: view.frame)
+        blur.material = .hudWindow
+        blur.blendingMode = .behindWindow
+        blur.state = .active
+        blur.autoresizingMask = [.width, .height]
+        blur.addSubview(view)
+        return blur
     }
 
     private func applyPet(to session: TerminalSession) {
@@ -936,7 +982,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func newTab(_ sender: Any?) {
-        if NSApp.keyWindow === quickTerminal.window {
+        // `===` would also be true with no key window and no quick-terminal
+        // panel (nil === nil); Cmd+T must fall through to a new window then.
+        if let quickWindow = quickTerminal.window, NSApp.keyWindow === quickWindow {
             _ = quickTerminal.newTab()
             return
         }
@@ -1247,13 +1295,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     // MARK: - config reload
 
     private func configureQuickTerminalHotKey() {
-        quickTerminalHotKey = nil
-        guard let value = config.quickTerminalKey, !value.isEmpty else { return }
+        guard let value = config.quickTerminalKey, !value.isEmpty else {
+            quickTerminalHotKey = nil
+            return
+        }
         guard let spec = GlobalHotKeySpec.parse(value) else {
+            quickTerminalHotKey = nil
             let message = "infinitty: invalid quick-terminal-key '\(value)'\n"
             FileHandle.standardError.write(Data(message.utf8))
             return
         }
+        // Config reloads fire on every file write; keep the live Carbon
+        // registration when the shortcut is unchanged.
+        if quickTerminalHotKey?.spec == spec { return }
+        quickTerminalHotKey = nil // unregister before claiming the new combo
         quickTerminalHotKey = GlobalHotKey(spec: spec) { [weak self] in
             self?.quickTerminal.toggle()
         }
@@ -1459,8 +1514,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         focusPaneMenu.addItem(.separator())
         // AppKit displays these equivalents in the menu, but shifted Option
         // digits become symbols before menu matching. The local key monitor
-        // above uses physical number-key codes for that keyboard path and only
-        // consumes the event when a pane selection can be performed.
+        // above uses physical number-key codes for that keyboard path and
+        // only consumes the event while the hold-⇧⌥ hint overlay is up and a
+        // pane selection can actually be performed; a bare ⇧⌥digit chord
+        // stays text input for the pty.
         for number in 1...9 {
             let item = focusPaneMenu.addItem(
                 withTitle: "Pane \(number)",

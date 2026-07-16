@@ -305,11 +305,15 @@ struct AppConfig {
         // transient.
         if let key = quickTerminalKey, GlobalHotKeySpec.parse(key) != nil {
             out += "quick-terminal-key = \(key)\n"
+        }
+        // The remaining quick-terminal settings also govern menu/socket
+        // toggles, so they persist independently of the hot key.
+        if quickTerminalScreen != .main {
             out += "quick-terminal-screen = \(quickTerminalScreen.rawValue)\n"
-            if !quickTerminalAutohide { out += "quick-terminal-autohide = false\n" }
-            if quickTerminalAnimationDuration != 0.2 {
-                out += "quick-terminal-animation-duration = \(quickTerminalAnimationDuration)\n"
-            }
+        }
+        if !quickTerminalAutohide { out += "quick-terminal-autohide = false\n" }
+        if quickTerminalAnimationDuration != 0.2 {
+            out += "quick-terminal-animation-duration = \(quickTerminalAnimationDuration)\n"
         }
         if hints { out += "hints = true\n" }
         if let v = hintCommand, !v.isEmpty { out += "hint-command = \(v)\n" }

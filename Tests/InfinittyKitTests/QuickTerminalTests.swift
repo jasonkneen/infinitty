@@ -269,4 +269,42 @@ final class QuickTerminalTests: XCTestCase {
 
         XCTAssertFalse(config.serialize().contains("quick-terminal-key"))
     }
+
+    func testConfigSerializationKeepsQuickTerminalSettingsWithoutKey() {
+        // The quick terminal is also reachable via the File menu and the
+        // control socket, so its settings must survive a Settings-window
+        // rewrite even when no hot key is configured.
+        var config = AppConfig()
+        config.quickTerminalScreen = .mouse
+        config.quickTerminalAutohide = false
+        config.quickTerminalAnimationDuration = 0.15
+
+        let text = config.serialize()
+        XCTAssertFalse(text.contains("quick-terminal-key"))
+        XCTAssertTrue(text.contains("quick-terminal-screen = mouse"))
+        XCTAssertTrue(text.contains("quick-terminal-autohide = false"))
+        XCTAssertTrue(text.contains("quick-terminal-animation-duration = 0.15"))
+    }
+
+    func testQuickTabStripAbandonsRenameWhenTabCountChanges() {
+        let strip = QuickTerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 500, height: 34))
+        strip.update(titles: ["one", "two", "three"], selectedIndex: 2)
+        strip.layoutSubtreeIfNeeded()
+
+        var cancelled = false
+        var committed: String?
+        strip.onRenameCancel = { cancelled = true }
+        strip.onRenameCommit = { committed = $0 }
+        XCTAssertTrue(strip.beginRename(at: 2, currentName: "three"))
+
+        strip.update(titles: ["one", "three"], selectedIndex: 1)
+        XCTAssertTrue(cancelled)
+        XCTAssertNil(committed)
+        XCTAssertFalse(strip.isRenaming)
+        XCTAssertFalse(strip.subviews.contains { $0 is QuickTabRenameTextView })
+        let tabButtons = strip.subviews.compactMap { $0 as? NSButton }
+            .filter { $0.title != "+" && $0.title != "×" }
+        XCTAssertTrue(tabButtons.allSatisfy { !$0.isHidden })
+    }
 }

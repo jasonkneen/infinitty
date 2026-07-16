@@ -1,5 +1,14 @@
 import AppKit
 
+extension NSEvent.ModifierFlags {
+    /// Just the four modifier keys that participate in shortcut matching,
+    /// with device-dependent and lock bits stripped.
+    var shortcutModifiers: NSEvent.ModifierFlags {
+        intersection(.deviceIndependentFlagsMask)
+            .intersection([.command, .option, .control, .shift])
+    }
+}
+
 enum PaneFocusDirection {
     case left
     case right
@@ -12,10 +21,7 @@ struct PaneNavigation {
         keyCode: UInt16,
         modifiers: NSEvent.ModifierFlags
     ) -> Int? {
-        let relevant = modifiers
-            .intersection(.deviceIndependentFlagsMask)
-            .intersection([.command, .option, .control, .shift])
-        guard relevant == [.shift, .option] else { return nil }
+        guard modifiers.shortcutModifiers == [.shift, .option] else { return nil }
         return [
             18: 1, 19: 2, 20: 3, 21: 4, 23: 5,
             22: 6, 26: 7, 28: 8, 25: 9,
@@ -125,10 +131,7 @@ struct TabNavigation {
         keyCode: UInt16,
         modifiers: NSEvent.ModifierFlags
     ) -> Int? {
-        let relevant = modifiers
-            .intersection(.deviceIndependentFlagsMask)
-            .intersection([.command, .option, .control, .shift])
-        guard relevant == [.command, .shift] else { return nil }
+        guard modifiers.shortcutModifiers == [.command, .shift] else { return nil }
         switch keyCode {
         case 123: return -1 // left arrow
         case 124: return 1  // right arrow

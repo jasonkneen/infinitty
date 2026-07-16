@@ -21,10 +21,12 @@ extension NSWindow {
     /// if a future macOS release changes the private view hierarchy.
     func nativeTabButtonsInVisualOrder() -> [NSView] {
         guard let root = contentView?.nativeTabRootView else { return [] }
+        // A hidden NSTabBar (e.g. after closing back down to one tab) must
+        // read as "no tab strip" so callers can use their bare-titlebar
+        // fallbacks instead of hit-testing invisible buttons.
         let tabBars = root.nativeTabDescendants(withClassName: "NSTabBar")
-        guard let tabBar = tabBars.first(where: { !$0.isHidden }) ?? tabBars.first else {
-            return []
-        }
+        guard let tabBar = tabBars.first(where: { !$0.isHiddenOrHasHiddenAncestor })
+        else { return [] }
         return tabBar
             .nativeTabDescendants(withClassName: "NSTabButton")
             .sorted { left, right in

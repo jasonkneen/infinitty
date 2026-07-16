@@ -61,8 +61,10 @@ final class GlobalHotKey {
     private var hotKey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private let action: () -> Void
+    let spec: GlobalHotKeySpec
 
     init?(spec: GlobalHotKeySpec, action: @escaping () -> Void) {
+        self.spec = spec
         self.action = action
 
         var eventType = EventTypeSpec(
@@ -196,10 +198,10 @@ final class QuickTerminalTabPageView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-final class QuickTabRenameTextView: NSTextView {
-    var onCommit: (() -> Void)?
-    var onCancel: (() -> Void)?
-
+/// The strip editor also abandons the rename whenever keyboard focus leaves
+/// it — the strip lives inside the panel, so any other click target or the
+/// panel losing key status means the user moved on.
+final class QuickTabRenameTextView: TabRenameTextView {
     private var windowResignObserver: Any?
 
     deinit {
@@ -230,17 +232,6 @@ final class QuickTabRenameTextView: NSTextView {
         // so its own focus restoration cannot trigger a second cancellation.
         DispatchQueue.main.async { [weak self] in self?.onCancel?() }
         return true
-    }
-
-    override func doCommand(by commandSelector: Selector) {
-        switch commandSelector {
-        case #selector(NSResponder.insertNewline(_:)):
-            onCommit?()
-        case #selector(NSResponder.cancelOperation(_:)):
-            onCancel?()
-        default:
-            super.doCommand(by: commandSelector)
-        }
     }
 }
 
@@ -290,6 +281,10 @@ final class QuickTerminalTabStripView: NSView {
     func update(titles: [String], selectedIndex: Int) {
         self.selectedIndex = selectedIndex
         if buttons.count != titles.count {
+            // A tab appeared or vanished mid-rename: renamingIndex is
+            // positional, so the editor could re-anchor over the wrong tab.
+            // Abandon the edit instead.
+            if renameEditor != nil { finishRename(committing: false) }
             buttons.forEach { $0.removeFromSuperview() }
             buttons = titles.indices.map { index in
                 let button = NSButton(
@@ -584,7 +579,8 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     func setCustomTitle(_ title: String?, for id: QuickTerminalTabID) {
-        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        guard let tab = tabs.first(where: { $0.id == id }),
+              tab.customTitle != title else { return }
         tab.customTitle = title
         renderTabStrip()
     }
@@ -593,6 +589,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         guard let index = tabs.firstIndex(where: { contains(session.view, in: $0.page) })
         else { return }
         let tab = tabs[index]
+        if tab.automaticTitle == title { return }
         if index == selectedIndex,
            let focused = window?.firstResponder as? TerminalView,
            contains(focused, in: tab.page),
@@ -909,13 +906,10 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     private func showTab(at index: Int) {
-        guard tabs.indices.contains(index), let window else { return }
-        let tab = tabs[index]
-        tabsView?.select(tab.page)
+        guard tabs.indices.contains(index), window != nil else { return }
+        tabsView?.select(tabs[index].page)
         renderTabStrip()
-        let responder = tab.lastFocusedView
-            ?? sessionsInPage(tab.page).first?.view
-        if let responder { window.makeFirstResponder(responder) }
+        restoreActiveResponder()
     }
 
     private func restoreActiveResponder() {
