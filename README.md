@@ -209,9 +209,13 @@ Font to use one everywhere.
 
 ### Tabs, splits, mouse, selection
 
-- **Tabs**: native macOS tabs — ⌘T new tab, ⌘N new window, tab bar "+" works
+- **Tabs**: native macOS tabs — ⌘T new tab, ⇧⌘←/→ previous/next tab,
+  ⌘1–8 select by position, ⌘9 selects the last tab, and the tab bar "+" works;
+  hold ⌘ to reveal the numbers in tab titles
 - **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
-  the focused pane (tab closes when its last pane exits)
+  the focused pane (tab closes when its last pane exits); ⇧⌥←/→/↑/↓ focuses
+  and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
+  pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly
 - **Quick terminal**: set `quick-terminal-key = cmd+shift+space` for a persistent,
   global Quake-style terminal that slides down from the top. Its shell,
   scrollback, and splits stay alive while hidden; it can autohide on focus loss
