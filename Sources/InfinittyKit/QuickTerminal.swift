@@ -182,31 +182,172 @@ final class QuickTerminalPanel: NSPanel {
     override var canBecomeMain: Bool { true }
 }
 
+/// Stable page container for one quick-terminal tab. The page stays attached
+/// to the panel while hidden, so its terminal renderers and split tree retain
+/// normal window ownership.
+final class QuickTerminalTabPageView: NSView {
+    init(content: NSView) {
+        super.init(frame: content.frame)
+        content.frame = bounds
+        content.autoresizingMask = [.width, .height]
+        addSubview(content)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+final class QuickTerminalTabStripView: NSView {
+    var onSelect: ((Int) -> Void)?
+    var onNewTab: (() -> Void)?
+    private var buttons: [NSButton] = []
+    private let addButton = NSButton(title: "+", target: nil, action: nil)
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.34).cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        layer?.borderWidth = 1
+
+        addButton.target = self
+        addButton.action = #selector(addPressed(_:))
+        addButton.isBordered = false
+        addButton.font = .systemFont(ofSize: 19, weight: .regular)
+        addButton.contentTintColor = .secondaryLabelColor
+        addButton.toolTip = "New Quick Tab (⌘T)"
+        addSubview(addButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func update(titles: [String], selectedIndex: Int) {
+        buttons.forEach { $0.removeFromSuperview() }
+        buttons = titles.enumerated().map { index, title in
+            let button = NSButton(title: title, target: self, action: #selector(tabPressed(_:)))
+            button.tag = index
+            button.isBordered = false
+            button.alignment = .center
+            button.lineBreakMode = .byTruncatingTail
+            button.font = .systemFont(ofSize: 12, weight: index == selectedIndex ? .semibold : .regular)
+            button.contentTintColor = index == selectedIndex ? .labelColor : .secondaryLabelColor
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 6
+            button.layer?.backgroundColor = index == selectedIndex
+                ? NSColor.white.withAlphaComponent(0.14).cgColor
+                : NSColor.clear.cgColor
+            button.layer?.borderWidth = index == selectedIndex ? 1 : 0
+            button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+            button.toolTip = title
+            addSubview(button)
+            return button
+        }
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let padding: CGFloat = 6
+        let addWidth: CGFloat = 32
+        addButton.frame = NSRect(
+            x: bounds.maxX - addWidth - padding,
+            y: 2,
+            width: addWidth,
+            height: max(bounds.height - 4, 0))
+        guard !buttons.isEmpty else { return }
+        let available = max(addButton.frame.minX - padding * 2, 1)
+        let width = floor(available / CGFloat(buttons.count))
+        for (index, button) in buttons.enumerated() {
+            button.frame = NSRect(
+                x: padding + CGFloat(index) * width,
+                y: 3,
+                width: max(width - 3, 1),
+                height: max(bounds.height - 6, 0))
+        }
+    }
+
+    @objc private func tabPressed(_ sender: NSButton) { onSelect?(sender.tag) }
+    @objc private func addPressed(_ sender: Any?) { onNewTab?() }
+}
+
+final class QuickTerminalTabsView: NSView {
+    static let stripHeight: CGFloat = 34
+    let pageHost = NSView()
+    let strip = QuickTerminalTabStripView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        addSubview(pageHost)
+        addSubview(strip)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        let stripHeight = min(Self.stripHeight, bounds.height)
+        pageHost.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripHeight)
+        strip.frame = NSRect(x: 0, y: bounds.height - stripHeight, width: bounds.width, height: stripHeight)
+        for page in pageHost.subviews { page.frame = pageHost.bounds }
+    }
+
+    func install(_ page: QuickTerminalTabPageView) {
+        page.frame = pageHost.bounds
+        page.autoresizingMask = [.width, .height]
+        pageHost.addSubview(page)
+    }
+
+    func remove(_ page: QuickTerminalTabPageView) { page.removeFromSuperview() }
+
+    func select(_ selected: QuickTerminalTabPageView) {
+        for page in pageHost.subviews { page.isHidden = page !== selected }
+    }
+}
+
 /// Manages one persistent quick-terminal window. `orderOut` hides it without
 /// touching its live TerminalSession, so scrollback and child processes survive.
 final class QuickTerminalController: NSObject, NSWindowDelegate {
     typealias WindowFactory = () -> (NSWindow, TerminalSession)?
-    typealias SessionsProvider = (NSWindow) -> [TerminalSession]
+    typealias TabFactory = (NSWindow) -> (NSView, TerminalSession)?
+    typealias SessionsProvider = (NSView) -> [TerminalSession]
+
+    private final class Tab {
+        let page: QuickTerminalTabPageView
+        var title = "Terminal"
+        weak var lastFocusedView: TerminalView?
+
+        init(page: QuickTerminalTabPageView) { self.page = page }
+    }
 
     private let makeWindow: WindowFactory
-    private let sessionsInWindow: SessionsProvider
+    private let makeTab: TabFactory
+    private let sessionsInPage: SessionsProvider
+    private let launchSession: (TerminalSession) -> Void
     private let heightState: QuickTerminalHeightState
     private var config: AppConfig
     private(set) var window: NSWindow?
+    private var tabsView: QuickTerminalTabsView?
+    private var tabs: [Tab] = []
+    private var selectedIndex = 0
+    private var showShortcutHints = false
     private var previousApp: NSRunningApplication?
     private var transition: UInt64 = 0
     private(set) var visible = false
+    var onTabsChanged: (() -> Void)?
 
     init(
         config: AppConfig,
         makeWindow: @escaping WindowFactory,
-        sessionsInWindow: @escaping SessionsProvider,
-        heightState: QuickTerminalHeightState = QuickTerminalHeightState()
+        makeTab: @escaping TabFactory,
+        sessionsInPage: @escaping SessionsProvider,
+        heightState: QuickTerminalHeightState = QuickTerminalHeightState(),
+        launchSession: @escaping (TerminalSession) -> Void = { $0.launch() }
     ) {
         self.config = config
         self.makeWindow = makeWindow
-        self.sessionsInWindow = sessionsInWindow
+        self.makeTab = makeTab
+        self.sessionsInPage = sessionsInPage
         self.heightState = heightState
+        self.launchSession = launchSession
     }
 
     func applyConfig(_ config: AppConfig) {
@@ -221,17 +362,115 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     func contains(_ session: TerminalSession) -> Bool {
-        guard let window else { return false }
-        return session.view.window === window
+        tab(containing: session) != nil
     }
 
     var hasLiveSession: Bool {
-        guard let window else { return false }
-        return !sessionsInWindow(window).isEmpty
+        tabs.contains { !sessionsInPage($0.page).isEmpty }
+    }
+
+    var tabCount: Int { tabs.count }
+    var activeRootView: NSView? { tabs.indices.contains(selectedIndex) ? tabs[selectedIndex].page : nil }
+    var activeSessions: [TerminalSession] {
+        guard let activeRootView else { return [] }
+        return sessionsInPage(activeRootView)
+    }
+
+    func sessions(inTabContaining session: TerminalSession) -> [TerminalSession] {
+        guard let tab = tab(containing: session) else { return [] }
+        return sessionsInPage(tab.page)
+    }
+
+    func setTitle(_ title: String, for session: TerminalSession) {
+        guard let index = tabs.firstIndex(where: { contains(session.view, in: $0.page) })
+        else { return }
+        let tab = tabs[index]
+        if index == selectedIndex,
+           let focused = window?.firstResponder as? TerminalView,
+           contains(focused, in: tab.page),
+           focused !== session.view {
+            return
+        }
+        if index != selectedIndex,
+           let lastFocusedView = tab.lastFocusedView,
+           lastFocusedView !== session.view {
+            return
+        }
+        tab.title = title
+        renderTabStrip()
+    }
+
+    func setFocusedSession(_ session: TerminalSession) {
+        guard let tab = tab(containing: session) else { return }
+        tab.lastFocusedView = session.view
+        tab.title = session.title
+        renderTabStrip()
+    }
+
+    func setShowsShortcutHints(_ visible: Bool) {
+        guard showShortcutHints != visible else { return }
+        showShortcutHints = visible
+        renderTabStrip()
     }
 
     func toggle() {
         visible ? hide() : show()
+    }
+
+    @discardableResult
+    func newTab() -> TerminalSession? {
+        guard let window, let (content, session) = makeTab(window) else { return nil }
+        let page = QuickTerminalTabPageView(content: content)
+        let tab = Tab(page: page)
+        tabs.append(tab)
+        tabsView?.install(page)
+        selectTab(at: tabs.count - 1)
+        launchSession(session)
+        onTabsChanged?()
+        return session
+    }
+
+    @discardableResult
+    func selectPreviousTab() -> Bool {
+        guard tabs.count > 1 else { return false }
+        return selectTab(at: (selectedIndex - 1 + tabs.count) % tabs.count)
+    }
+
+    @discardableResult
+    func selectNextTab() -> Bool {
+        guard tabs.count > 1 else { return false }
+        return selectTab(at: (selectedIndex + 1) % tabs.count)
+    }
+
+    @discardableResult
+    func selectTab(shortcutNumber: Int) -> Bool {
+        guard let index = TabNavigation.index(for: shortcutNumber, tabCount: tabs.count) else {
+            return false
+        }
+        return selectTab(at: index)
+    }
+
+    /// Removes the tab owning `session`. Returns true when it was the final
+    /// tab and the controller reset its panel.
+    @discardableResult
+    func removeTab(containing session: TerminalSession) -> Bool {
+        guard let index = tabs.firstIndex(where: { contains(session.view, in: $0.page) }) else {
+            return false
+        }
+        let removed = tabs.remove(at: index)
+        tabsView?.remove(removed.page)
+        if tabs.isEmpty {
+            lastSessionDidExit()
+            return true
+        }
+        if index < selectedIndex {
+            selectedIndex -= 1
+        } else if index == selectedIndex {
+            selectedIndex = min(index, tabs.count - 1)
+        }
+        showTab(at: selectedIndex)
+        onTabsChanged?()
+        return false
     }
 
     func show() {
@@ -315,6 +554,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         window?.contentView = nil
         window?.close()
         window = nil
+        tabs.removeAll()
+        tabsView = nil
+        selectedIndex = 0
         previousApp = nil
     }
 
@@ -343,17 +585,76 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             display: true)
     }
 
-    private func ensureWindow() -> (NSWindow, TerminalSession)? {
+    func ensureWindow() -> (NSWindow, TerminalSession)? {
         if let window {
-            guard let session = sessionsInWindow(window).first else { return nil }
+            guard let session = activeSessions.first else { return nil }
             return (window, session)
         }
         guard let (window, session) = makeWindow() else { return nil }
+        guard let initialContent = window.contentView else { return nil }
+        let tabsView = QuickTerminalTabsView(frame: initialContent.frame)
+        window.contentView = tabsView
+        let firstPage = QuickTerminalTabPageView(content: initialContent)
+        tabsView.install(firstPage)
+        tabs = [Tab(page: firstPage)]
+        selectedIndex = 0
+        self.tabsView = tabsView
+        tabsView.strip.onSelect = { [weak self] index in
+            _ = self?.selectTab(at: index)
+        }
+        tabsView.strip.onNewTab = { [weak self] in
+            _ = self?.newTab()
+        }
         self.window = window
+        showTab(at: 0)
         window.delegate = self
         configureWindow()
-        session.launch()
+        launchSession(session)
+        onTabsChanged?()
         return (window, session)
+    }
+
+    @discardableResult
+    private func selectTab(at index: Int) -> Bool {
+        guard tabs.indices.contains(index), let window else { return false }
+        if tabs.indices.contains(selectedIndex),
+           let focused = window.firstResponder as? TerminalView,
+           contains(focused, in: tabs[selectedIndex].page) {
+            tabs[selectedIndex].lastFocusedView = focused
+        }
+        selectedIndex = index
+        showTab(at: index)
+        onTabsChanged?()
+        return true
+    }
+
+    private func showTab(at index: Int) {
+        guard tabs.indices.contains(index), let window else { return }
+        let tab = tabs[index]
+        tabsView?.select(tab.page)
+        renderTabStrip()
+        let responder = tab.lastFocusedView
+            ?? sessionsInPage(tab.page).first?.view
+        if let responder { window.makeFirstResponder(responder) }
+    }
+
+    private func renderTabStrip() {
+        let titles = tabs.enumerated().map { index, tab in
+            guard showShortcutHints,
+                  let number = TabNavigation.shortcutNumber(
+                    forTabIndex: index, tabCount: tabs.count)
+            else { return tab.title }
+            return "⌘\(number)  \(tab.title)"
+        }
+        tabsView?.strip.update(titles: titles, selectedIndex: selectedIndex)
+    }
+
+    private func tab(containing session: TerminalSession) -> Tab? {
+        tabs.first { contains(session.view, in: $0.page) }
+    }
+
+    private func contains(_ view: NSView, in page: NSView) -> Bool {
+        view === page || view.isDescendant(of: page)
     }
 
     private func configureWindow() {
