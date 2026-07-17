@@ -1531,6 +1531,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     // MARK: - window delegate
 
+    /// Veto tab/window closes while a pane still runs a process: closing
+    /// terminates it, so confirm first.
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender.tabbingIdentifier == "infinitty",
+              sender !== quickTerminal.window else { return true }
+        let running = ForegroundProcessTracker.runningProcesses(
+            in: activeSessions(in: sender))
+        guard !running.isEmpty else { return true }
+        let alert = ForegroundProcessTracker.closeConfirmationAlert(
+            for: running.map(\.info))
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
     public func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
         // If a rename is currently anchored to this window, cancel it so the

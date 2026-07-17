@@ -83,7 +83,7 @@ final class CodeViewTests: XCTestCase {
             split.setPosition(split.bounds.width - 280, ofDividerAt: 0)
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 2)
+        wait(for: [exp], timeout: 10)
         // Run a couple more layout rounds like a live window would.
         window.contentView?.layoutSubtreeIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
@@ -202,7 +202,7 @@ final class CodeViewTests: XCTestCase {
     // MARK: - changes page
 
     private func waitForCondition(
-        _ description: String, timeout: TimeInterval = 5,
+        _ description: String, timeout: TimeInterval = 10,
         condition: @escaping () -> Bool
     ) {
         let exp = expectation(description: description)

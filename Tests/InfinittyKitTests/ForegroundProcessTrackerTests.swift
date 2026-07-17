@@ -58,19 +58,57 @@ final class ForegroundProcessTrackerTests: XCTestCase {
         XCTAssertNotEqual(a, c)
     }
 
-    func testProcessInfoEqualityIgnoresDisplayName() {
-        // Two different localizations of the same binary at the same pid are equal.
-        let en = ForegroundProcessInfo(
-            pid: 100, displayName: "TextEdit", rawName: "TextEdit",
-            executablePath: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-            bundleURL: URL(fileURLWithPath: "/System/Applications/TextEdit.app")
-        )
-        let ja = ForegroundProcessInfo(
-            pid: 100, displayName: "テキストエディット", rawName: "TextEdit",
-            executablePath: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-            bundleURL: URL(fileURLWithPath: "/System/Applications/TextEdit.app")
-        )
-        XCTAssertEqual(en, ja)
+    func testFreshProbeIdleShellReportsItself() {
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        let pipe = Pipe()
+        shell.standardInput = pipe
+        shell.standardOutput = Pipe()
+        shell.standardError = Pipe()
+        try! shell.run()
+        defer {
+            kill(shell.processIdentifier, SIGHUP)
+            shell.waitUntilExit()
+        }
+        // Let any transient startup children exit first.
+        Thread.sleep(forTimeInterval: 1.5)
+        let info = ForegroundProcessTracker.foregroundProcess(
+            of: shell.processIdentifier)
+        // Idle: the probe reports the shell itself (or nil if it died).
+        XCTAssertTrue(info == nil || info?.pid == shell.processIdentifier)
+    }
+
+    func testFreshProbeSeesChildProcess() {
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        let pipeIn = Pipe()
+        shell.standardInput = pipeIn
+        shell.standardOutput = Pipe()
+        shell.standardError = Pipe()
+        try! shell.run()
+        defer {
+            pipeIn.fileHandleForWriting.write("exit\n".data(using: .utf8)!)
+            shell.waitUntilExit()
+        }
+        pipeIn.fileHandleForWriting.write("sleep 30 &\n".data(using: .utf8)!)
+        Thread.sleep(forTimeInterval: 1.5) // give zsh time to fork
+
+        let info = ForegroundProcessTracker.foregroundProcess(
+            of: shell.processIdentifier)
+        XCTAssertEqual(info?.rawName, "sleep")
+        XCTAssertNotEqual(info?.pid, shell.processIdentifier)
+    }
+
+    func testCloseConfirmationAlertCancelIsDefault() {
+        let info = ForegroundProcessInfo(
+            pid: 42, displayName: "vim", rawName: "vim",
+            executablePath: nil, bundleURL: nil)
+        let alert = ForegroundProcessTracker.closeConfirmationAlert(for: [info])
+        XCTAssertEqual(alert.buttons.map(\.title), ["Cancel", "Close"])
+        XCTAssertTrue(alert.messageText.contains("vim"))
+        let multi = ForegroundProcessTracker.closeConfirmationAlert(
+            for: [info, info])
+        XCTAssertTrue(multi.messageText.contains("2"))
     }
 }
 

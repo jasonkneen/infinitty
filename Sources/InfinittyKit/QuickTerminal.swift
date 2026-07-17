@@ -963,8 +963,23 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
 
     private func closeTab(at index: Int) {
         guard tabs.indices.contains(index) else { return }
-        for session in sessionsInPage(tabs[index].page) {
-            session.terminate()
+        let sessions = sessionsInPage(tabs[index].page)
+        let terminate = { sessions.forEach { $0.terminate() } }
+        let running = ForegroundProcessTracker.runningProcesses(in: sessions)
+        guard !running.isEmpty else {
+            terminate()
+            return
+        }
+        let alert = ForegroundProcessTracker.closeConfirmationAlert(
+            for: running.map(\.info))
+        if let window {
+            // Sheet, not modal, so quick-terminal autohide-on-focus-loss
+            // doesn't fire while the user decides.
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertSecondButtonReturn { terminate() }
+            }
+        } else if alert.runModal() == .alertSecondButtonReturn {
+            terminate()
         }
     }
 

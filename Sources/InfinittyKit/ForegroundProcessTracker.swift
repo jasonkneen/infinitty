@@ -130,6 +130,43 @@ public final class ForegroundProcessTracker {
         return path.isEmpty ? nil : path
     }
 
+    /// Fresh one-shot probe of a shell's foreground process. When the shell
+    /// sits at a prompt this reports the shell itself (pid == shellPid).
+    public static func foregroundProcess(of shellPid: pid_t) -> ForegroundProcessInfo? {
+        probeForeground(of: shellPid)
+    }
+
+    /// The sessions with a real process in the foreground right now (fresh
+    /// probe, not the 2s poll): an idle shell at a prompt doesn't count.
+    static func runningProcesses(
+        in sessions: [TerminalSession]
+    ) -> [(session: TerminalSession, info: ForegroundProcessInfo)] {
+        sessions.compactMap { session in
+            guard let info = foregroundProcess(of: session.pty.pid),
+                  info.pid != session.pty.pid else { return nil }
+            return (session, info)
+        }
+    }
+
+    /// The "processes still running" confirmation alert. Cancel is the
+    /// default button; Close terminates the processes.
+    public static func closeConfirmationAlert(
+        for processes: [ForegroundProcessInfo]
+    ) -> NSAlert {
+        let names = processes.map(\.displayName).joined(separator: ", ")
+        let alert = NSAlert()
+        alert.messageText = processes.count == 1
+            ? "“\(names)” is still running"
+            : "\(processes.count) processes are still running"
+        alert.informativeText = processes.count == 1
+            ? "Closing will terminate it."
+            : "Closing will terminate them: \(names)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Close")
+        return alert
+    }
+
     private static func probeForeground(of shellPid: pid_t) -> ForegroundProcessInfo? {
         // 1) find direct children of the shell
         var buf = [pid_t](repeating: 0, count: 256)
