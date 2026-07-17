@@ -206,13 +206,16 @@ final class CodeViewTests: XCTestCase {
         condition: @escaping () -> Bool
     ) {
         let exp = expectation(description: description)
-        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
             if condition() {
                 timer.invalidate()
                 exp.fulfill()
             }
         }
         wait(for: [exp], timeout: timeout)
+        // Always kill the timer: on timeout it would otherwise keep firing
+        // into later tests, running stale closures against torn-down state.
+        timer.invalidate()
     }
 
     func testChangesPageShowsNotARepoForPlainFolder() {
