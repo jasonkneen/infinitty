@@ -108,7 +108,7 @@ final class TabRenameField: NSObject, NSPopoverDelegate {
         controller.preferredContentSize = contentSize
         popover.contentViewController = controller
         popover.contentSize = contentSize
-        popover.behavior = .transient
+        popover.behavior = .applicationDefined
         popover.animates = true
 
         super.init()
