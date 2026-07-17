@@ -9,6 +9,8 @@ final class TerminalView: NSView {
     var pty: PTY!
     var renderer: Renderer!
     var onFocus: (() -> Void)?
+    /// Click landed on the pet sprite (pet assistant entry point).
+    var onPetClick: (() -> Void)?
 
     private var scrollAccumulator: CGFloat = 0
     private var mouseScrollAccumulator: CGFloat = 0
@@ -410,6 +412,13 @@ final class TerminalView: NSView {
             return
         }
         window?.makeFirstResponder(self)
+
+        // A click on the pet opens the assistant bubble instead of selecting.
+        if let petRect = renderer.petHitRect(in: self), petRect.contains(pt) {
+            onPetClick?()
+            dragMode = .none
+            return
+        }
 
         if event.modifierFlags.contains(.command) {
             openLink(at: event)

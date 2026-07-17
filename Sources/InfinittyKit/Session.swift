@@ -118,6 +118,17 @@ final class TerminalSession: NSObject {
         if pty.pid > 0 { kill(pty.pid, SIGHUP) }
     }
 
+    /// The pane's live working directory: the foreground process's cwd (the
+    /// shell itself at a prompt), probed on demand so it's fresh even between
+    /// the tracker's 2s polls. Falls back to the launch directory.
+    func currentDirectory() -> String? {
+        let pid = processTracker?.current?.pid ?? pty.pid
+        if pid > 1, let dir = ForegroundProcessTracker.directory(of: pid) {
+            return dir
+        }
+        return workingDirectory
+    }
+
     /// Release threads and the socket. Idempotent.
     func shutdown() {
         guard !torndown else { return }

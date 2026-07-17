@@ -113,6 +113,7 @@ final class PetAnimator {
         case rest
         case oneShot(cyclesLeft: Int)
         case running
+        case thinking
     }
 
     private weak var terminal: Terminal?
@@ -154,18 +155,36 @@ final class PetAnimator {
     // MARK: events
 
     func commandStarted() {
+        if case .thinking = mode { return }
         markerDriven = true
         enterRunning()
     }
 
     func commandEnded(exitCode: Int) {
+        if case .thinking = mode { return }
         markerDriven = true
         play(exitCode == 0 ? PetAnimations.waving : PetAnimations.failed, cycles: 1)
     }
 
     func bell() {
         if case .running = mode { return }
+        if case .thinking = mode { return }
         play(PetAnimations.jumping, cycles: 1)
+    }
+
+    /// Loop the review animation while the assistant works. Sticky: activity
+    /// heuristics and command markers don't interrupt it.
+    func startThinking() {
+        if case .thinking = mode { return }
+        mode = .thinking
+        animation = PetAnimations.review
+        frame = 0
+        stepFrame()
+    }
+
+    func stopThinking() {
+        guard case .thinking = mode else { return }
+        rest()
     }
 
     // MARK: internals
@@ -226,14 +245,15 @@ final class PetAnimator {
                 mode = .oneShot(cyclesLeft: left - 1)
             case .rest:
                 return
-            case .running:
-                break // loop until the command ends
+            case .running, .thinking:
+                break // loop until the command / assistant ends
             }
         }
         stepFrame()
     }
 
     private func pollActivity() {
+        if case .thinking = mode { return } // assistant owns the pet for now
         guard let terminal else { return }
         let gen = terminal.currentGeneration
         let changed = gen != lastGen

@@ -135,6 +135,20 @@ final class Renderer: NSObject {
         if dirty { poke() }
     }
 
+    /// The pet sprite's rect in view coordinates (bottom-right corner,
+    /// unflipped view), for click hit-testing. nil when no pet is shown.
+    func petHitRect(in view: NSView) -> CGRect? {
+        renderLock.lock()
+        let hasPet = petTexture != nil
+        let size = petSizePoints
+        renderLock.unlock()
+        guard hasPet else { return nil }
+        let h = size * (208.0 / 192.0)
+        let m: CGFloat = 10
+        return CGRect(
+            x: view.bounds.width - size - m, y: m, width: size, height: h)
+    }
+
     var cellSizePoints: CGSize { atlas.cellSizePoints }
     var backgroundColor: SIMD4<Float> { theme.background }
 

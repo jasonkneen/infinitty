@@ -317,6 +317,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let s, let win = s.view.window else { return }
             self?.quickTerminal.setFocusedSession(s)
             self?.updateTitle(for: win)
+            self?.codeViews[ObjectIdentifier(win)]?.track(session: s)
+        }
+        s.view.onPetClick = { [weak self, weak s] in
+            guard let self, let s else { return }
+            self.presentPetAssistant(for: s)
         }
         s.terminal.onMarker = { [weak self, weak s] kind, exit in
             guard let self, let s else { return }
@@ -759,6 +764,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let win = s.view.window
         s.shutdown()
         sessions.removeAll { $0 === s }
+        petAssistants.removeValue(forKey: s.id)?.detach()
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
@@ -936,6 +942,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         in window: NSWindow
     ) -> (NSView, TerminalSession) {
         let session = createSession(scale: window.backingScaleFactor)
+        // New quick-terminal tabs land in the current tab's live folder.
+        let focused = (window.firstResponder as? TerminalView)
+            .flatMap { view in sessions.first { $0.view === view } }
+        session.workingDirectory = (focused ?? quickTerminal.activeSessions.first)?
+            .currentDirectory()
         let size = quickTerminal.activeRootView?.bounds.size
             ?? window.contentView?.bounds.size
             ?? window.contentLayoutRect.size
@@ -1023,7 +1034,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             newWindow(sender)
             return
         }
-        let (window, session) = makeTerminalWindow()
+        // Inherit the live cwd of the current pane so the new tab lands where
+        // the user is working, not back in $HOME.
+        let source = focusedSession() ?? activeSessions(in: key).first
+        let (window, session) = makeTerminalWindow(cwd: source?.currentDirectory())
         key.addTabbedWindow(window, ordered: .above)
         window.makeKeyAndOrderFront(nil)
         session.launch()
@@ -1065,6 +1079,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func split(session: TerminalSession, vertical: Bool, newFirst: Bool) {
         guard let win = session.view.window else { return }
         let newSession = createSession(scale: win.backingScaleFactor)
+        // Splits land in the source pane's live folder, same as new tabs.
+        newSession.workingDirectory = session.currentDirectory()
 
         let old = session.view
         let container = old.superview
@@ -1124,6 +1140,113 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func toggleQuickTerminal(_ sender: Any?) {
         quickTerminal.toggle()
+    }
+
+    // MARK: - code view
+
+    /// Per-window code-view sidebars, keyed by window identity.
+    private var codeViews: [ObjectIdentifier: CodeViewController] = [:]
+    private static let codeViewWidth: CGFloat = 280
+
+    @objc func toggleCodeView(_ sender: Any?) {
+        guard let win = NSApp.keyWindow,
+              win.tabbingIdentifier == "infinitty",
+              win !== quickTerminal.window else { return }
+        let id = ObjectIdentifier(win)
+        if let controller = codeViews[id] {
+            // Hide: unwrap the outer split and put the terminal content back.
+            if let split = win.contentView as? NSSplitView,
+               let content = split.arrangedSubviews.first(where: { $0 !== controller.view }) {
+                content.removeFromSuperview()
+                win.contentView = content
+            }
+            codeViews.removeValue(forKey: id)
+            refocusTerminal(in: win)
+            return
+        }
+        openCodeView(in: win)
+    }
+
+    /// Open the code-view sidebar in `win` (no-op if already open).
+    @discardableResult
+    private func openCodeView(in win: NSWindow) -> CodeViewController? {
+        let id = ObjectIdentifier(win)
+        if let existing = codeViews[id] { return existing }
+        guard let content = win.contentView else { return nil }
+        let controller = CodeViewController(config: config)
+        let split = NSSplitView(frame: NSRect(origin: .zero, size: win.contentLayoutRect.size))
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.autoresizingMask = [.width, .height]
+        win.contentView = split
+        split.addArrangedSubview(content)
+        split.addArrangedSubview(controller.view)
+        // Terminal flexes on window resize; the sidebar holds its width.
+        split.setHoldingPriority(.defaultLow, forSubviewAt: 0)
+        split.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
+        codeViews[id] = controller
+        let source = focusedSession() ?? activeSessions(in: win).first
+        if let source { controller.track(session: source) }
+        DispatchQueue.main.async {
+            split.setPosition(split.bounds.width - Self.codeViewWidth, ofDividerAt: 0)
+            self.refocusTerminal(in: win)
+        }
+        return controller
+    }
+
+    /// Keep keyboard input in the terminal after sidebar toggles.
+    private func refocusTerminal(in win: NSWindow) {
+        if win.firstResponder is TerminalView { return }
+        if let target = activeSessions(in: win).first?.view {
+            win.makeFirstResponder(target)
+        }
+    }
+
+    // MARK: - pet assistant
+
+    /// One assistant per session (kept so the popover survives focus changes).
+    private var petAssistants: [Int: PetAssistant] = [:]
+
+    private func presentPetAssistant(for session: TerminalSession) {
+        guard let anchor = session.renderer.petHitRect(in: session.view) else { return }
+        let assistant: PetAssistant
+        if let existing = petAssistants[session.id] {
+            assistant = existing
+        } else {
+            let created = PetAssistant(config: config)
+            created.attach(to: session)
+            created.onShowInSidePanel = { [weak self] paths, query in
+                self?.showAssistantResults(paths, query: query, for: session)
+            }
+            petAssistants[session.id] = created
+            assistant = created
+        }
+        assistant.presentInput(anchorRect: anchor, in: session.view)
+    }
+
+    /// "Show in Side Panel" from the pet's result bubble: open the code view
+    /// if needed and load the assistant's file results into it.
+    private func showAssistantResults(
+        _ paths: [String], query: String?, for session: TerminalSession
+    ) {
+        guard let win = session.view.window,
+              win.tabbingIdentifier == "infinitty",
+              win !== quickTerminal.window else { return }
+        guard let controller = openCodeView(in: win) else { return }
+        controller.track(session: session)
+        controller.showSearchResults(paths, query: query)
+    }
+
+    public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleCodeView(_:)) {
+            let win = NSApp.keyWindow
+            let standard = win.flatMap {
+                $0.tabbingIdentifier == "infinitty" && $0 !== quickTerminal.window ? $0 : nil
+            }
+            item.state = standard.flatMap { codeViews[ObjectIdentifier($0)] } != nil ? .on : .off
+            return standard != nil
+        }
+        return true
     }
 
     // MARK: - app control API (external apps / MCP)
@@ -1418,6 +1541,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
         tabIconAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
+        codeViews.removeValue(forKey: ObjectIdentifier(win))
         win.subtitle = ""
         let closing = sessions.filter { $0.view.window === win }
         for s in closing { s.shutdown() }
@@ -1526,6 +1650,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         selectTabItem.submenu = selectTabMenu
         windowMenu.addItem(selectTabItem)
+
+        let codeViewItem = windowMenu.addItem(
+            withTitle: "Code View",
+            action: #selector(AppDelegate.toggleCodeView(_:)),
+            keyEquivalent: "e")
+        codeViewItem.keyEquivalentModifierMask = [.command, .shift]
 
         let focusPaneItem = NSMenuItem(title: "Focus Pane", action: nil, keyEquivalent: "")
         let focusPaneMenu = NSMenu(title: "Focus Pane")
