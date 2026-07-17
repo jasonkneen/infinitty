@@ -358,6 +358,56 @@ final class CodeViewTests: XCTestCase {
         XCTAssertEqual(controller.cellBadgeForTesting(row: 1), "A")
     }
 
+    /// Stage all → type a message → Commit: the commit lands in git, the
+    /// field clears, and the changes list drains.
+    func testCommitFlow() throws {
+        func git(_ args: String...) -> String {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", tempDir] + args
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = Pipe()
+            try! p.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            XCTAssertEqual(p.terminationStatus, 0, "git \(args)")
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        git("init", "-q")
+        git("config", "user.email", "test@example.com")
+        git("config", "user.name", "Test")
+        git("add", "Package.swift")
+        git("commit", "-q", "-m", "init")
+        try "// changed\n".write(
+            toFile: tempDir + "/Package.swift", atomically: true, encoding: .utf8)
+
+        let (controller, _) = mountedController()
+        controller.reRootForTesting(tempDir)
+        controller.switchPageForTesting(1)
+        waitForCondition("changes loaded") {
+            controller.topLevelRowCountForTesting == 1
+        }
+        // Disabled without a message, and still disabled once the message
+        // exists but nothing is staged.
+        XCTAssertFalse(controller.commitButtonEnabledForTesting)
+        controller.setCommitMessageForTesting("test commit")
+        XCTAssertFalse(controller.commitButtonEnabledForTesting)
+
+        controller.stageAllForTesting()
+        waitForCondition("commit enabled") {
+            controller.commitButtonEnabledForTesting
+        }
+        controller.commitForTesting()
+        waitForCondition("committed") {
+            git("log", "--oneline", "-1").contains("test commit")
+        }
+        waitForCondition("changes drained") {
+            controller.topLevelRowCountForTesting == 0
+        }
+        XCTAssertEqual(controller.commitMessageForTesting, "")
+    }
+
     /// Selecting a change swaps the text preview for the diff table:
     /// combined and split modes render rows, and the font size adjusts.
     func testDiffViewerRendersCombinedAndSplit() throws {

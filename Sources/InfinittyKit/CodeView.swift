@@ -254,12 +254,13 @@ final class DiffCellView: NSTableCellView {
 }
 
 /// The code-view sidebar. Top to bottom: Files|Changes segmented control,
-/// rg-backed search field (or per-status change counts on the Changes page),
-/// current-folder header, then a file tree (or flat search / git-status
-/// results) above a read-only preview, with a branch footer at the bottom.
-/// Markdown renders by default with a Raw toggle; git changes preview as
-/// diffs and can be staged/unstaged in place. The footer switches branches.
-/// Follows the tracked session's live cwd (2s tracker poll, debounced).
+/// rg-backed search field (or per-status change counts and a commit box on
+/// the Changes page), current-folder header, then a file tree (or flat
+/// search / git-status results) above a read-only preview, with a branch
+/// footer at the bottom. Markdown renders by default with a Raw toggle; git
+/// changes preview as diffs and can be staged, committed and switched
+/// between branches in place. Follows the tracked session's live cwd
+/// (2s tracker poll, debounced).
 final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
 
     private enum Page: Int { case files = 0, changes = 1 }
@@ -384,7 +385,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         // when there's a message and at least one staged change.
         commitField.placeholderString = "Commit message"
         commitField.controlSize = .small
-        commitField.bezelStyle = .rounded
+        commitField.bezelStyle = .roundedBezel
         commitField.delegate = self
         commitField.target = self
         commitField.action = #selector(commitTapped(_:))
@@ -825,7 +826,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     /// a stale .git/index.lock. Failures here used to be swallowed, which
     /// read as "the button does nothing".
     private func runGitMutation(
-        _ message: String, _ operation: @escaping () -> String?
+        _ message: String, _ operation: @escaping () -> String?,
+        onSuccess: (() -> Void)? = nil
     ) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let error = operation()
@@ -833,13 +835,29 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
                 guard let self else { return }
                 if let error {
                     self.showGitError(error, message: message) {
-                        self.runGitMutation(message, operation)
+                        self.runGitMutation(message, operation, onSuccess: onSuccess)
                     }
                 } else {
+                    onSuccess?()
                     self.refreshChanges()
                 }
             }
         }
+    }
+
+    @objc private func commitTapped(_ sender: Any?) {
+        let message = commitField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, let repo = changesRepo else { return }
+        runGitMutation("Could not commit", { CodeGit.commit(in: repo, message: message) }) { [weak self] in
+            self?.commitField.stringValue = ""
+        }
+    }
+
+    private func updateCommitControls() {
+        let hasStaged = changes.contains { $0.isStaged }
+        let hasMessage = !commitField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        commitButton.isEnabled = hasStaged && hasMessage
     }
 
     @objc private func stageTapped(_ sender: Any?) {
@@ -1121,6 +1139,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         updateChangeStats()
         updateStageButton()
         updateStageAllButton()
+        updateCommitControls()
         updateBranchFooter()
         updateHeader()
         if page == .changes {
@@ -1619,6 +1638,13 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     }
     func stageSelectedForTesting() { stageTapped(nil) }
     func stageAllForTesting() { stageAllTapped(nil) }
+    var commitButtonEnabledForTesting: Bool { commitButton.isEnabled }
+    var commitMessageForTesting: String { commitField.stringValue }
+    func setCommitMessageForTesting(_ text: String) {
+        commitField.stringValue = text
+        updateCommitControls()
+    }
+    func commitForTesting() { commitTapped(nil) }
     var showingDiffForTesting: Bool { showingDiff }
     var diffModeForTesting: Int { diffMode == .combined ? 0 : 1 }
     var diffFontSizeForTesting: CGFloat { diffFontSize }
