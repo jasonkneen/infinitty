@@ -37,6 +37,10 @@ final class TerminalSession: NSObject {
         view.terminal = terminal
         view.pty = pty
         view.renderer = renderer
+        // A split can expose this view before Metal has produced its first
+        // drawable. Seed the backing layer now so borderless panels never show
+        // the desktop through the new pane for a frame.
+        renderer.prepare(layer: view.metalLayer)
 
         pty.onData = { [terminal] buf, count in terminal.feed(buf, count) }
         pty.onEOF = { [weak self] in

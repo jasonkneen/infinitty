@@ -92,6 +92,7 @@ printf 'list\n'                | nc -U /tmp/infinitty-current.sock  # panes as J
 printf 'run 1 make test\n'     | nc -U /tmp/infinitty-current.sock  # sync: {"exitCode":0,"output":…}
 printf 'new-tab\n'             | nc -U /tmp/infinitty-current.sock  # returns new pane id
 printf 'split 1 right\n'       | nc -U /tmp/infinitty-current.sock
+printf 'toggle-quick-terminal\n' | nc -U /tmp/infinitty-current.sock
 printf 'focus 2\n'             | nc -U /tmp/infinitty-current.sock
 printf 'activity deploying…\n' | nc -U /tmp/infinitty-current.sock  # post to the notch widget
 printf 'subscribe\n'           | nc -U /tmp/infinitty-current.sock  # JSON event stream
@@ -208,9 +209,23 @@ Font to use one everywhere.
 
 ### Tabs, splits, mouse, selection
 
-- **Tabs**: native macOS tabs — ⌘T new tab, ⌘N new window, tab bar "+" works
+- **Tabs**: native macOS tabs — ⌘T new tab, ⇧⌘←/→ previous/next tab,
+  ⌘1–8 select by position, ⌘9 selects the last tab, and the tab bar "+" works;
+  hold ⌘ to reveal the numbers in tab titles; ⇧⌘T renames the active tab
 - **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
-  the focused pane (tab closes when its last pane exits)
+  the focused pane (tab closes when its last pane exits); ⇧⌥←/→/↑/↓ focuses
+  and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
+  pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly
+- **Quick terminal**: set `quick-terminal-key = cmd+shift+space` for a persistent,
+  global Quake-style terminal that slides down from the top. Its shell,
+  scrollback, splits, and internal tabs stay alive while hidden. Its always-visible
+  tab strip supports the `+` and selected-tab close buttons, ⌘T, ⇧⌘←/→, and
+  ⌘1–9. It can autohide on
+  focus loss and target the main screen, mouse screen, or menu-bar screen. The
+  global key uses the macOS hot-key API and does not require Accessibility
+  permission. Drag its bottom edge to resize it; the height is remembered across
+  launches. ⌘W closes the focused pane (and then its tab when the last pane
+  exits); ⇧⌘W hides the panel without terminating any panes.
 - **Mouse reporting**: click/drag/motion/scroll forwarded to apps that ask
   (vim, tmux, htop, lazygit; modes 9/1000/1002/1003, SGR + legacy encoding).
   Hold **Shift** to scroll local scrollback or select while an app owns the mouse.
@@ -228,10 +243,16 @@ Font to use one everywhere.
   content and live in scrollback.
 - **Window dragging is titlebar-only**; drags in the grid always select.
   Right-click for context menu: copy/paste, 4-way splits, rename tab, reset.
-- **Rename the active tab**: ⌃-click **Rename Tab…** in the right-click menu,
-  or **double-click the titlebar** (the area where the active tab's title
-  is drawn). An inline field pops over the titlebar — ⏎ commits, ⎋ cancels,
-  empty restores the automatic title.
+- **Rename a tab**: press ⇧⌘T, choose **Rename Tab…** in the terminal-content
+  right-click menu, or double-click its tab title (double-click the window
+  title when there is no visible tab strip). Quick-terminal titles become
+  editable directly in their tab; native tabs use an anchored rename popover.
+  ⏎ commits. Clicking away also commits a quick-terminal rename; for a native
+  tab, clicking elsewhere in the same terminal window commits while clicking
+  outside it cancels. ⎋ or pressing ⇧⌘T again cancels and discards any
+  typed text; an empty name restores the automatic title. Custom names are
+  kept in memory for the lifetime of their native or quick-terminal tab; they
+  are not restored after the tab closes or the app restarts.
 - **Running-process indicator** (native titlebar): the active pane's
   foreground process (e.g. `vim`, `node`, `Safari`) is shown as the window
   subtitle and as a small icon in the trailing edge of the titlebar. The

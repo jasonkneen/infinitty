@@ -109,7 +109,7 @@ final class Renderer: NSObject {
         config = newConfig
         atlas = GlyphAtlas.atlas(device: device, config: newConfig, scale: scale)
         theme = Theme.dark.applying(newConfig)
-        layer?.isOpaque = newConfig.backgroundOpacity >= 1 && !newConfig.backgroundBlur
+        if let layer { prepare(layer: layer) }
     }
 
     // MARK: - pet overlay
@@ -137,6 +137,22 @@ final class Renderer: NSObject {
 
     var cellSizePoints: CGSize { atlas.cellSizePoints }
     var backgroundColor: SIMD4<Float> { theme.background }
+
+    /// Give a pane an immediate backing color before its first Metal drawable
+    /// is available. This prevents a transparent frame when a new pane is
+    /// inserted into a borderless/translucent window such as the quick terminal.
+    /// Opaque setups only: the drawable's own translucent clear color
+    /// composites over the layer background every frame, so a placeholder
+    /// there would double the effective background opacity for the lifetime
+    /// of the pane.
+    func prepare(layer: CAMetalLayer) {
+        let opaque = config.backgroundOpacity >= 1 && !config.backgroundBlur
+        layer.isOpaque = opaque
+        let bg = theme.background
+        layer.backgroundColor = opaque
+            ? CGColor(red: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1)
+            : nil
+    }
 
     private func buildPipelines() {
         let options = MTLCompileOptions()
@@ -188,7 +204,7 @@ final class Renderer: NSObject {
         layer.device = device
         layer.pixelFormat = .bgra8Unorm
         layer.framebufferOnly = true
-        layer.isOpaque = config.backgroundOpacity >= 1 && !config.backgroundBlur
+        prepare(layer: layer)
         layer.maximumDrawableCount = 3
         layer.displaySyncEnabled = true
 

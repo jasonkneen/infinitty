@@ -43,6 +43,12 @@
 #                                   # (guarded: only completed, markdown-looking,
 #                                   #  on-screen output; skips TUIs/alt-screen)
 
+# quick terminal (global Quake-style drop-down; no Accessibility permission)
+# quick-terminal-key                = cmd+shift+space
+# quick-terminal-screen             = main      # main | mouse | macos-menu-bar
+# quick-terminal-autohide           = true
+# quick-terminal-animation-duration = 0.2
+
 # inline AI hints (ghost text — Tab or → to accept)
 # hints        = true              # history + CLI specs + smart model
 # ai-base-url  = https://api.openai.com/v1   # optional OpenAI-compatible endpoint

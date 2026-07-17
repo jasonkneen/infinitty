@@ -1,32 +1,86 @@
 import AppKit
 
+private enum TerminalWindowRole {
+    case standard
+    case quickTerminal
+}
+
 /// Manages windows, native tabs, and split panes. Every pane is a
 /// self-contained TerminalSession; the delegate only does plumbing.
 public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     override public init() {
         super.init()
         installTitlebarDoubleClickMonitor()
+        installModifierHintMonitor()
     }
 
-    /// Install a local mouse monitor that turns double-clicks on an infinitty
-    /// window's titlebar into the inline rename UI. (We can't hook the system
-    /// tab bar directly — modern macOS native tabs don't expose hit-testing —
-    /// but the active tab's title is rendered into the titlebar strip in
-    /// both native and bare-titlebar modes, so this is the natural place.)
+    /// Install a local mouse monitor that turns a native-tab double-click (or
+    /// a single-window titlebar double-click) into the rename UI.
     private func installTitlebarDoubleClickMonitor() {
         titlebarClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
             [weak self] event in
             guard let self else { return event }
             guard event.clickCount == 2,
-                  let win = event.window,
-                  win.tabbingIdentifier == "infinitty",
-                  self.eventIsInTitlebar(event, of: win)
+                  let sourceWindow = event.window,
+                  sourceWindow.tabbingIdentifier == "infinitty"
             else { return event }
-            // Consume the event so the system doesn't also treat it as a
-            // window-drag start (native tabs use double-click for nothing,
-            // but bare-titlebar drags would otherwise kick off).
-            self.beginInlineRename(for: win)
+
+            // Only the clicked window's own tab strip is hit-tested: matching
+            // other windows' buttons by raw screen geometry would hit occluded
+            // windows or windows on another Space.
+            let screenPoint = sourceWindow.convertPoint(toScreen: event.locationInWindow)
+            if let hit = sourceWindow.nativeTabButton(atScreenPoint: screenPoint),
+               let tabs = sourceWindow.tabbedWindows,
+               tabs.indices.contains(hit.index) {
+                let target = tabs[hit.index]
+                sourceWindow.tabGroup?.selectedWindow = target
+                target.makeKeyAndOrderFront(nil)
+                DispatchQueue.main.async { [weak self, weak target] in
+                    guard let self, let target else { return }
+                    self.beginInlineRename(for: target)
+                }
+                return nil
+            }
+
+            // No native tab button means this is a single-window/bare-titlebar
+            // layout. Preserve the documented titlebar double-click gesture.
+            guard sourceWindow.nativeTabButtonsInVisualOrder().isEmpty,
+                  self.eventIsInTitlebar(event, of: sourceWindow)
+            else { return event }
+            self.beginInlineRename(for: sourceWindow)
             return nil
+        }
+    }
+
+    private func installModifierHintMonitor() {
+        modifierHintMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) {
+            [weak self] event in
+            self?.setShortcutHintModifiers(event.modifierFlags)
+            return event
+        }
+        paneShortcutKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard let self else { return event }
+            if let offset = TabNavigation.cycleOffset(
+                keyCode: event.keyCode,
+                modifiers: event.modifierFlags),
+               NSApp.keyWindow?.firstResponder is TerminalView {
+                if offset < 0 {
+                    self.selectPreviousTab(event)
+                } else {
+                    self.selectNextTab(event)
+                }
+                return nil
+            }
+            // Digits act only while the hint overlay is up (the documented
+            // hold-⇧⌥-then-press flow). A quick ⇧⌥digit chord is text input
+            // on many layouts (€, °, …) and must keep reaching the pty.
+            guard self.showPaneShortcutHints,
+                  let number = PaneNavigation.shortcutNumber(
+                    keyCode: event.keyCode,
+                    modifiers: event.modifierFlags)
+            else { return event }
+            return self.selectPane(number: number, requireTerminalFocus: true) ? nil : event
         }
     }
 
@@ -35,8 +89,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// the top inset of the content view occupies the same role.
     private func eventIsInTitlebar(_ event: NSEvent, of win: NSWindow) -> Bool {
         let p = event.locationInWindow
-        guard win.frame.contains(p) else { return false }
-        let contentTop = win.frame.maxY - win.contentLayoutRect.maxY
+        guard p.x >= 0, p.x <= win.frame.width,
+              p.y >= 0, p.y <= win.frame.height
+        else { return false }
+        let contentTop = win.contentLayoutRect.maxY
         return p.y >= contentTop
     }
 
@@ -50,11 +106,42 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
+    private var quickTerminalHotKey: GlobalHotKey?
+    private lazy var quickTerminal: QuickTerminalController = {
+        let controller = QuickTerminalController(
+            config: config,
+            makeWindow: { [weak self] in
+                self?.makeTerminalWindow(role: .quickTerminal)
+            },
+            makeTab: { [weak self] window in
+                self?.makeQuickTerminalTabContent(in: window)
+            },
+            sessionsInPage: { [weak self] page in
+                self?.sessions.filter {
+                    $0.view === page || $0.view.isDescendant(of: page)
+                } ?? []
+            })
+        controller.onTabsChanged = { [weak self, weak controller] in
+            guard let self, let window = controller?.window else { return }
+            self.updateTitle(for: window)
+            self.refreshPets()
+            self.refreshShortcutHints()
+        }
+        return controller
+    }()
     /// Currently visible rename UI, if any. Capped to one at a time so the
     /// gestures can't stack.
     private var activeRename: TabRenameField?
     /// Local mouse monitor that turns titlebar double-clicks into inline rename.
     private var titlebarClickMonitor: Any?
+    private var modifierHintMonitor: Any?
+    private var paneShortcutKeyMonitor: Any?
+    private var commandModifierHeld = false
+    private var paneModifiersHeld = false
+    private var showTabShortcutHints = false
+    private var showPaneShortcutHints = false
+    private var pendingTabHint: DispatchWorkItem?
+    private var pendingPaneHint: DispatchWorkItem?
     /// Shell cwd for the first window — set from a folder argv (GitHub
     /// Desktop et al.) before run(), or by an open-folder event that arrives
     /// during launch.
@@ -70,6 +157,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         openWindow(cwd: initialWorkingDirectory)
         launchCompleted = true
         watchConfigFile()
+        configureQuickTerminalHotKey()
         if config.notch { notch.show(display: config.notchDisplay) }
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
             openSettings(nil) // UI testing hook
@@ -159,7 +247,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        // Keep a hidden session alive even when it is controlled only through
+        // the menu or socket rather than a registered global shortcut.
+        QuickTerminalResidency.shouldTerminateAfterLastWindowClosed(
+            hasRegisteredHotKey: quickTerminalHotKey != nil,
+            hasLiveSession: quickTerminal.hasLiveSession)
+    }
+
+    public func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag {
+            openWindow(cwd: nil)
+            return false
+        }
+        return true
     }
 
     /// Finder / `open -a Infinitty <folder>` / folder dropped on the Dock
@@ -182,8 +285,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        quickTerminalHotKey = nil
+        pendingTabHint?.cancel()
+        pendingPaneHint?.cancel()
+        if let titlebarClickMonitor { NSEvent.removeMonitor(titlebarClickMonitor) }
+        if let modifierHintMonitor { NSEvent.removeMonitor(modifierHintMonitor) }
+        if let paneShortcutKeyMonitor { NSEvent.removeMonitor(paneShortcutKeyMonitor) }
         appControl.stop()
         for s in sessions { s.shutdown() }
+    }
+
+    public func applicationWillResignActive(_ notification: Notification) {
+        setShortcutHintModifiers([])
     }
 
     // MARK: - session plumbing
@@ -196,11 +309,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         s.onExited = { [weak self] session in self?.sessionDidExit(session) }
         s.onTitleChanged = { [weak self] session in
             guard let win = session.view.window else { return }
+            self?.quickTerminal.setTitle(session.title, for: session)
             self?.updateTitle(for: win)
             self?.appControl.broadcast(["event": "title", "pane": session.id, "title": session.title])
         }
         s.view.onFocus = { [weak self, weak s] in
             guard let s, let win = s.view.window else { return }
+            self?.quickTerminal.setFocusedSession(s)
             self?.updateTitle(for: win)
         }
         s.terminal.onMarker = { [weak self, weak s] kind, exit in
@@ -236,6 +351,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return sessions.first { $0.view === view }
     }
 
+    private func activeSessions(in win: NSWindow) -> [TerminalSession] {
+        if win === quickTerminal.window { return quickTerminal.activeSessions }
+        return sessions.filter { $0.view.window === win }
+    }
+
     /// Bring `session`'s pane to the front within its window and make it first
     /// responder. Used by the titlebar process-icon accessory to refocus the
     /// pane the icon is describing after a tab switch.
@@ -245,14 +365,253 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         win.makeKeyAndOrderFront(nil)
     }
 
+    private func panesInVisualOrder(in win: NSWindow) -> [TerminalSession] {
+        var views: [TerminalView] = []
+        func collect(from view: NSView) {
+            if let terminal = view as? TerminalView {
+                views.append(terminal)
+                return
+            }
+            if let split = view as? NSSplitView {
+                split.arrangedSubviews.forEach { collect(from: $0) }
+            } else {
+                view.subviews.forEach { collect(from: $0) }
+            }
+        }
+        let root = win === quickTerminal.window
+            ? quickTerminal.activeRootView
+            : win.contentView
+        if let root { collect(from: root) }
+        return views.compactMap { view in sessions.first { $0.view === view } }
+    }
+
+    private func setShortcutHintModifiers(_ modifiers: NSEvent.ModifierFlags) {
+        let relevant = modifiers.shortcutModifiers
+        setHintChordHeld(
+            relevant == .command,
+            held: \.commandModifierHeld,
+            pending: \.pendingTabHint,
+            show: \.showTabShortcutHints)
+        setHintChordHeld(
+            relevant == [.shift, .option],
+            held: \.paneModifiersHeld,
+            pending: \.pendingPaneHint,
+            show: \.showPaneShortcutHints)
+    }
+
+    /// Hints appear after a short hold (so plain shortcut chords don't
+    /// flash them) and clear the moment the chord is released.
+    private func setHintChordHeld(
+        _ nowHeld: Bool,
+        held: ReferenceWritableKeyPath<AppDelegate, Bool>,
+        pending: ReferenceWritableKeyPath<AppDelegate, DispatchWorkItem?>,
+        show: ReferenceWritableKeyPath<AppDelegate, Bool>
+    ) {
+        guard nowHeld != self[keyPath: held] else { return }
+        self[keyPath: held] = nowHeld
+        self[keyPath: pending]?.cancel()
+        self[keyPath: pending] = nil
+        if nowHeld {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self[keyPath: held] else { return }
+                self[keyPath: show] = true
+                self.refreshShortcutHints()
+            }
+            self[keyPath: pending] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+        } else if self[keyPath: show] {
+            self[keyPath: show] = false
+            refreshShortcutHints()
+        }
+    }
+
+    /// Tracks whether the last refresh left hint chrome (pane badges, ⌘N
+    /// title prefixes) applied somewhere, so the app-wide clearing sweep can
+    /// be skipped on the frequent tab/pane churn that happens with no
+    /// modifiers held.
+    private var shortcutHintsApplied = false
+
+    private func refreshShortcutHints() {
+        let showingAny = showTabShortcutHints || showPaneShortcutHints
+        guard showingAny || shortcutHintsApplied else { return }
+        shortcutHintsApplied = showingAny
+        var windows: [NSWindow] = []
+        var seen = Set<ObjectIdentifier>()
+        for session in sessions {
+            session.view.setPaneShortcutHint(number: nil)
+            session.view.setPaneShortcutSelectionHighlighted(false)
+            if let win = session.view.window,
+               seen.insert(ObjectIdentifier(win)).inserted {
+                windows.append(win)
+            }
+        }
+        windows.forEach(updateTitle)
+
+        guard showPaneShortcutHints, let win = NSApp.keyWindow else { return }
+        for (index, pane) in panesInVisualOrder(in: win).prefix(9).enumerated() {
+            pane.view.setPaneShortcutHint(number: index + 1)
+        }
+        (win.firstResponder as? TerminalView)?
+            .setPaneShortcutSelectionHighlighted(true)
+    }
+
+    public func windowDidBecomeKey(_ notification: Notification) {
+        guard showPaneShortcutHints else { return }
+        refreshShortcutHints()
+    }
+
+    @objc func focusPaneLeft(_ sender: Any?) { focusPane(in: .left) }
+    @objc func focusPaneRight(_ sender: Any?) { focusPane(in: .right) }
+    @objc func focusPaneUp(_ sender: Any?) { focusPane(in: .up) }
+    @objc func focusPaneDown(_ sender: Any?) { focusPane(in: .down) }
+
+    private func focusPane(in direction: PaneFocusDirection) {
+        guard let target = paneTarget(in: direction) else {
+            // The ⇧⌥arrow menu equivalents match even when there is nothing
+            // to focus. Terminal panes still own this application shortcut,
+            // so suppress it at an edge rather than leaking an escape sequence
+            // to the pty. Non-terminal editors retain their selection command.
+            if PaneNavigation.shouldForwardUnmatchedArrow(
+                terminalHasFocus: NSApp.keyWindow?.firstResponder is TerminalView
+            ) {
+                forwardCurrentKeyEventToFirstResponder()
+            }
+            return
+        }
+        focusPane(for: target)
+        if showPaneShortcutHints { refreshShortcutHints() }
+        target.view.showFocusHighlight()
+    }
+
+    private func paneTarget(in direction: PaneFocusDirection) -> TerminalSession? {
+        guard let current = focusedSession(), let win = current.view.window else { return nil }
+        let panes = panesInVisualOrder(in: win)
+        guard let currentIndex = panes.firstIndex(where: { $0 === current }) else { return nil }
+        let frames = panes.map { $0.view.convert($0.view.bounds, to: nil) }
+        guard let index = PaneNavigation.targetIndex(
+            from: currentIndex, frames: frames, direction: direction)
+        else { return nil }
+        return panes[index]
+    }
+
+    /// A matched menu key equivalent consumes its keyDown even when the
+    /// action cannot act. Re-deliver the event to the key window's first
+    /// responder so the keystroke is not silently dropped.
+    private func forwardCurrentKeyEventToFirstResponder() {
+        guard let event = NSApp.currentEvent, event.type == .keyDown,
+              let responder = NSApp.keyWindow?.firstResponder
+        else { return }
+        responder.keyDown(with: event)
+    }
+
+    @objc func selectPreviousTab(_ sender: Any?) {
+        guard let current = NSApp.keyWindow else { return }
+        if let quickWindow = quickTerminal.window, current === quickWindow {
+            _ = quickTerminal.selectPreviousTab()
+            refreshShortcutHints()
+            return
+        }
+        // In a non-tabbed key window (Settings fields, the rename popover)
+        // ⇧⌘←/→ is the select-to-line-edge editing command, not tab cycling.
+        guard current.tabbingIdentifier == "infinitty" else {
+            forwardCurrentKeyEventToFirstResponder()
+            return
+        }
+        selectNativeTab(offset: -1, from: current, sender: sender)
+    }
+
+    @objc func selectNextTab(_ sender: Any?) {
+        guard let current = NSApp.keyWindow else { return }
+        if let quickWindow = quickTerminal.window, current === quickWindow {
+            _ = quickTerminal.selectNextTab()
+            refreshShortcutHints()
+            return
+        }
+        guard current.tabbingIdentifier == "infinitty" else {
+            forwardCurrentKeyEventToFirstResponder()
+            return
+        }
+        selectNativeTab(offset: 1, from: current, sender: sender)
+    }
+
+    /// Select native tabs directly instead of calling NSWindow's
+    /// selectPreviousTab/selectNextTab actions. Those actions traverse the
+    /// responder chain and can route straight back to this delegate selector,
+    /// causing unbounded recursion.
+    private func selectNativeTab(offset: Int, from current: NSWindow, sender: Any?) {
+        let tabs = current.tabbedWindows ?? [current]
+        guard let currentIndex = tabs.firstIndex(where: { $0 === current }),
+              let targetIndex = TabNavigation.cycledIndex(
+                from: currentIndex,
+                offset: offset,
+                tabCount: tabs.count),
+              targetIndex != currentIndex
+        else { return }
+        let target = tabs[targetIndex]
+        current.tabGroup?.selectedWindow = target
+        target.makeKeyAndOrderFront(sender)
+        refreshShortcutHints()
+    }
+
+    @objc func selectTabByNumber(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        if let quickWindow = quickTerminal.window, NSApp.keyWindow === quickWindow {
+            _ = quickTerminal.selectTab(shortcutNumber: item.tag)
+            refreshShortcutHints()
+            return
+        }
+        guard
+              let current = NSApp.keyWindow,
+              current.tabbingIdentifier == "infinitty" else { return }
+        let tabs = current.tabbedWindows ?? [current]
+        guard let index = TabNavigation.index(for: item.tag, tabCount: tabs.count) else { return }
+        let target = tabs[index]
+        current.tabGroup?.selectedWindow = target
+        target.makeKeyAndOrderFront(sender)
+        refreshShortcutHints()
+    }
+
+    @objc func selectPaneByNumber(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        _ = selectPane(number: item.tag)
+    }
+
+    @discardableResult
+    private func selectPane(number: Int, requireTerminalFocus: Bool = false) -> Bool {
+        guard let win = NSApp.keyWindow else { return false }
+        let panes = panesInVisualOrder(in: win)
+        let index = requireTerminalFocus
+            ? PaneNavigation.shortcutTargetIndex(
+                for: number,
+                paneCount: panes.count,
+                terminalHasFocus: win.firstResponder is TerminalView)
+            : PaneNavigation.index(for: number, paneCount: panes.count)
+        guard let index else { return false }
+        focusPane(for: panes[index])
+        if showPaneShortcutHints { refreshShortcutHints() }
+        panes[index].view.showFocusHighlight()
+        return true
+    }
+
     private var titleOverrides: [ObjectIdentifier: String] = [:]
     private var tabIconAccessories: [ObjectIdentifier: TabIconAccessory] = [:]
 
     /// Tab/window title: custom name if renamed, else the focused pane's
     /// title, plus the pane count when the tab holds more than one shell.
     private func updateTitle(for win: NSWindow) {
-        let inWindow = sessions.filter { $0.view.window === win }
+        let inWindow = activeSessions(in: win)
         guard !inWindow.isEmpty else { return }
+        if win === quickTerminal.window {
+            let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
+            quickTerminal.setTitle(focused.title, for: focused)
+            quickTerminal.setShowsShortcutHints(showTabShortcutHints)
+            win.title = quickTerminal.activeTabID
+                .flatMap { quickTerminal.displayTitle(for: $0) }
+                ?? focused.title
+            win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
+            return
+        }
+
         let base: String
         if let custom = titleOverrides[ObjectIdentifier(win)] {
             base = custom
@@ -260,7 +619,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
             base = focused.title
         }
-        win.title = inWindow.count > 1 ? "\(base) (\(inWindow.count))" : base
+        let hintedBase: String
+        if showTabShortcutHints,
+           let tabs = win.tabbedWindows,
+           let index = tabs.firstIndex(where: { $0 === win }),
+           let number = TabNavigation.shortcutNumber(
+                forTabIndex: index, tabCount: tabs.count) {
+            hintedBase = "⌘\(number) \(base)"
+        } else {
+            hintedBase = base
+        }
+        win.title = inWindow.count > 1 ? "\(hintedBase) (\(inWindow.count))" : hintedBase
         win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
         // also poke the accessory if the title changed in a way that affects it
         tabIconAccessories[ObjectIdentifier(win)]?.refreshFromHost()
@@ -269,7 +638,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// The foreground process for the focused pane in `win`, if any session
     /// in the window is currently tracking one.
     func foregroundProcessInfo(for win: NSWindow) -> ForegroundProcessInfo? {
-        let inWindow = sessions.filter { $0.view.window === win }
+        let inWindow = activeSessions(in: win)
         let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow.first
         return focused?.processTracker?.current
     }
@@ -283,7 +652,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let override = titleOverrides[ObjectIdentifier(win)] {
             return override
         }
-        let t = win.title
+        var t = win.title
+        if let r = t.range(of: "^⌘[1-9] ", options: .regularExpression) {
+            t.removeSubrange(r)
+        }
         if let r = t.range(of: " \\(\\d+\\)$", options: .regularExpression) {
             return String(t[..<r.lowerBound])
         }
@@ -291,18 +663,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func renameTab(_ sender: Any?) {
-        guard let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
-              win.tabbingIdentifier == "infinitty" else { return }
+        // Treat the shortcut as a mode toggle. Repeating it while an editor
+        // is open abandons the pending value instead of replacing the editor.
+        if let activeRename {
+            activeRename.dismiss(committed: false)
+            self.activeRename = nil
+            return
+        }
+        guard let win = NSApp.keyWindow
+                ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
+              win === quickTerminal.window || win.tabbingIdentifier == "infinitty"
+        else { return }
+        if win === quickTerminal.window {
+            _ = quickTerminal.toggleRenamingActiveTab()
+            return
+        }
         beginInlineRename(for: win)
     }
 
     /// Show the inline rename UI over `win`'s titlebar. If a rename is
-    /// already in flight for some other window, commit it and replace it
+    /// already in flight for some other window, cancel it and replace it
     /// rather than stack two UIs fighting over first responder.
     func beginInlineRename(for win: NSWindow) {
-        // Dismiss any previous rename by committing — the user is now
-        // expressing intent on a (possibly different) target.
-        activeRename?.dismiss(committed: true)
+        // A new rename supersedes any unfinished edit without saving it.
+        activeRename?.dismiss(committed: false)
         activeRename = nil
 
         // Use the stored override if set, otherwise derive the bare title
@@ -326,7 +710,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             if self.activeRename === field { self.activeRename = nil }
         }
         field.onCancel = { [weak self, weak field] in
-            if self?.activeRename === field { self?.activeRename = nil }
+            guard let self else { return }
+            if self.activeRename === field { self.activeRename = nil }
         }
         activeRename = field
         field.present()
@@ -341,7 +726,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         var chosen = Set<ObjectIdentifier>()
         let windows = Set(sessions.compactMap { $0.view.window })
         for win in windows {
-            let inWindow = sessions.filter { $0.view.window === win }
+            let inWindow = activeSessions(in: win)
             let host = inWindow.max { a, b in
                 let fa = a.view.convert(a.view.bounds, to: nil)
                 let fb = b.view.convert(b.view.bounds, to: nil)
@@ -365,21 +750,44 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func sessionDidExit(_ s: TerminalSession) {
+        let wasQuickTerminal = quickTerminal.contains(s)
+        let quickTabWasActive = wasQuickTerminal
+            && quickTerminal.activeSessions.contains { $0 === s }
+        let quickTabSessions = wasQuickTerminal
+            ? quickTerminal.sessions(inTabContaining: s)
+            : []
+        let win = s.view.window
         s.shutdown()
         sessions.removeAll { $0 === s }
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
-        guard let win = v.window else { return }
+        guard let win else { return }
+
+        if wasQuickTerminal, quickTabSessions.count == 1 {
+            _ = quickTerminal.removeTab(containing: s)
+            refreshPets()
+            refreshShortcutHints()
+            return
+        }
 
         if let split = v.superview as? NSSplitView {
             v.removeFromSuperview()
             collapse(split, in: win)
-            if let next = sessions.first(where: { $0.view.window === win }) {
+            let next: TerminalSession?
+            if wasQuickTerminal {
+                next = quickTabWasActive
+                    ? quickTabSessions.first { $0 !== s }
+                    : nil
+            } else {
+                next = activeSessions(in: win).first
+            }
+            if let next {
                 win.makeFirstResponder(next.view)
             }
             updateTitle(for: win)
             refreshPets()
+            refreshShortcutHints()
         } else {
             win.close() // last pane: closes this window/tab
         }
@@ -425,7 +833,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @discardableResult
-    private func makeTerminalWindow(cwd: String? = nil) -> (NSWindow, TerminalSession) {
+    private func makeTerminalWindow(
+        cwd: String? = nil,
+        role: TerminalWindowRole = .standard
+    ) -> (NSWindow, TerminalSession) {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let session = createSession(scale: scale)
         session.workingDirectory = cwd
@@ -436,23 +847,36 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             width: CGFloat(120) * cell.width + inset * 2,
             height: CGFloat(32) * cell.height + inset * 2
         )
-        let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: contentSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
+        let contentRect = NSRect(origin: .zero, size: contentSize)
+        let window: NSWindow
+        switch role {
+        case .standard:
+            window = NSWindow(
+                contentRect: contentRect,
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false)
+        case .quickTerminal:
+            window = QuickTerminalPanel(
+                contentRect: contentRect,
+                styleMask: [.borderless, .resizable, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false)
+        }
         window.title = "infinitty"
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)
         applyWindowBacking(to: window, renderer: session.renderer)
         window.contentResizeIncrements = cell
-        window.tabbingIdentifier = "infinitty"
-        window.delegate = self
+        if role == .standard {
+            window.tabbingIdentifier = "infinitty"
+            window.delegate = self
+        }
 
         // Titlebar & traffic-light chrome.
-        let customLights = config.trafficLights != "circle"
-        let bareTitlebar = config.titlebarStyle != "native" || customLights
+        let customLights = role == .standard && config.trafficLights != "circle"
+        let bareTitlebar = role == .quickTerminal
+            || config.titlebarStyle != "native" || customLights
         if bareTitlebar {
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
@@ -471,16 +895,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         session.view.frame = NSRect(origin: .zero, size: contentSize)
         session.view.autoresizingMask = [.width, .height]
-        if config.backgroundBlur {
-            let blur = NSVisualEffectView(frame: NSRect(origin: .zero, size: contentSize))
-            blur.material = .hudWindow
-            blur.blendingMode = .behindWindow
-            blur.state = .active
-            blur.addSubview(session.view)
-            window.contentView = blur
-        } else {
-            window.contentView = session.view
-        }
+        window.contentView = config.backgroundBlur
+            ? wrapInBackgroundBlur(session.view)
+            : session.view
 
         if customLights, let shape = TrafficLightsView.Shape(rawValue: config.trafficLights) {
             let lights = TrafficLightsView(shape: shape)
@@ -491,13 +908,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             window.contentView?.addSubview(lights)
         }
 
-        window.center()
+        if role == .standard { window.center() }
 
         // Process-icon accessory: only when the OS titlebar is actually visible.
         // Bare-titlebar modes (transparent / hidden / custom traffic lights) make
         // the titlebar invisible, so an accessory there would either be invisible
         // or, worse, fight with the cell grid.
-        let useAccessory = !bareTitlebar && config.titlebarStyle == "native"
+        let useAccessory = role == .standard
+            && !bareTitlebar && config.titlebarStyle == "native"
         if useAccessory {
             let acc = TabIconAccessory()
             acc.titlebarShowsTitle = true
@@ -510,6 +928,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         return (window, session)
+    }
+
+    /// Creates a page payload for the existing quick-terminal panel. The
+    /// controller wraps this in a stable tab page before launching the shell.
+    private func makeQuickTerminalTabContent(
+        in window: NSWindow
+    ) -> (NSView, TerminalSession) {
+        let session = createSession(scale: window.backingScaleFactor)
+        let size = quickTerminal.activeRootView?.bounds.size
+            ?? window.contentView?.bounds.size
+            ?? window.contentLayoutRect.size
+        session.view.frame = NSRect(origin: .zero, size: size)
+        session.view.autoresizingMask = [.width, .height]
+        if config.backgroundBlur {
+            return (wrapInBackgroundBlur(session.view), session)
+        }
+        return (session.view, session)
+    }
+
+    /// Hosts `view` inside a behind-window blur so translucent backgrounds
+    /// pick up the frosted look.
+    private func wrapInBackgroundBlur(_ view: NSView) -> NSVisualEffectView {
+        let blur = NSVisualEffectView(frame: view.frame)
+        blur.material = .hudWindow
+        blur.blendingMode = .behindWindow
+        blur.state = .active
+        blur.autoresizingMask = [.width, .height]
+        blur.addSubview(view)
+        return blur
     }
 
     private func applyPet(to session: TerminalSession) {
@@ -538,6 +985,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
+            self.refreshShortcutHints()
         }
         return session
     }
@@ -559,11 +1007,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
+            self.refreshShortcutHints()
         }
         return session
     }
 
     @objc func newTab(_ sender: Any?) {
+        // `===` would also be true with no key window and no quick-terminal
+        // panel (nil === nil); Cmd+T must fall through to a new window then.
+        if let quickWindow = quickTerminal.window, NSApp.keyWindow === quickWindow {
+            _ = quickTerminal.newTab()
+            return
+        }
         guard let key = NSApp.keyWindow, key.tabbingIdentifier == "infinitty" else {
             newWindow(sender)
             return
@@ -575,6 +1030,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
+            self.refreshShortcutHints()
         }
     }
 
@@ -645,6 +1101,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             win.makeFirstResponder(newSession.view)
             self.refreshPets()
             self.updateTitle(for: win)
+            self.refreshShortcutHints()
         }
         newSession.launch()
     }
@@ -658,7 +1115,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func closeWindow(_ sender: Any?) {
+        if NSApp.keyWindow === quickTerminal.window {
+            quickTerminal.hide()
+            return
+        }
         NSApp.keyWindow?.performClose(sender)
+    }
+
+    @objc func toggleQuickTerminal(_ sender: Any?) {
+        quickTerminal.toggle()
     }
 
     // MARK: - app control API (external apps / MCP)
@@ -731,6 +1196,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 DispatchQueue.main.async {
                     self.refreshPets()
                     self.updateTitle(for: window)
+                    self.refreshShortcutHints()
                 }
                 return session.id
             }
@@ -745,7 +1211,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 cwd = dir
             }
             let id = onMain { () -> Int? in
-                guard let host = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else {
+                let key = NSApp.keyWindow.flatMap {
+                    $0.tabbingIdentifier == "infinitty" ? $0 : nil
+                }
+                guard let host = key ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else {
                     return nil
                 }
                 let (window, session) = self.makeTerminalWindow(cwd: cwd)
@@ -755,6 +1224,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 DispatchQueue.main.async {
                     self.refreshPets()
                     self.updateTitle(for: window)
+                    self.refreshShortcutHints()
                 }
                 return session.id
             } ?? nil
@@ -779,9 +1249,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "focus":
             guard let (s, _) = paneAndText(arg) else { return "error: focus <id>" }
             _ = onMain {
-                s.view.window?.makeKeyAndOrderFront(nil)
-                s.view.window?.makeFirstResponder(s.view)
-                NSApp.activate(ignoringOtherApps: true)
+                if self.quickTerminal.contains(s) {
+                    _ = self.quickTerminal.focus(s)
+                } else {
+                    s.view.window?.makeKeyAndOrderFront(nil)
+                    s.view.window?.makeFirstResponder(s.view)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
             return "ok"
         case "close":
@@ -839,14 +1313,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "activity":
             _ = onMain { self.notch.showCustom(text: arg) }
             return "ok"
+        case "toggle-quick-terminal":
+            _ = onMain { self.quickTerminal.toggle() }
+            return "ok"
         default:
             return "error: unknown command '\(cmd)' (ping | version | list | new-window | new-tab | "
                 + "split | focus | close | send | send-line | screen | history | last-output | "
-                + "last-command | exit-code | run | activity | subscribe)"
+                + "last-command | exit-code | run | activity | toggle-quick-terminal | subscribe)"
         }
     }
 
     // MARK: - config reload
+
+    private func configureQuickTerminalHotKey() {
+        guard let value = config.quickTerminalKey, !value.isEmpty else {
+            quickTerminalHotKey = nil
+            return
+        }
+        guard let spec = GlobalHotKeySpec.parse(value) else {
+            quickTerminalHotKey = nil
+            let message = "infinitty: invalid quick-terminal-key '\(value)'\n"
+            FileHandle.standardError.write(Data(message.utf8))
+            return
+        }
+        // Config reloads fire on every file write; keep the live Carbon
+        // registration when the shortcut is unchanged.
+        if quickTerminalHotKey?.spec == spec { return }
+        quickTerminalHotKey = nil // unregister before claiming the new combo
+        quickTerminalHotKey = GlobalHotKey(spec: spec) { [weak self] in
+            self?.quickTerminal.toggle()
+        }
+        if quickTerminalHotKey == nil {
+            let message = "infinitty: quick-terminal-key '\(value)' is unavailable or already in use\n"
+            FileHandle.standardError.write(Data(message.utf8))
+        }
+    }
 
     @objc func reloadConfiguration(_ sender: Any?) {
         reloadConfig()
@@ -854,6 +1355,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func reloadConfig() {
         config = AppConfig.load()
+        quickTerminal.applyConfig(config)
+        configureQuickTerminalHotKey()
         var windows = Set<NSWindow>()
         for s in sessions {
             let scale = s.view.window?.backingScaleFactor
@@ -958,12 +1461,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "New Window", action: #selector(AppDelegate.newWindow(_:)), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "New Tab", action: #selector(AppDelegate.newTab(_:)), keyEquivalent: "t")
+        fileMenu.addItem(
+            withTitle: "Toggle Quick Terminal",
+            action: #selector(AppDelegate.toggleQuickTerminal(_:)),
+            keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Split Right", action: #selector(AppDelegate.splitRight(_:)), keyEquivalent: "d")
         fileMenu.addItem(withTitle: "Split Down", action: #selector(AppDelegate.splitDown(_:)), keyEquivalent: "D")
         fileMenu.addItem(withTitle: "Split Left", action: #selector(AppDelegate.splitLeft(_:)), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Split Up", action: #selector(AppDelegate.splitUp(_:)), keyEquivalent: "")
-        fileMenu.addItem(withTitle: "Rename Tab…", action: #selector(AppDelegate.renameTab(_:)), keyEquivalent: "")
+        let renameTab = fileMenu.addItem(
+            withTitle: "Rename Tab…",
+            action: #selector(AppDelegate.renameTab(_:)),
+            keyEquivalent: "t")
+        renameTab.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Reload Configuration", action: #selector(AppDelegate.reloadConfiguration(_:)), keyEquivalent: "r")
         fileMenu.addItem(.separator())
@@ -990,6 +1501,62 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         main.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(.separator())
+
+        let previousTab = windowMenu.addItem(
+            withTitle: "Previous Tab",
+            action: #selector(AppDelegate.selectPreviousTab(_:)),
+            keyEquivalent: "\u{F702}")
+        previousTab.keyEquivalentModifierMask = [.command, .shift]
+        let nextTab = windowMenu.addItem(
+            withTitle: "Next Tab",
+            action: #selector(AppDelegate.selectNextTab(_:)),
+            keyEquivalent: "\u{F703}")
+        nextTab.keyEquivalentModifierMask = [.command, .shift]
+
+        let selectTabItem = NSMenuItem(title: "Select Tab", action: nil, keyEquivalent: "")
+        let selectTabMenu = NSMenu(title: "Select Tab")
+        for number in 1...9 {
+            let title = number == 9 ? "Last Tab" : "Tab \(number)"
+            let item = selectTabMenu.addItem(
+                withTitle: title,
+                action: #selector(AppDelegate.selectTabByNumber(_:)),
+                keyEquivalent: String(number))
+            item.tag = number
+        }
+        selectTabItem.submenu = selectTabMenu
+        windowMenu.addItem(selectTabItem)
+
+        let focusPaneItem = NSMenuItem(title: "Focus Pane", action: nil, keyEquivalent: "")
+        let focusPaneMenu = NSMenu(title: "Focus Pane")
+        let paneBindings: [(String, Selector, String)] = [
+            ("Left", #selector(AppDelegate.focusPaneLeft(_:)), "\u{F702}"),
+            ("Right", #selector(AppDelegate.focusPaneRight(_:)), "\u{F703}"),
+            ("Up", #selector(AppDelegate.focusPaneUp(_:)), "\u{F700}"),
+            ("Down", #selector(AppDelegate.focusPaneDown(_:)), "\u{F701}"),
+        ]
+        for (title, action, key) in paneBindings {
+            let item = focusPaneMenu.addItem(
+                withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = [.shift, .option]
+        }
+        focusPaneMenu.addItem(.separator())
+        // AppKit displays these equivalents in the menu, but shifted Option
+        // digits become symbols before menu matching. The local key monitor
+        // above uses physical number-key codes for that keyboard path and
+        // only consumes the event while the hold-⇧⌥ hint overlay is up and a
+        // pane selection can actually be performed; a bare ⇧⌥digit chord
+        // stays text input for the pty.
+        for number in 1...9 {
+            let item = focusPaneMenu.addItem(
+                withTitle: "Pane \(number)",
+                action: #selector(AppDelegate.selectPaneByNumber(_:)),
+                keyEquivalent: String(number))
+            item.tag = number
+            item.keyEquivalentModifierMask = [.shift, .option]
+        }
+        focusPaneItem.submenu = focusPaneMenu
+        windowMenu.addItem(focusPaneItem)
         windowItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
 

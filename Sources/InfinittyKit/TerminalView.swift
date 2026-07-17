@@ -25,6 +25,8 @@ final class TerminalView: NSView {
     // Agent-control glow (control-socket activity).
     private var glowView: AgentGlowView?
     private var glowTimer: Timer?
+    private var focusHighlightView: PaneFocusHighlightView?
+    private var paneShortcutHintView: PaneShortcutHintView?
 
     /// Pulse the inner border while an agent drives this pane; fades 3 s
     /// after the last socket command.
@@ -41,6 +43,53 @@ final class TerminalView: NSView {
         glowTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
             self?.glowView?.stopPulse()
         }
+    }
+
+    func showFocusHighlight() {
+        ensureFocusHighlight().flash()
+    }
+
+    func setPaneShortcutSelectionHighlighted(_ highlighted: Bool) {
+        if highlighted {
+            ensureFocusHighlight().setPersistentlyVisible(true)
+        } else {
+            focusHighlightView?.setPersistentlyVisible(false)
+        }
+    }
+
+    private func ensureFocusHighlight() -> PaneFocusHighlightView {
+        if let focusHighlightView { return focusHighlightView }
+        let highlight = PaneFocusHighlightView(frame: bounds)
+        highlight.autoresizingMask = [.width, .height]
+        if let hint = paneShortcutHintView {
+            addSubview(highlight, positioned: .below, relativeTo: hint)
+        } else {
+            addSubview(highlight, positioned: .above, relativeTo: nil)
+        }
+        focusHighlightView = highlight
+        return highlight
+    }
+
+    func setPaneShortcutHint(number: Int?) {
+        guard let number else {
+            paneShortcutHintView?.isHidden = true
+            return
+        }
+        if paneShortcutHintView == nil {
+            let hint = PaneShortcutHintView(number: number)
+            addSubview(hint, positioned: .above, relativeTo: nil)
+            paneShortcutHintView = hint
+        }
+        paneShortcutHintView?.setNumber(number)
+        paneShortcutHintView?.isHidden = false
+        positionPaneShortcutHint()
+    }
+
+    private func positionPaneShortcutHint() {
+        guard let hint = paneShortcutHintView else { return }
+        hint.frame.origin = NSPoint(
+            x: floor((bounds.width - hint.frame.width) / 2),
+            y: floor((bounds.height - hint.frame.height) / 2))
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -84,6 +133,7 @@ final class TerminalView: NSView {
 
     override func layout() {
         super.layout()
+        positionPaneShortcutHint()
         updateGeometry()
         if inLiveResize {
             // Synchronous present keeps content glued to the window edge
