@@ -65,8 +65,26 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertFalse(panel.showsCloseButtonForTesting)
         XCTAssertFalse(panel.usesGlassSurfaceForTesting)
         XCTAssertGreaterThan(panel.inputFrameForTesting.width, 100)
+        window.makeKeyAndOrderFront(nil)
         panel.focusInput()
         XCTAssertTrue(panel.inputIsFirstResponderForTesting)
+    }
+
+    func testComposerListsConfiguredModel() {
+        var config = AppConfig()
+        config.aiModel = "claude-sonnet-4"
+        let assistant = PetAssistant(config: config)
+        let panel = assistant.makeSidebarPanelView()
+        XCTAssertEqual(panel.modelValueForTesting, "Auto · Best available")
+        XCTAssertTrue(panel.modelItemTitlesForTesting.contains("claude-sonnet-4"))
+    }
+
+    func testComposerDefaultsModelWhenBaseURLSet() {
+        var config = AppConfig()
+        config.aiBaseURL = "https://api.example.com/v1"
+        let assistant = PetAssistant(config: config)
+        let panel = assistant.makeSidebarPanelView()
+        XCTAssertTrue(panel.modelItemTitlesForTesting.contains("gpt-4o-mini"))
     }
     func testPetClickPresentsIndependentAssistantPanel() throws {
         let assistant = PetAssistant(config: AppConfig())

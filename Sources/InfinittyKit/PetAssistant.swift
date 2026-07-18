@@ -12,8 +12,12 @@ final class PetAssistantPanelView: NSView {
     }
 
     private let presentation: Presentation
+    private let config: AppConfig
     private let glassBackground = NSVisualEffectView()
-    var onSubmit: ((String) -> Void)?
+    var onSubmit: ((String, String) -> Void)?
+    /// Agent backend labels ("Codex", "Claude") the owner detected; injected
+    /// at init so UI construction stays machine-independent and testable.
+    private let agentTitles: [String]
     var onShowFiles: (() -> Void)?
     var onNewChat: (() -> Void)?
     var onClose: (() -> Void)?
@@ -37,8 +41,10 @@ final class PetAssistantPanelView: NSView {
     private let sendButton = NSButton()
     private let showFilesButton = NSButton(title: "Show Files", target: nil, action: nil)
 
-    init(presentation: Presentation) {
+    init(presentation: Presentation, config: AppConfig, agentTitles: [String] = []) {
         self.presentation = presentation
+        self.config = config
+        self.agentTitles = agentTitles
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         configureSurface()
@@ -137,7 +143,7 @@ final class PetAssistantPanelView: NSView {
     private func configureComposer() {
         modelLabel.font = .systemFont(ofSize: 9, weight: .semibold)
         modelLabel.textColor = .secondaryLabelColor
-        modelPicker.addItem(withTitle: "Auto · Best available")
+        for title in composerModelTitles() { modelPicker.addItem(withTitle: title) }
         modelPicker.controlSize = .regular
         modelPicker.font = .systemFont(ofSize: NSFont.systemFontSize)
 
@@ -161,12 +167,17 @@ final class PetAssistantPanelView: NSView {
         input.isRichText = false
         input.isVerticallyResizable = false
         input.isHorizontallyResizable = true
-        input.minSize = NSSize(width: 80, height: 32)
+        input.autoresizingMask = [.height]
+        input.frame = NSRect(x: 0, y: 0, width: 200, height: 32)
+        input.minSize = NSSize(width: 0, height: 32)
         input.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: 32)
         input.textContainerInset = NSSize(width: 3, height: 7)
         input.textContainer?.lineFragmentPadding = 0
         input.textContainer?.maximumNumberOfLines = 1
         input.textContainer?.lineBreakMode = .byClipping
+        input.textContainer?.widthTracksTextView = false
+        input.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: 32)
         input.onCommit = { [weak self] in self?.submit() }
 
         inputScroll.borderType = .noBorder
@@ -178,6 +189,8 @@ final class PetAssistantPanelView: NSView {
         sendButton.image = NSImage(
             systemSymbolName: "arrow.up", accessibilityDescription: "Send")
         sendButton.isBordered = false
+        sendButton.imagePosition = .imageOnly
+        sendButton.focusRingType = .none
         sendButton.contentTintColor = .white
         sendButton.wantsLayer = true
         sendButton.layer?.backgroundColor = NSColor(
@@ -185,6 +198,31 @@ final class PetAssistantPanelView: NSView {
         sendButton.layer?.cornerRadius = 15
         sendButton.target = self
         sendButton.action = #selector(sendTapped)
+    }
+
+    private func composerModelTitles() -> [String] {
+        var titles = ["Auto · Best available"]
+        titles += agentTitles
+        if let model = config.aiModel, !model.isEmpty {
+            titles.append(model)
+        } else if let base = config.aiBaseURL, !base.isEmpty {
+            titles.append("gpt-4o-mini")
+        }
+        return titles
+    }
+
+    /// The composer's currently-selected MODEL title ("Auto · Best available",
+    /// "Codex", "Claude", or a configured model name). Read at submit time.
+    var selectedModelTitle: String { modelPicker.titleOfSelectedItem ?? "Auto · Best available" }
+
+    override func layout() {
+        super.layout()
+        let clip = inputScroll.contentView.bounds
+        guard clip.width > 0, clip.height > 0 else { return }
+        input.minSize = NSSize(width: 0, height: clip.height)
+        input.frame = NSRect(x: 0, y: 0, width: clip.width, height: clip.height)
+        input.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: clip.height)
     }
 
     private func installSubviewsAndConstraints() {
@@ -323,7 +361,7 @@ final class PetAssistantPanelView: NSView {
         let request = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty else { return }
         input.string = ""
-        onSubmit?(request)
+        onSubmit?(request, selectedModelTitle)
     }
 
     @objc private func sendTapped(_ sender: Any?) { submit() }
@@ -350,6 +388,9 @@ final class PetAssistantPanelView: NSView {
     var emptyStateForTesting: String { emptyStateLabel.stringValue }
     var modelLabelForTesting: String { modelLabel.stringValue }
     var modelValueForTesting: String { modelPicker.titleOfSelectedItem ?? "" }
+    var modelItemTitlesForTesting: [String] { modelPicker.itemTitles }
+    var inputFrameForTesting: NSRect { input.frame }
+    var inputIsFirstResponderForTesting: Bool { input.window?.firstResponder === input }
     var attachmentSymbolForTesting: String { "paperclip" }
     var sendSymbolForTesting: String { "arrow.up" }
     var sendButtonIsCircularForTesting: Bool { sendButton.layer?.cornerRadius == 15 }
@@ -377,12 +418,15 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private var lastQuery: String?
     private var sidebarMessages: [(role: String, text: String)] = []
     private weak var sidebarPanel: PetAssistantPanelView?
+    /// Locally-installed coding-agent CLIs, detected once at construction.
+    let detectedAgents: [DetectedAgent]
 
     /// Hand-off: file results the user wants to see in the code-view sidebar.
     var onShowInSidePanel: ((_ paths: [String], _ query: String?) -> Void)?
 
-    init(config: AppConfig) {
+    init(config: AppConfig, detectedAgents: [DetectedAgent] = AgentDetector.detect()) {
         self.config = config
+        self.detectedAgents = detectedAgents
     }
 
     func attach(to session: TerminalSession) {
@@ -399,11 +443,13 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private func makePanelView(
         presentation: PetAssistantPanelView.Presentation
     ) -> PetAssistantPanelView {
-        let panel = PetAssistantPanelView(presentation: presentation)
+        let panel = PetAssistantPanelView(
+            presentation: presentation, config: config,
+            agentTitles: detectedAgents.map(\.label))
         panel.setMessages(sidebarMessages)
         panel.setHasFiles(!lastFiles.isEmpty)
-        panel.onSubmit = { [weak self] request in
-            self?.submitFromPanel(request)
+        panel.onSubmit = { [weak self] request, model in
+            self?.submitFromPanel(request, model: model)
         }
         panel.onShowFiles = { [weak self] in
             guard let self, !self.lastFiles.isEmpty else { return }
@@ -432,12 +478,11 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             panel.setThinking(thinking)
         }
     }
-
-    private func submitFromPanel(_ request: String) {
+    private func submitFromPanel(_ request: String, model: String) {
         sidebarMessages.append((role: "You", text: request))
         updatePanels()
         setPanelsThinking(true)
-        ask(request) { [weak self] answer, _, _ in
+        ask(request, model: model) { [weak self] answer, _, _ in
             guard let self else { return }
             self.sidebarMessages.append((role: "Assistant", text: answer))
             self.updatePanels()
@@ -504,16 +549,15 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private typealias AskCompletion = (String, [String], String?) -> Void
 
     private func ask(
-        _ request: String, completion: AskCompletion? = nil
+        _ request: String, model: String = "Auto · Best available",
+        completion: AskCompletion? = nil
     ) {
         guard let session else {
             completion?("No terminal session is available.", [], nil)
             return
         }
         session.petAnimator?.startThinking()
-        let source = HintEngine.resolveSmart(
-            hints: true, hintCommand: config.hintCommand,
-            aiBaseURL: config.aiBaseURL, aiKey: config.aiKey, aiModel: config.aiModel)
+        let chain = backendChain(for: model)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -526,7 +570,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             """
             let user = context + "\n--- user request ---\n" + request
 
-            Self.askAI(source: source, system: Self.systemPrompt, user: user) { reply in
+            Self.runChain(chain, system: Self.systemPrompt, user: user, cwd: cwd) { reply in
                 if let query = Self.parseSearchDirective(reply), let cwd {
                     let all = CodeSearch.listFilesSync(root: cwd)
                     let matches = CodeSearch.filter(all, query: query, limit: 50)
@@ -535,7 +579,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                     let followUp = context
                         + "\n--- files matching \"\(query)\" ---\n" + fileBlock
                         + "\n--- user request ---\n" + request
-                    Self.askAI(source: source, system: Self.systemPrompt, user: followUp) { final in
+                    Self.runChain(chain, system: Self.systemPrompt, user: followUp, cwd: cwd) { final in
                         self.finish(
                             answer: final ?? "…", files: matches, query: query,
                             completion: completion)
@@ -543,11 +587,63 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 } else {
                     self.finish(
                         answer: reply
-                            ?? "I can't reach an AI right now. Configure ai-base-url/ai-key "
-                            + "or enable Apple Intelligence.",
+                            ?? "I can't reach an AI right now. Configure a codex/claude CLI, "
+                            + "ai-base-url/ai-key, or enable Apple Intelligence.",
                         files: [], query: nil, completion: completion)
                 }
             }
+        }
+    }
+
+    /// A resolved chat backend: a detected CLI agent or the hint-style source.
+    enum ChatBackend {
+        case agent(DetectedAgent)
+        case smart(HintEngine.SmartSource)
+    }
+
+    /// Ordered backends to try for `model`. Explicit picks force a single
+    /// backend; "Auto" prefers detected agents, then OpenAI, then Foundation.
+    func backendChain(for model: String) -> [ChatBackend] {
+        if let agent = detectedAgents.first(where: { $0.label == model }) {
+            return [.agent(agent)]
+        }
+        if let base = config.aiBaseURL, !base.isEmpty,
+           model != "Auto · Best available" {
+            return [.smart(.openai(base: base, key: config.aiKey ?? "", model: model))]
+        }
+        // Auto: detected agents first, then configured smart source.
+        var chain: [ChatBackend] = detectedAgents.map { .agent($0) }
+        let smart = HintEngine.resolveSmart(
+            hints: true, hintCommand: config.hintCommand,
+            aiBaseURL: config.aiBaseURL, aiKey: config.aiKey, aiModel: config.aiModel)
+        if case .none = smart {} else { chain.append(.smart(smart)) }
+        return chain
+    }
+
+    /// Try each backend in order until one returns a non-empty answer.
+    static func runChain(
+        _ chain: [ChatBackend], system: String, user: String,
+        cwd: String? = nil,
+        done: @escaping (String?) -> Void
+    ) {
+        guard let first = chain.first else { done(nil); return }
+        let rest = Array(chain.dropFirst())
+        run(first, system: system, user: user, cwd: cwd) { reply in
+            if let reply, !reply.isEmpty { done(reply); return }
+            runChain(rest, system: system, user: user, cwd: cwd, done: done)
+        }
+    }
+
+    static func run(
+        _ backend: ChatBackend, system: String, user: String,
+        cwd: String? = nil,
+        done: @escaping (String?) -> Void
+    ) {
+        switch backend {
+        case .agent(let agent):
+            spawnAgent(agent, system: system, user: user, cwd: cwd, done: done)
+        case .smart(let source):
+            askAI(source: source, system: system, user: user, done: done)
         }
     }
 
@@ -622,6 +718,72 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             done(nil)
             #endif
         }
+    }
+
+    /// Drive a detected coding-agent CLI non-interactively: prompt on stdin,
+    /// answer read from stdout (or codex's last-message file). stderr is
+    /// drained on a background read so verbose agent logs never deadlock the
+    /// pipe. A watchdog kills a run that exceeds `timeout`.
+    static func spawnAgent(
+        _ agent: DetectedAgent, system: String, user: String,
+        cwd: String? = nil,
+        timeout: TimeInterval = 90,
+        done: @escaping (String?) -> Void
+    ) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: agent.path)
+        if let cwd, !cwd.isEmpty {
+            proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        }
+        var lastMessageFile: String?
+        var args = AgentDetector.args(for: agent.kind, model: nil)
+        if agent.kind == .codex {
+            let tmp = NSTemporaryDirectory() + "infinitty-codex-\(UUID().uuidString).txt"
+            FileManager.default.createFile(atPath: tmp, contents: nil)
+            lastMessageFile = tmp
+            args += ["-o", tmp]
+        }
+        proc.arguments = args
+
+        let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
+        proc.standardInput = stdin
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+        // Drain stderr so a full pipe can't block the child.
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
+
+        guard (try? proc.run()) != nil else {
+            if let lastMessageFile { try? FileManager.default.removeItem(atPath: lastMessageFile) }
+            done(nil)
+            return
+        }
+
+        let watchdog = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
+        stdin.fileHandleForWriting.write(Data((system + "\n\n" + user).utf8))
+        try? stdin.fileHandleForWriting.close()
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        watchdog.cancel()
+        stderr.fileHandleForReading.readabilityHandler = nil
+
+        var answer: String?
+        if let lastMessageFile {
+            answer = try? String(contentsOfFile: lastMessageFile, encoding: .utf8)
+            try? FileManager.default.removeItem(atPath: lastMessageFile)
+        }
+        if answer == nil || answer?.isEmpty == true {
+            answer = String(data: stdoutData, encoding: .utf8)
+        }
+        let trimmed = answer?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard proc.terminationStatus == 0, let trimmed, !trimmed.isEmpty else {
+            done(nil)
+            return
+        }
+        done(trimmed)
     }
 
     private static func askOpenAI(
