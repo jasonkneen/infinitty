@@ -166,8 +166,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Background launch: `open -g` or INFINITTY_NO_ACTIVATE keeps focus on
         // whatever you're doing — infinitty runs and is socket-drivable without
         // ever coming to the foreground.
-        if ProcessInfo.processInfo.environment["INFINITTY_NO_ACTIVATE"] == nil {
+        let environment = ProcessInfo.processInfo.environment
+        switch ScreenRecordingPermissionAssistant.launchAction(environment: environment) {
+        case .showExplicitly:
+            DispatchQueue.main.async {
+                ScreenRecordingPermissionAssistant.shared.show()
+            }
+        case .showAutomatically:
             NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async {
+                ScreenRecordingPermissionAssistant.shared.showAutomaticallyIfNeeded()
+            }
+        case .none:
+            break
         }
 
         // Auto-check for updates (quiet — only lights the top-right indicator),
@@ -185,6 +196,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func checkForUpdates(_ sender: Any?) {
         updater.check(userInitiated: true)
+    }
+
+    @objc func showScreenRecordingPermission(_ sender: Any?) {
+        ScreenRecordingPermissionAssistant.shared.show()
     }
 
     @objc func showAbout(_ sender: Any?) {
@@ -1613,6 +1628,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             withTitle: "Settings…",
             action: #selector(AppDelegate.openSettings(_:)),
             keyEquivalent: ","
+        )
+        appMenu.addItem(
+            withTitle: "Screen Recording Permission…",
+            action: #selector(AppDelegate.showScreenRecordingPermission(_:)),
+            keyEquivalent: ""
         )
         appMenu.addItem(.separator())
         appMenu.addItem(

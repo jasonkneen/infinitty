@@ -6,6 +6,13 @@ import FoundationModels
 /// Full-height presentation of the pet assistant for the sidebar CHAT page.
 /// It owns its own AppKit views while sharing the assistant's request state.
 final class PetAssistantPanelView: NSView {
+    enum Presentation: Equatable {
+        case sidebar
+        case popover
+    }
+
+    private let presentation: Presentation
+    private let glassBackground = NSVisualEffectView()
     var onSubmit: ((String) -> Void)?
     var onShowFiles: (() -> Void)?
     var onNewChat: (() -> Void)?
@@ -30,8 +37,9 @@ final class PetAssistantPanelView: NSView {
     private let sendButton = NSButton()
     private let showFilesButton = NSButton(title: "Show Files", target: nil, action: nil)
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    init(presentation: Presentation) {
+        self.presentation = presentation
+        super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         configureSurface()
         configureHeader()
@@ -44,12 +52,25 @@ final class PetAssistantPanelView: NSView {
 
     private func configureSurface() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor(
-            calibratedRed: 0.105, green: 0.11, blue: 0.145, alpha: 1).cgColor
-        layer?.cornerRadius = 14
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor(white: 1, alpha: 0.10).cgColor
+        layer?.cornerRadius = presentation == .popover ? 16 : 14
         layer?.masksToBounds = true
+
+        if presentation == .popover {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            glassBackground.material = .hudWindow
+            glassBackground.blendingMode = .behindWindow
+            glassBackground.state = .active
+            glassBackground.wantsLayer = true
+            glassBackground.layer?.cornerRadius = 16
+            glassBackground.layer?.borderWidth = 1
+            glassBackground.layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
+            glassBackground.layer?.masksToBounds = true
+        } else {
+            layer?.backgroundColor = NSColor(
+                calibratedRed: 0.105, green: 0.11, blue: 0.145, alpha: 1).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = NSColor(white: 1, alpha: 0.10).cgColor
+        }
     }
 
     private func configureHeader() {
@@ -79,6 +100,7 @@ final class PetAssistantPanelView: NSView {
         closeButton.contentTintColor = .secondaryLabelColor
         closeButton.target = self
         closeButton.action = #selector(closeTapped)
+        closeButton.isHidden = presentation == .sidebar
 
         separator.wantsLayer = true
         separator.layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
@@ -100,7 +122,7 @@ final class PetAssistantPanelView: NSView {
 
         emptyStateLabel.font = .systemFont(ofSize: 12, weight: .regular)
         emptyStateLabel.textColor = NSColor(white: 0.56, alpha: 1)
-        emptyStateLabel.alignment = .center
+        emptyStateLabel.alignment = .left
         emptyStateLabel.lineBreakMode = .byWordWrapping
         emptyStateLabel.maximumNumberOfLines = 2
 
@@ -166,6 +188,17 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func installSubviewsAndConstraints() {
+        if presentation == .popover {
+            glassBackground.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(glassBackground)
+            NSLayoutConstraint.activate([
+                glassBackground.topAnchor.constraint(equalTo: topAnchor),
+                glassBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
+                glassBackground.trailingAnchor.constraint(equalTo: trailingAnchor),
+                glassBackground.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+        }
+
         sparkleTile.addSubview(sparkleIcon)
         inputContainer.addSubview(attachmentButton)
         inputContainer.addSubview(inputScroll)
@@ -187,7 +220,10 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func headerConstraints() -> [NSLayoutConstraint] {
-        [
+        let newChatTrailing = presentation == .popover
+            ? newChatButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8)
+            : newChatButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -13)
+        return [
             sparkleTile.topAnchor.constraint(equalTo: topAnchor, constant: 13),
             sparkleTile.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
             sparkleTile.widthAnchor.constraint(equalToConstant: 24),
@@ -201,7 +237,7 @@ final class PetAssistantPanelView: NSView {
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -11),
             closeButton.centerYAnchor.constraint(equalTo: sparkleTile.centerYAnchor),
             closeButton.widthAnchor.constraint(equalToConstant: 22),
-            newChatButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
+            newChatTrailing,
             newChatButton.centerYAnchor.constraint(equalTo: sparkleTile.centerYAnchor),
             separator.topAnchor.constraint(equalTo: topAnchor, constant: 50),
             separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -216,10 +252,9 @@ final class PetAssistantPanelView: NSView {
             transcriptScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
             transcriptScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             transcriptScroll.bottomAnchor.constraint(equalTo: modelPicker.topAnchor, constant: -12),
-            emptyStateLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            emptyStateLabel.centerYAnchor.constraint(equalTo: transcriptScroll.centerYAnchor, constant: -42),
-            emptyStateLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
-            emptyStateLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
+            emptyStateLabel.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 18),
+            emptyStateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            emptyStateLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -18),
             showFilesButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             showFilesButton.bottomAnchor.constraint(equalTo: modelPicker.topAnchor, constant: -8),
         ]
@@ -282,6 +317,8 @@ final class PetAssistantPanelView: NSView {
 
     func setHasFiles(_ hasFiles: Bool) { showFilesButton.isHidden = !hasFiles }
 
+    func focusInput() { window?.makeFirstResponder(input) }
+
     private func submit() {
         let request = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty else { return }
@@ -316,22 +353,26 @@ final class PetAssistantPanelView: NSView {
     var attachmentSymbolForTesting: String { "paperclip" }
     var sendSymbolForTesting: String { "arrow.up" }
     var sendButtonIsCircularForTesting: Bool { sendButton.layer?.cornerRadius == 15 }
+    var presentationForTesting: Presentation { presentation }
+    var showsCloseButtonForTesting: Bool { !closeButton.isHidden }
+    var usesGlassSurfaceForTesting: Bool { presentation == .popover }
+    var transcriptForTesting: String { transcript.string }
+    var showsEmptyStateForTesting: Bool { !emptyStateLabel.isHidden }
+    func submitForTesting(_ request: String) {
+        input.string = request
+        submit()
+    }
+    func newChatForTesting() { onNewChat?() }
 }
 
-/// The pet assistant. Clicking the pet pops a bubble (same idiom as the
-/// rename-tab popover) asking "How can I help?"; the typed request goes to
-/// the configured AI with the terminal's recent output as context. While it
-/// thinks, the pet loops its review animation; the answer comes back in a
-/// second bubble. If the AI asks for files (`SEARCH: <query>` as its whole
-/// reply), an rg file search runs in the shell's cwd and the matches come
-/// back with a "Show in Side Panel" hand-off to the code view.
+/// The pet assistant. Clicking the pet opens the same full Assistant UI used
+/// by the sidebar CHAT page in an independently owned popover view. Both
+/// presentations share conversation and request state.
 final class PetAssistant: NSObject, NSPopoverDelegate {
     private weak var session: TerminalSession?
     private let config: AppConfig
     private var popover: NSPopover?
-    private var editor: TabRenameTextView?
-    private var anchorRect = NSRect.zero
-    private weak var anchorView: NSView?
+    private weak var popoverPanel: PetAssistantPanelView?
     private var lastFiles: [String] = []
     private var lastQuery: String?
     private var sidebarMessages: [(role: String, text: String)] = []
@@ -350,135 +391,103 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     func makeSidebarPanelView() -> PetAssistantPanelView {
         if let sidebarPanel { return sidebarPanel }
-        let panel = PetAssistantPanelView()
+        let panel = makePanelView(presentation: .sidebar)
+        sidebarPanel = panel
+        return panel
+    }
+
+    private func makePanelView(
+        presentation: PetAssistantPanelView.Presentation
+    ) -> PetAssistantPanelView {
+        let panel = PetAssistantPanelView(presentation: presentation)
         panel.setMessages(sidebarMessages)
         panel.setHasFiles(!lastFiles.isEmpty)
         panel.onSubmit = { [weak self] request in
-            self?.submitFromSidebar(request)
+            self?.submitFromPanel(request)
         }
         panel.onShowFiles = { [weak self] in
             guard let self, !self.lastFiles.isEmpty else { return }
             self.onShowInSidePanel?(self.lastFiles, self.lastQuery)
         }
-        panel.onNewChat = { [weak self] in
-            guard let self else { return }
-            self.sidebarMessages.removeAll()
-            self.lastFiles.removeAll()
-            self.lastQuery = nil
-            self.sidebarPanel?.setMessages([])
-            self.sidebarPanel?.setHasFiles(false)
-        }
-        sidebarPanel = panel
+        panel.onNewChat = { [weak self] in self?.resetConversation() }
         return panel
     }
 
-    private func submitFromSidebar(_ request: String) {
+    private func resetConversation() {
+        sidebarMessages.removeAll()
+        lastFiles.removeAll()
+        lastQuery = nil
+        updatePanels()
+    }
+
+    private func updatePanels() {
+        for panel in [sidebarPanel, popoverPanel].compactMap({ $0 }) {
+            panel.setMessages(sidebarMessages)
+            panel.setHasFiles(!lastFiles.isEmpty)
+        }
+    }
+
+    private func setPanelsThinking(_ thinking: Bool) {
+        for panel in [sidebarPanel, popoverPanel].compactMap({ $0 }) {
+            panel.setThinking(thinking)
+        }
+    }
+
+    private func submitFromPanel(_ request: String) {
         sidebarMessages.append((role: "You", text: request))
-        sidebarPanel?.setMessages(sidebarMessages)
-        sidebarPanel?.setThinking(true)
-        ask(request) { [weak self] answer, files, _ in
+        updatePanels()
+        setPanelsThinking(true)
+        ask(request) { [weak self] answer, _, _ in
             guard let self else { return }
             self.sidebarMessages.append((role: "Assistant", text: answer))
-            self.sidebarPanel?.setMessages(self.sidebarMessages)
-            self.sidebarPanel?.setHasFiles(!files.isEmpty)
-            self.sidebarPanel?.setThinking(false)
+            self.updatePanels()
+            self.setPanelsThinking(false)
         }
     }
 
     func detach() {
-        popover?.close()
-        popover = nil
+        closePopover()
         session = nil
     }
 
     // MARK: - input bubble
 
     func presentInput(anchorRect: NSRect, in view: NSView) {
-        self.anchorRect = anchorRect
-        self.anchorView = view
-        let contentSize = NSSize(width: 300, height: 76)
-        let content = NSView(frame: NSRect(origin: .zero, size: contentSize))
+        closePopover()
+        let contentSize = NSSize(width: 380, height: 420)
+        let panel = makePanelView(presentation: .popover)
+        panel.frame = NSRect(origin: .zero, size: contentSize)
+        panel.translatesAutoresizingMaskIntoConstraints = true
+        panel.autoresizingMask = [.width, .height]
+        panel.onClose = { [weak self] in self?.closePopover() }
 
-        let title = NSTextField(labelWithString: "How can I help?")
-        title.frame = NSRect(x: 18, y: 49, width: 264, height: 18)
-        title.font = .systemFont(ofSize: 12, weight: .semibold)
-        title.textColor = .secondaryLabelColor
-        content.addSubview(title)
-
-        let editor = TabRenameTextView(frame: NSRect(x: 0, y: 0, width: 264, height: 27))
-        editor.font = .systemFont(ofSize: 13, weight: .regular)
-        editor.textColor = .labelColor
-        editor.insertionPointColor = .labelColor
-        editor.drawsBackground = false
-        editor.backgroundColor = .clear
-        editor.isRichText = false
-        editor.isVerticallyResizable = false
-        editor.isHorizontallyResizable = true
-        editor.autoresizingMask = [.height]
-        editor.minSize = NSSize(width: 264, height: 27)
-        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: 27)
-        editor.textContainerInset = NSSize(width: 7, height: 5)
-        editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainer?.maximumNumberOfLines = 1
-        editor.textContainer?.lineBreakMode = .byClipping
-        editor.textContainer?.containerSize = NSSize(
-            width: CGFloat.greatestFiniteMagnitude, height: 27)
-        editor.textContainer?.widthTracksTextView = false
-
-        let editorScroll = NSScrollView(frame: NSRect(x: 18, y: 14, width: 264, height: 27))
-        editorScroll.borderType = .noBorder
-        editorScroll.drawsBackground = true
-        editorScroll.backgroundColor = .controlBackgroundColor
-        editorScroll.hasHorizontalScroller = false
-        editorScroll.hasVerticalScroller = false
-        editorScroll.autohidesScrollers = true
-        editorScroll.wantsLayer = true
-        editorScroll.layer?.cornerRadius = 8
-        editorScroll.layer?.borderWidth = 1
-        editorScroll.layer?.borderColor = NSColor.separatorColor.cgColor
-        editorScroll.layer?.masksToBounds = true
-        editorScroll.documentView = editor
-        content.addSubview(editorScroll)
-        self.editor = editor
-
-        editor.onCommit = { [weak self] in self?.commitInput() }
-        editor.onCancel = { [weak self] in self?.closePopover() }
+        let controller = NSViewController()
+        controller.view = panel
+        controller.preferredContentSize = contentSize
 
         let pop = NSPopover()
-        let controller = NSViewController()
-        controller.view = content
-        controller.preferredContentSize = contentSize
         pop.contentViewController = controller
         pop.contentSize = contentSize
         pop.behavior = .transient
         pop.animates = true
         pop.delegate = self
         popover = pop
+        popoverPanel = panel
 
-        // The pet sits at the bottom of the view: open the bubble above it.
         pop.show(relativeTo: anchorRect, of: view, preferredEdge: .maxY)
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let editor = self.editor else { return }
-            editor.window?.makeFirstResponder(editor)
-        }
+        DispatchQueue.main.async { [weak panel] in panel?.focusInput() }
     }
 
-    private func commitInput() {
-        let request = editor?.string.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        closePopover()
-        guard !request.isEmpty, let view = anchorView else { return }
-        ask(request, in: view)
-    }
 
     private func closePopover() {
         popover?.close()
         popover = nil
-        editor = nil
+        popoverPanel = nil
     }
 
     func popoverDidClose(_ notification: Notification) {
         popover = nil
-        editor = nil
+        popoverPanel = nil
     }
 
     // MARK: - the ask pipeline
@@ -495,7 +504,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private typealias AskCompletion = (String, [String], String?) -> Void
 
     private func ask(
-        _ request: String, in view: NSView? = nil, completion: AskCompletion? = nil
+        _ request: String, completion: AskCompletion? = nil
     ) {
         guard let session else {
             completion?("No terminal session is available.", [], nil)
@@ -529,14 +538,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                     Self.askAI(source: source, system: Self.systemPrompt, user: followUp) { final in
                         self.finish(
                             answer: final ?? "…", files: matches, query: query,
-                            in: view, completion: completion)
+                            completion: completion)
                     }
                 } else {
                     self.finish(
                         answer: reply
                             ?? "I can't reach an AI right now. Configure ai-base-url/ai-key "
                             + "or enable Apple Intelligence.",
-                        files: [], query: nil, in: view, completion: completion)
+                        files: [], query: nil, completion: completion)
                 }
             }
         }
@@ -555,101 +564,19 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func finish(
-        answer: String, files: [String], query: String?, in view: NSView?,
+        answer: String, files: [String], query: String?,
         completion: AskCompletion?
     ) {
         DispatchQueue.main.async {
             self.session?.petAnimator?.stopThinking()
             self.lastFiles = files
             self.lastQuery = query
-            if let completion {
-                completion(answer, files, query)
-            } else if let view {
-                self.presentResult(answer: answer, in: view)
-            }
+            completion?(answer, files, query)
         }
     }
 
-    // MARK: - result bubble
 
-    private func presentResult(answer: String, in view: NSView) {
-        let width: CGFloat = 320
-        let contentSize = NSSize(width: width, height: 240)
-        let content = NSView(frame: NSRect(origin: .zero, size: contentSize))
-
-        let title = NSTextField(labelWithString: "Here's what I found")
-        title.frame = NSRect(x: 18, y: contentSize.height - 26, width: width - 36, height: 18)
-        title.font = .systemFont(ofSize: 12, weight: .semibold)
-        title.textColor = .secondaryLabelColor
-        content.addSubview(title)
-
-        let answerView = NSTextView(
-            frame: NSRect(x: 0, y: 0, width: width - 36, height: 160))
-        answerView.isEditable = false
-        answerView.isSelectable = true
-        answerView.drawsBackground = false
-        answerView.font = .systemFont(ofSize: 12)
-        answerView.textColor = .labelColor
-        answerView.textContainerInset = NSSize(width: 4, height: 4)
-        answerView.textContainer?.widthTracksTextView = true
-        answerView.isHorizontallyResizable = false
-        answerView.isVerticallyResizable = true
-        answerView.autoresizingMask = [.width]
-        answerView.string = answer
-
-        let scroll = NSScrollView(
-            frame: NSRect(x: 18, y: 42, width: width - 36, height: contentSize.height - 76))
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.documentView = answerView
-        content.addSubview(scroll)
-
-        var buttonX: CGFloat = width - 18
-        func placeButton(_ title: String, action: Selector, visible: Bool = true) {
-            guard visible else { return }
-            let button = NSButton(title: title, target: self, action: action)
-            button.bezelStyle = .rounded
-            button.controlSize = .small
-            button.sizeToFit()
-            button.frame.origin = NSPoint(x: buttonX - button.frame.width, y: 10)
-            buttonX -= button.frame.width + 8
-            content.addSubview(button)
-        }
-        placeButton("Done", action: #selector(doneTapped(_:)))
-        placeButton("Ask Again", action: #selector(askAgainTapped(_:)))
-        placeButton("Show in Side Panel",
-                    action: #selector(showInPanelTapped(_:)),
-                    visible: !lastFiles.isEmpty)
-
-        let pop = NSPopover()
-        let controller = NSViewController()
-        controller.view = content
-        controller.preferredContentSize = contentSize
-        pop.contentViewController = controller
-        pop.contentSize = contentSize
-        pop.behavior = .transient
-        pop.animates = true
-        pop.delegate = self
-        popover = pop
-        pop.show(relativeTo: anchorRect, of: view, preferredEdge: .maxY)
-    }
-
-    @objc private func doneTapped(_ sender: Any?) {
-        closePopover()
-    }
-
-    @objc private func askAgainTapped(_ sender: Any?) {
-        guard let view = anchorView else { return }
-        closePopover()
-        presentInput(anchorRect: anchorRect, in: view)
-    }
-
-    @objc private func showInPanelTapped(_ sender: Any?) {
-        let files = lastFiles
-        let query = lastQuery
-        closePopover()
-        onShowInSidePanel?(files, query)
-    }
+    var popoverPanelForTesting: PetAssistantPanelView? { popoverPanel }
 
     // MARK: - AI backends (mirrors HintEngine's smart-source resolution)
 

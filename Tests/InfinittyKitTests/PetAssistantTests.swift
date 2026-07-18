@@ -61,5 +61,49 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(panel.attachmentSymbolForTesting, "paperclip")
         XCTAssertEqual(panel.sendSymbolForTesting, "arrow.up")
         XCTAssertTrue(panel.sendButtonIsCircularForTesting)
+        XCTAssertEqual(panel.presentationForTesting, .sidebar)
+        XCTAssertFalse(panel.showsCloseButtonForTesting)
+        XCTAssertFalse(panel.usesGlassSurfaceForTesting)
+        XCTAssertGreaterThan(panel.inputFrameForTesting.width, 100)
+        panel.focusInput()
+        XCTAssertTrue(panel.inputIsFirstResponderForTesting)
     }
+    func testPetClickPresentsIndependentAssistantPanel() throws {
+        let assistant = PetAssistant(config: AppConfig())
+        let sidebarPanel = assistant.makeSidebarPanelView()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        let anchorView = NSView(frame: window.contentView!.bounds)
+        window.contentView = anchorView
+
+        assistant.presentInput(
+            anchorRect: NSRect(x: 380, y: 8, width: 24, height: 24),
+            in: anchorView)
+
+        let popoverPanel = try XCTUnwrap(assistant.popoverPanelForTesting)
+        XCTAssertFalse(popoverPanel === sidebarPanel)
+        XCTAssertEqual(popoverPanel.titleForTesting, "Assistant")
+        XCTAssertEqual(popoverPanel.newChatTitleForTesting, "New chat")
+        XCTAssertEqual(popoverPanel.modelValueForTesting, "Auto · Best available")
+        XCTAssertTrue(popoverPanel.sendButtonIsCircularForTesting)
+        XCTAssertEqual(popoverPanel.presentationForTesting, .popover)
+        XCTAssertTrue(popoverPanel.showsCloseButtonForTesting)
+        XCTAssertTrue(popoverPanel.usesGlassSurfaceForTesting)
+        XCTAssertEqual(popoverPanel.frame.size, NSSize(width: 380, height: 420))
+
+        popoverPanel.submitForTesting("Hello")
+        XCTAssertEqual(sidebarPanel.transcriptForTesting, popoverPanel.transcriptForTesting)
+        XCTAssertTrue(sidebarPanel.transcriptForTesting.contains("Hello"))
+        XCTAssertFalse(sidebarPanel.showsEmptyStateForTesting)
+        XCTAssertFalse(popoverPanel.showsEmptyStateForTesting)
+
+        popoverPanel.newChatForTesting()
+        XCTAssertEqual(sidebarPanel.transcriptForTesting, "")
+        XCTAssertEqual(popoverPanel.transcriptForTesting, "")
+        XCTAssertTrue(sidebarPanel.showsEmptyStateForTesting)
+        XCTAssertTrue(popoverPanel.showsEmptyStateForTesting)
+        assistant.detach()
+    }
+
 }
