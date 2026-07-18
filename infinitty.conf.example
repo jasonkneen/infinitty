@@ -20,6 +20,7 @@
 # foreground   = #D7DAE0           # hex or basic color name
 # background   = #0F1216
 # cursor-color = #AEB8C4
+# palette      = 4=#61AFEF         # ANSI/256 override (ghostty syntax, N=0-255)
 
 # window chrome
 # titlebar       = transparent     # native | transparent | hidden

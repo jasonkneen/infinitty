@@ -47,6 +47,9 @@ struct Theme {
         if let bg = config.background { t.background = Theme.rgba(bg) }
         if let cursor = config.cursorColor { t.cursor = Theme.rgba(cursor) }
         if let sel = config.selectionBackground { t.selection = Theme.rgba(sel) }
+        for (index, color) in config.palette where t.palette.indices.contains(index) {
+            t.palette[index] = Theme.rgba(color)
+        }
         t.background.w = Float(config.backgroundOpacity)
         return t
     }

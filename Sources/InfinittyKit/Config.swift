@@ -18,6 +18,7 @@ import Foundation
 ///   margin / padding / window-padding-x / window-padding-y
 ///   line-spacing / line-height / adjust-cell-height  (1.1 | 10% | 3)
 ///   kerning / letter-spacing / cell-width / adjust-cell-width
+///   palette = N=#RRGGBB  (ANSI/256-color overrides, indices 0-255)
 ///
 /// adjust-cell-* accepts Ghostty forms: `10%` (relative) or a bare number
 /// (extra points added to the cell).
@@ -38,6 +39,7 @@ struct AppConfig {
     var background: UInt32?
     var cursorColor: UInt32?
     var selectionBackground: UInt32?
+    var palette: [Int: UInt32] = [:] // index (0-255) -> 0xRRGGBB overrides
     var titlebarStyle = "native" // native | transparent | hidden
     var trafficLights = "circle" // circle | square | rectangle | diamond
     var pet: String? // codex pet name (~/.codex/pets/<name>) or directory path
@@ -105,7 +107,7 @@ struct AppConfig {
         return c
     }
 
-    private mutating func apply(fileContents: String) {
+    mutating func apply(fileContents: String) {
         var fontSet = false
         var paddingX: CGFloat?
         var paddingY: CGFloat?
@@ -121,8 +123,9 @@ struct AppConfig {
                 if let sp = value.firstIndex(where: { $0 == " " || $0 == "\t" }) {
                     value = String(value[..<sp])
                 }
-            } else if let hash = value.firstIndex(of: "#") {
-                // trailing comment
+            } else if key != "palette", let hash = value.firstIndex(of: "#") {
+                // trailing comment (palette values carry their hex color
+                // after an inner `=`, so the `#` is data there, not a comment)
                 value = value[..<hash].trimmingCharacters(in: .whitespaces)
             }
             if value.count >= 2,
@@ -173,6 +176,10 @@ struct AppConfig {
                 cursorColor = AppConfig.parseColor(value)
             case "selection-background":
                 selectionBackground = AppConfig.parseColor(value)
+            case "palette":
+                if let (index, color) = AppConfig.parsePaletteEntry(value) {
+                    palette[index] = color
+                }
             case "titlebar", "macos-titlebar-style":
                 switch value.lowercased() {
                 case "transparent", "tabs": titlebarStyle = "transparent"
@@ -267,6 +274,20 @@ struct AppConfig {
         return n
     }
 
+    /// Ghostty palette entry: `N=#RRGGBB` (hex or basic color name), N 0-255.
+    /// Anything after the color token (a trailing comment) is ignored.
+    static func parsePaletteEntry(_ value: String) -> (index: Int, color: UInt32)? {
+        guard let eq = value.firstIndex(of: "=") else { return nil }
+        let indexPart = value[..<eq].trimmingCharacters(in: .whitespaces)
+        var colorPart = value[value.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        if let sp = colorPart.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+            colorPart = String(colorPart[..<sp])
+        }
+        guard let index = Int(indexPart), (0...255).contains(index),
+              let color = parseColor(colorPart) else { return nil }
+        return (index, color)
+    }
+
     /// Ghostty adjust-cell-* values: "10%" -> multiplier, "3" -> extra points.
     private static func parseAdjust(_ value: String) -> (multiplier: CGFloat, extra: CGFloat)? {
         if value.hasSuffix("%") {
@@ -330,6 +351,9 @@ struct AppConfig {
         if let c = background { out += "background = \(hex(c))\n" }
         if let c = cursorColor { out += "cursor-color = \(hex(c))\n" }
         if let c = selectionBackground { out += "selection-background = \(hex(c))\n" }
+        for (index, color) in palette.sorted(by: { $0.key < $1.key }) {
+            out += "palette = \(index)=\(hex(color))\n"
+        }
         return out
     }
 
