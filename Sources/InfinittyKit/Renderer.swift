@@ -85,6 +85,7 @@ final class Renderer: NSObject {
     private var renderThread: Thread?
     private var renderRunLoop: CFRunLoop?
     private let linkPaused = OSAllocatedUnfairLock(initialState: false)
+    private let resizeRenderPending = OSAllocatedUnfairLock(initialState: false)
 
     private(set) var config: AppConfig
     var insetPoints: CGFloat { config.margin }
@@ -262,7 +263,7 @@ final class Renderer: NSObject {
         renderLock.unlock()
         if petNeedsFrame {
             idleTicks = 0
-            render(sync: false)
+            render()
             return
         }
         if gen == lastGen {
@@ -281,13 +282,26 @@ final class Renderer: NSObject {
             return
         }
         idleTicks = 0
-        render(sync: false)
+        render()
     }
 
-    /// Synchronous render for live resize: encode, wait for schedule, present.
-    /// Keeps the drawable glued to the window during resize — no jelly.
-    func renderNow(sync: Bool) {
-        render(sync: sync)
+    /// Live-resize frame request from AppKit main. Hands off to the render
+    /// thread and coalesces repeats: AppKit main NEVER acquires drawables or
+    /// waits on the GPU, so when another process saturates the GPU we drop
+    /// resize frames instead of freezing keyboard/mouse input.
+    func renderNow() {
+        guard let rl = renderRunLoop else { return }
+        let shouldSchedule = resizeRenderPending.withLock { pending -> Bool in
+            if pending { return false }
+            pending = true
+            return true
+        }
+        guard shouldSchedule else { return }
+        CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) { [weak self] in
+            self?.resizeRenderPending.withLock { $0 = false }
+            self?.render()
+        }
+        CFRunLoopWakeUp(rl)
     }
 
     /// Rebuild the glyph atlas (display scale change).
@@ -311,20 +325,51 @@ final class Renderer: NSObject {
 
     // MARK: - frame
 
-    private func render(sync: Bool) {
+    private func render() {
+        // Only CPU-side state under renderLock: a consistent snapshot for the
+        // encode below. The lock is NEVER held across a GPU wait —
+        // nextDrawable()/inflight can block arbitrarily long on a saturated
+        // GPU, and every main-thread caller (applyConfig, updateScale,
+        // petHitRect) takes renderLock.
         renderLock.lock()
-        defer { renderLock.unlock() }
-
         let drawableSize = layer.drawableSize
-        guard drawableSize.width >= 1, drawableSize.height >= 1 else { return }
-
+        guard drawableSize.width >= 1, drawableSize.height >= 1 else {
+            renderLock.unlock()
+            return
+        }
         let gen = terminal.copySnapshot(into: &snap)
         buildInstances()
+        let atlas = self.atlas
+        let theme = self.theme
+        let insetPoints = self.insetPoints
+        let topInsetPoints = self.topInsetPoints
+        let petTexture = self.petTexture
+        let petSizePoints = self.petSizePoints
+        let petFrame = self.petFrame
+        let drewPet = petDirty
+        petDirty = false
+        renderLock.unlock()
 
-        inflight.wait()
+        // GPU section (render thread only). Bound the wait for a free
+        // in-flight slot: a saturated GPU must make us drop frames, never
+        // stall a thread. On early exit, restore petDirty so tick() retries
+        // a pet frame we captured but never presented.
+        guard inflight.wait(timeout: .now() + .milliseconds(100)) == .success else {
+            if drewPet {
+                renderLock.lock()
+                petDirty = true
+                renderLock.unlock()
+            }
+            return
+        }
         guard let drawable = layer.nextDrawable(),
               let cb = queue.makeCommandBuffer() else {
             inflight.signal()
+            if drewPet {
+                renderLock.lock()
+                petDirty = true
+                renderLock.unlock()
+            }
             return
         }
 
@@ -348,6 +393,11 @@ final class Renderer: NSObject {
 
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else {
             inflight.signal()
+            if drewPet {
+                renderLock.lock()
+                petDirty = true
+                renderLock.unlock()
+            }
             return
         }
         var viewport = SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
@@ -413,19 +463,16 @@ final class Renderer: NSObject {
                 color: SIMD4<Float>(1, 1, 1, 1)
             ), texture: petTex)
         }
-        petDirty = false
         enc.endEncoding()
 
         cb.addCompletedHandler { [inflight] _ in inflight.signal() }
-        if sync {
-            cb.commit()
-            cb.waitUntilScheduled()
-            drawable.present()
-        } else {
-            cb.present(drawable)
-            cb.commit()
-        }
+        // Present tied to command-buffer completion. Never waitUntilScheduled:
+        // an unbounded GPU wait here wedges every later frame.
+        cb.present(drawable)
+        cb.commit()
+        renderLock.lock()
         lastGen = gen
+        renderLock.unlock()
     }
 
     private func fill<T>(_ buffer: inout MTLBuffer?, with data: [T]) -> MTLBuffer? {

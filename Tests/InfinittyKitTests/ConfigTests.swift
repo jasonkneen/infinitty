@@ -3,6 +3,20 @@ import XCTest
 @testable import InfinittyKit
 
 final class ConfigTests: XCTestCase {
+    func testBuiltInPetIsEnabledByDefault() {
+        XCTAssertEqual(AppConfig().pet, "infinitty")
+    }
+
+    func testPetOptOutParsesAndSurvivesSerialization() {
+        var config = AppConfig()
+        config.apply(fileContents: "pet = none")
+        XCTAssertNil(config.pet)
+
+        var reparsed = AppConfig()
+        reparsed.apply(fileContents: config.serialize())
+        XCTAssertNil(reparsed.pet)
+    }
+
     func testParsePaletteEntry() {
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.index, 4)
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.color, 0x61AFEF)

@@ -168,10 +168,11 @@ final class SettingsWindowController: NSWindowController {
         notchPopup.addItems(withTitles: ["builtin", "external", "primary", "all"])
 
         petPopup.addItem(withTitle: "none")
+        petPopup.addItem(withTitle: "infinitty")
         let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
             ?? NSString(string: "~/.codex").expandingTildeInPath
         if let pets = try? FileManager.default.contentsOfDirectory(atPath: "\(codexHome)/pets") {
-            for pet in pets.sorted() where !pet.hasPrefix(".") {
+            for pet in pets.sorted() where !pet.hasPrefix(".") && pet != "infinitty" {
                 petPopup.addItem(withTitle: pet)
             }
         }

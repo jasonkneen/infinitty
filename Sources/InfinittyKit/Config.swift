@@ -42,7 +42,7 @@ struct AppConfig {
     var palette: [Int: UInt32] = [:] // index (0-255) -> 0xRRGGBB overrides
     var titlebarStyle = "native" // native | transparent | hidden
     var trafficLights = "circle" // circle | square | rectangle | diamond
-    var pet: String? // codex pet name (~/.codex/pets/<name>) or directory path
+    var pet: String? = "infinitty" // built-in name, codex pet name, or directory path
     var petScale: CGFloat = 0.5
     var petMode = "window" // window = one pet (follows focus) | pane = every split
     var backgroundOpacity: CGFloat = 1.0
@@ -192,7 +192,8 @@ struct AppConfig {
                     trafficLights = v
                 }
             case "pet", "codex-pet":
-                pet = value
+                let normalized = value.lowercased()
+                pet = ["none", "off", "false"].contains(normalized) ? nil : value
             case "pet-scale":
                 if let v = Double(value) { petScale = CGFloat(v) }
             case "pet-mode", "petmode":
@@ -318,6 +319,10 @@ struct AppConfig {
             out += "pet = \(p)\n"
             out += "pet-scale = \(Double(petScale))\n"
             if petMode != "window" { out += "pet-mode = pane\n" }
+        } else {
+            // The built-in pet is enabled by default, so an explicit opt-out
+            // must survive Settings rewrites and subsequent launches.
+            out += "pet = none\n"
         }
         if !agentGlow { out += "agent-glow = false\n" }
         // Settings rewrites the managed config. Do not perpetuate a malformed

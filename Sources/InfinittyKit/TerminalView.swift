@@ -138,9 +138,10 @@ final class TerminalView: NSView {
         positionPaneShortcutHint()
         updateGeometry()
         if inLiveResize {
-            // Synchronous present keeps content glued to the window edge
-            // while dragging — the thing that makes resize feel instant.
-            renderer.renderNow(sync: true)
+            // Frame requests hop to the render thread (coalesced) — AppKit
+            // main never touches the GPU here, so a saturated GPU drops
+            // resize frames instead of freezing input.
+            renderer.renderNow()
         }
     }
 

@@ -74,6 +74,26 @@ enum Pet {
         let fm = FileManager.default
         let expanded = NSString(string: nameOrPath).expandingTildeInPath
 
+        if !nameOrPath.contains("/") {
+            let subdirectory = "Pets/\(nameOrPath.lowercased())"
+            // Packaged apps preserve the Pets/<name> directory.
+            if let bundled = Bundle.main.url(
+                forResource: "spritesheet",
+                withExtension: "webp",
+                subdirectory: subdirectory
+            ) {
+                return bundled.path
+            }
+            // SwiftPM flattens processed resources into its module bundle.
+            if nameOrPath.caseInsensitiveCompare("infinitty") == .orderedSame,
+               let bundled = Bundle.module.url(
+                   forResource: "spritesheet",
+                   withExtension: "webp"
+               ) {
+                return bundled.path
+            }
+        }
+
         var dirs: [String] = []
         if nameOrPath.contains("/") {
             var isDir: ObjCBool = false

@@ -272,9 +272,10 @@ Font to use one everywhere.
   `circle | square | rectangle | diamond`
 - **Transparency**: `background-opacity = 0.9`, `background-blur = true`
   (frosted behind-window blur)
-- **Codex pets**: `pet = r2d2` renders your installed `~/.codex/pets`
-  spritesheets animated in the corner — idle loop normally, running loop
-  while output flows
+- **Built-in AI pet**: Infinitty's `>_<` face ships enabled by default and
+  changes expression as the terminal works, waits, succeeds, or fails. Set
+  `pet = none` to hide it, or `pet = r2d2` to use an installed
+  `~/.codex/pets` spritesheet instead
 - **Notch live activity**: `notch = true` shows a slim strip beside the
   MacBook notch with the running command and its exit status (OSC 133)
 

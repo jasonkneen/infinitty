@@ -9,6 +9,7 @@ let package = Package(
         .target(
             name: "InfinittyKit",
             dependencies: ["CPty"],
+            resources: [.process("Resources")],
             swiftSettings: [
                 .unsafeFlags(["-Ounchecked"], .when(configuration: .release)),
             ]

@@ -95,15 +95,21 @@ final class AppControlServer {
     }
 
     /// Push a JSON event line to every subscriber (called from main).
+    /// Subscriber sockets carry a short SO_SNDTIMEO (set at subscribe time),
+    /// so each write returns within milliseconds; slow or dead readers are
+    /// pruned here. A stalled subscriber can never park AppKit behind
+    /// write(2). Removal and close happen under the lock, so teardown in the
+    /// subscribe handler never double-closes a pruned (and possibly reused)
+    /// descriptor.
     func broadcast(_ object: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
-        var line = Array(data)
-        line.append(0x0A)
+        let line = Array(data) + [0x0A]
         subscriberLock.lock()
         var dead: [Int32] = []
         for fd in subscribers {
             let n = line.withUnsafeBufferPointer { write(fd, $0.baseAddress!, $0.count) }
-            if n <= 0 { dead.append(fd) }
+            // Short write = corrupt event line for that client: prune it.
+            if n != line.count { dead.append(fd) }
         }
         if !dead.isEmpty {
             for fd in dead { close(fd) }
@@ -151,9 +157,10 @@ final class AppControlServer {
         let request = String(decoding: line, as: UTF8.self)
 
         if request == "subscribe" {
-            // Long-lived: 1 s send deadline so a stalled reader gets dropped,
-            // no receive deadline (we only write). Hold until client EOF.
-            var sndTv = timeval(tv_sec: 1, tv_usec: 0)
+            // Long-lived: millisecond send deadline so fanout on the main
+            // thread stays bounded and a stalled reader gets pruned; no
+            // receive deadline (we only write). Hold until client EOF.
+            var sndTv = timeval(tv_sec: 0, tv_usec: 10_000)
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sndTv, socklen_t(MemoryLayout<timeval>.size))
             var noTv = timeval(tv_sec: 0, tv_usec: 0)
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &noTv, socklen_t(MemoryLayout<timeval>.size))
@@ -163,10 +170,15 @@ final class AppControlServer {
             subscriberLock.unlock()
             var drain = [UInt8](repeating: 0, count: 256)
             while read(fd, &drain, drain.count) > 0 {}
+            // Close only if we still own the fd: broadcast()/stop() prune
+            // (remove AND close) subscribers under the same lock, so an
+            // unconditional close here could hit a reused descriptor.
             subscriberLock.lock()
-            subscribers.removeAll { $0 == fd }
+            if let i = subscribers.firstIndex(of: fd) {
+                subscribers.remove(at: i)
+                close(fd)
+            }
             subscriberLock.unlock()
-            close(fd)
             return
         }
 
