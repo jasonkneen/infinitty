@@ -61,73 +61,79 @@ final class UpdateIndicatorView: NSView {
     }
 }
 
-/// Sidebar collapse/expand toggle in the top-right corner. Collapses the
-/// code-view sidebar to a minimal width and expands it back.
-final class SidebarCollapseView: NSView {
-    var onClick: (() -> Void)?
-    private let icon = NSTextField(labelWithString: "")
-    private var hovering = false
-    private let accent = NSColor.controlAccentColor
-    private let size: CGFloat = 28
-    private var isCollapsed = false
+/// Native right-side titlebar host for the persistent sidebar toggle.
+final class SidebarToggleAccessory: NSTitlebarAccessoryViewController {
+    let toggleView = SidebarToggleView()
+    private weak var hostWindow: NSWindow?
 
-    init() {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        layer?.masksToBounds = true
+    override init(nibName nibNameOrNil: NSNib.Name?, bundle nibBundleOrNil: Bundle?) {
+        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+        layoutAttribute = .right
+        view = toggleView
+    }
 
-        icon.stringValue = "⊟"
-        icon.font = .systemFont(ofSize: 13, weight: .semibold)
-        icon.alignment = .center
-        icon.isEditable = false
-        icon.isBezeled = false
-        icon.drawsBackground = false
-        addSubview(icon)
-
-        setFrameSize(NSSize(width: size, height: size))
-        icon.frame = bounds
-        icon.autoresizingMask = [.width, .height]
-        applyStyle()
-        updateTooltip()
+    convenience init() {
+        self.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func applyStyle() {
-        layer?.backgroundColor = accent.withAlphaComponent(hovering ? 0.16 : 0.08).cgColor
-        icon.textColor = accent.withAlphaComponent(hovering ? 1.0 : 0.75)
+    func attach(to window: NSWindow) {
+        hostWindow = window
+        window.addTitlebarAccessoryViewController(self)
     }
 
-    private func updateTooltip() {
-        toolTip = isCollapsed ? "Show sidebar" : "Hide sidebar"
-    }
-
-    func setCollapsed(_ collapsed: Bool) {
-        isCollapsed = collapsed
-        updateTooltip()
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
-    }
-
-    override func mouseEntered(with event: NSEvent) { hovering = true; applyStyle() }
-    override func mouseExited(with event: NSEvent) { hovering = false; applyStyle() }
-    override func mouseDown(with event: NSEvent) { onClick?() }
-
-    /// Pin to the top-right corner, tight under the titlebar inset.
-    func place(in host: NSView, topInset: CGFloat) {
-        frame.origin = NSPoint(
-            x: host.bounds.width - frame.width - 8,
-            y: host.bounds.height - size - max(topInset, 4) - 3
-        )
-        autoresizingMask = [.minXMargin, .minYMargin]
+    func detach() {
+        if let hostWindow,
+           let index = hostWindow.titlebarAccessoryViewControllers.firstIndex(where: { $0 === self }) {
+            hostWindow.removeTitlebarAccessoryViewController(at: index)
+        }
+        hostWindow = nil
     }
 }
+
+/// Persistent sidebar toggle shown in the native titlebar above the tab strip.
+final class SidebarToggleView: NSView {
+    var onClick: (() -> Void)?
+    private let icon = NSImageView()
+    private let foreground = NSColor.labelColor
+    private let viewSize = NSSize(width: 28, height: 22)
+    private var isSidebarVisible = false
+
+    init() {
+        super.init(frame: NSRect(origin: .zero, size: viewSize))
+
+        icon.image = NSImage(
+            systemSymbolName: "sidebar.right",
+            accessibilityDescription: "Toggle sidebar")
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        icon.imageScaling = .scaleProportionallyDown
+        icon.frame = bounds.insetBy(dx: 6, dy: 3)
+        icon.autoresizingMask = [.width, .height]
+        addSubview(icon)
+
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Toggle sidebar")
+        updatePresentation()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func updatePresentation() {
+        icon.contentTintColor = foreground
+        toolTip = isSidebarVisible ? "Hide sidebar" : "Show sidebar"
+        setAccessibilityValue(isSidebarVisible ? "Sidebar shown" : "Sidebar hidden")
+    }
+
+    func setSidebarVisible(_ visible: Bool) {
+        isSidebarVisible = visible
+        updatePresentation()
+    }
+
+
+    override func mouseDown(with event: NSEvent) { onClick?() }
+}
+
 
 /// Pulsing inner glow shown while an agent drives the pane through the
 /// control socket — an Apple-Intelligence-style rotating conic gradient ring.

@@ -36,7 +36,7 @@ final class Renderer: NSObject {
     private var glyphPipeline: MTLRenderPipelineState!
     private var spritePipeline: MTLRenderPipelineState!
 
-    // Extra top content inset (transparent/hidden titlebar styles).
+    // Extra top content inset for full-size custom window chrome.
     var topInsetPoints: CGFloat = 0
 
     // Codex pet overlay.

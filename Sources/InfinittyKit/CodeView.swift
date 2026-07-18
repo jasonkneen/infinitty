@@ -234,11 +234,17 @@ final class CodeTableCellView: NSTableCellView {
 }
 
 /// Draws the selection as a rounded indigo pill instead of the system gray.
+/// Draws a compact neutral selection without using the system accent color.
 final class CodeRowView: NSTableRowView {
+    static let emphasizedSelectionColor = CodePalette.selectionFill
+
     override func drawSelection(in dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 4, dy: 1)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
-        (isEmphasized ? CodePalette.accent : NSColor(white: 1, alpha: 0.16)).setFill()
+        let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+        let color = isEmphasized
+            ? Self.emphasizedSelectionColor
+            : NSColor(calibratedWhite: 0.18, alpha: 1)
+        color.setFill()
         path.fill()
     }
 }
@@ -263,7 +269,7 @@ final class DiffCellView: NSTableCellView {
 /// (2s tracker poll, debounced).
 final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
 
-    private enum Page: Int { case files = 0, changes = 1 }
+    private enum Page: Int { case files = 0, changes = 1, chat = 2 }
     private enum DiffMode { case combined, split }
 
     private let config: AppConfig
@@ -271,7 +277,9 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private var cwdObserver: NSObjectProtocol?
 
     // UI
-    private let pageControl = CodeSegmentedBar(labels: ["Files", "Changes"], squared: true)
+    private let pageControl = CodeSegmentedBar(
+        labels: ["FILES", "CHANGES", "CHAT"],
+        fontSize: 12, fontWeight: .medium, squared: true)
     private let searchField = NSSearchField()
     private let statsRow = NSView()
     private var statCountFields: [NSTextField] = []
@@ -288,6 +296,10 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private let stageButton = NSButton()
     private let branchFooter = NSView()
     private let branchButton = NSButton()
+    private let header = NSView()
+    private let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 280, height: 500))
+    private let chatHost = NSView()
+    private weak var assistant: PetAssistant?
     private var selectedChange: CodeChange?
     private var headerTopToSearch: NSLayoutConstraint?
     private var headerTopToCommit: NSLayoutConstraint?
@@ -360,9 +372,17 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         }
 
         searchField.placeholderString = "Search files"
-        searchField.controlSize = .small
+        searchField.font = .systemFont(ofSize: NSFont.systemFontSize)
+        searchField.controlSize = .regular
+        searchField.isBezeled = false
+        searchField.drawsBackground = true
+        searchField.backgroundColor = NSColor(white: 1, alpha: 0.07)
+        searchField.wantsLayer = true
+        searchField.layer?.cornerRadius = 6
+        searchField.layer?.borderWidth = 1
+        searchField.layer?.borderColor = CodePalette.hairline.cgColor
+        searchField.layer?.masksToBounds = true
         searchField.delegate = self
-
         // Changes-page stats: one compact centered line of badge + count chips.
         let statsStack = NSStackView()
         statsStack.orientation = .horizontal
@@ -400,8 +420,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         commitRow.isHidden = true
 
         // Header: current folder (files) or repo • branch (changes) + refresh.
-        let header = NSView()
-        pathLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        pathLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         pathLabel.textColor = .secondaryLabelColor
         pathLabel.lineBreakMode = .byTruncatingMiddle
         let refreshButton = NSButton(
@@ -431,7 +450,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
-        outlineView.rowSizeStyle = .small
+        outlineView.rowSizeStyle = .medium
         outlineView.style = .sourceList
         outlineView.backgroundColor = .clear
         outlineView.indentationPerLevel = 13
@@ -441,7 +460,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
         // Preview header: file name + markdown Rendered/Raw toggle.
         let previewHeader = NSView()
-        previewTitle.font = .systemFont(ofSize: 11, weight: .medium)
+        previewTitle.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         previewTitle.textColor = .secondaryLabelColor
         previewTitle.lineBreakMode = .byTruncatingMiddle
         markdownToggle.onChange = { [weak self] index in
@@ -609,7 +628,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         // resize. Seeding the divider in viewDidLayout is NOT safe — the live
         // window can lay the sidebar out at a stub height first, which leaves
         // the tree squashed at 0pt when it grows.
-        let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 280, height: 500))
         split.isVertical = false
         split.dividerStyle = .thin
         treeScroll.frame = NSRect(x: 0, y: 275, width: 280, height: 225)
@@ -635,7 +653,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         branchButton.imagePosition = .imageLeading
         branchButton.bezelStyle = .inline
         branchButton.isBordered = false
-        branchButton.font = .systemFont(ofSize: 11, weight: .medium)
+        branchButton.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         branchButton.contentTintColor = .secondaryLabelColor
         branchButton.target = self
         branchButton.action = #selector(showBranchMenu(_:))
@@ -650,6 +668,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         container.addSubview(header)
         container.addSubview(split)
         container.addSubview(branchFooter)
+        container.addSubview(chatHost)
         pageControl.translatesAutoresizingMaskIntoConstraints = false
         searchField.translatesAutoresizingMaskIntoConstraints = false
         statsRow.translatesAutoresizingMaskIntoConstraints = false
@@ -659,6 +678,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         header.translatesAutoresizingMaskIntoConstraints = false
         split.translatesAutoresizingMaskIntoConstraints = false
         branchFooter.translatesAutoresizingMaskIntoConstraints = false
+        chatHost.translatesAutoresizingMaskIntoConstraints = false
         branchButton.translatesAutoresizingMaskIntoConstraints = false
         footerHairline.translatesAutoresizingMaskIntoConstraints = false
         stageAllButton.translatesAutoresizingMaskIntoConstraints = false
@@ -729,6 +749,11 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             split.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             splitBottomToContainer!,
 
+            chatHost.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6),
+            chatHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            chatHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            chatHost.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
             branchFooter.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             branchFooter.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             branchFooter.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -742,6 +767,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             footerHairline.topAnchor.constraint(equalTo: branchFooter.topAnchor),
             footerHairline.heightAnchor.constraint(equalToConstant: 1),
         ])
+        chatHost.isHidden = true
         view = container
     }
 
@@ -814,7 +840,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     }
 
     private func updateBranchFooter() {
-        let inRepo = changesRepo != nil
+        let inRepo = changesRepo != nil && page != .chat
         branchFooter.isHidden = !inRepo
         branchButton.title = changesBranch ?? "detached HEAD"
         splitBottomToFooter?.isActive = inRepo
@@ -974,6 +1000,22 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         reRoot(session.currentDirectory())
     }
 
+    func attachAssistant(_ assistant: PetAssistant) {
+        if self.assistant === assistant, !chatHost.subviews.isEmpty { return }
+        self.assistant = assistant
+        chatHost.subviews.forEach { $0.removeFromSuperview() }
+        let panel = assistant.makeSidebarPanelView()
+        panel.removeFromSuperview()
+        chatHost.addSubview(panel)
+        panel.onClose = { [weak self] in self?.setPage(.files) }
+        NSLayoutConstraint.activate([
+            panel.topAnchor.constraint(equalTo: chatHost.topAnchor),
+            panel.leadingAnchor.constraint(equalTo: chatHost.leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: chatHost.trailingAnchor),
+            panel.bottomAnchor.constraint(equalTo: chatHost.bottomAnchor),
+        ])
+    }
+
     private func reRootDebounced(_ path: String) {
         pendingReRoot?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.reRoot(path) }
@@ -1010,14 +1052,19 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private func setPage(_ newPage: Page) {
         page = newPage
         pageControl.setSelectedIndex(newPage.rawValue)
-        searchField.isHidden = newPage == .changes
-        statsRow.isHidden = newPage == .files
-        commitRow.isHidden = newPage == .files
+        searchField.isHidden = newPage != .files
+        statsRow.isHidden = newPage != .changes
+        commitRow.isHidden = newPage != .changes
+        let showingChat = newPage == .chat
+        chatHost.isHidden = !showingChat
+        header.isHidden = showingChat
+        split.isHidden = showingChat
         selectedChange = nil
         updateStageButton()
         updateStageAllButton()
-        headerTopToSearch?.isActive = newPage == .files
+        headerTopToSearch?.isActive = newPage != .changes
         headerTopToCommit?.isActive = newPage == .changes
+        updateBranchFooter()
         updateHeader()
         if newPage == .changes { refreshChanges() }
         outlineView.reloadData()
@@ -1046,6 +1093,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
                 let repo = (changesRepo! as NSString).lastPathComponent
                 pathLabel.stringValue = changesBranch.map { "\(repo) • \($0)" } ?? repo
             }
+        case .chat:
+            pathLabel.stringValue = ""
         }
     }
 
@@ -1228,9 +1277,9 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
     private func updateDiffModeIcons() {
         unifiedButton.contentTintColor = diffMode == .combined
-            ? CodePalette.accent : .secondaryLabelColor
+            ? .labelColor : .secondaryLabelColor
         splitDiffButton.contentTintColor = diffMode == .split
-            ? CodePalette.accent : .secondaryLabelColor
+            ? .labelColor : .secondaryLabelColor
     }
 
     private func adjustDiffFont(_ delta: CGFloat) {
@@ -1488,6 +1537,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             }
         case .changes:
             refreshChanges()
+        case .chat:
+            break
         }
     }
 
@@ -1507,6 +1558,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         case .files:
             if let results = searchResults { return results.count }
             return root?.children.count ?? 0
+        case .chat: return 0
         }
     }
 
@@ -1517,6 +1569,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         case .files:
             if let results = searchResults { return results[index] }
             return root!.children[index]
+        case .chat: preconditionFailure("CHAT has no outline children")
         }
     }
 
@@ -1559,8 +1612,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             NSLayoutConstraint.activate([
                 imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
                 imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                imageView.widthAnchor.constraint(equalToConstant: 14),
-                imageView.heightAnchor.constraint(equalToConstant: 14),
+                imageView.widthAnchor.constraint(equalToConstant: 16),
+                imageView.heightAnchor.constraint(equalToConstant: 16),
                 cell.badge.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
                 cell.badge.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
                 cell.badge.widthAnchor.constraint(equalToConstant: 20),
@@ -1575,7 +1628,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
         if let change = item as? CodeChange {
             let color = statusColor(change)
-            cell.textField?.font = .systemFont(ofSize: 11)
+            cell.textField?.font = .systemFont(ofSize: NSFont.systemFontSize)
             cell.textField?.textColor = .labelColor
             cell.textField?.stringValue = change.path
             cell.badge.stringValue = change.label
@@ -1596,7 +1649,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
         guard let node = item as? CodeFileNode else { return nil }
         cell.badge.isHidden = true
-        cell.textField?.font = .systemFont(ofSize: 11)
+        cell.textField?.font = .systemFont(ofSize: NSFont.systemFontSize)
         cell.textField?.textColor = .labelColor
         cell.textField?.stringValue = node.nameOverride ?? node.url.lastPathComponent
         cell.imageView?.image = CodeIcon.image(
@@ -1623,6 +1676,40 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
     var topLevelRowCountForTesting: Int { outlineView.numberOfRows }
     var previewTextForTesting: String { textView.string }
+    var pageControlLabelsForTesting: [String] { pageControl.labelsForTesting }
+    var pageControlFontSizeForTesting: CGFloat { pageControl.fontSizeForTesting }
+    var searchFontSizeForTesting: CGFloat { searchField.font?.pointSize ?? 0 }
+    func cellFontSizeForTesting(row: Int) -> CGFloat {
+        (outlineView.view(atColumn: 0, row: row, makeIfNecessary: true)
+            as? CodeTableCellView)?.textField?.font?.pointSize ?? 0
+    }
+    func cellIconSizeForTesting(row: Int) -> CGFloat {
+        (outlineView.view(atColumn: 0, row: row, makeIfNecessary: true)
+            as? CodeTableCellView)?.imageView?.image?.size.width ?? 0
+    }
+    var pageControlFontWeightForTesting: CGFloat { pageControl.fontWeightForTesting }
+    var pageControlHasOutlineForTesting: Bool {
+        pageControl.outlineColor.alphaComponent > 0
+    }
+    var fileIconSizeForTesting: NSSize {
+        CodeIcon.image(for: URL(fileURLWithPath: "file.swift"), isDirectory: false)?.size ?? .zero
+    }
+    var searchCornerRadiusForTesting: CGFloat { searchField.layer?.cornerRadius ?? 0 }
+    var pageControlSelectionIsNeutralForTesting: Bool {
+        CodePalette.isNeutral(pageControl.selectionFillColor)
+    }
+    var rowSelectionIsNeutralForTesting: Bool {
+        CodePalette.isNeutral(CodeRowView.emphasizedSelectionColor)
+    }
+    var diffModeSelectionIsNeutralForTesting: Bool {
+        CodePalette.isNeutral(unifiedButton.contentTintColor ?? .clear)
+            && CodePalette.isNeutral(splitDiffButton.contentTintColor ?? .clear)
+    }
+    var chatPageIsVisibleForTesting: Bool { !chatHost.isHidden }
+    var chatPageFrameForTesting: NSRect { chatHost.frame }
+    func chatPageUsesAssistantForTesting(_ assistant: PetAssistant) -> Bool {
+        self.assistant === assistant
+    }
     var headerTextForTesting: String { pathLabel.stringValue }
     var previewTitleForTesting: String { previewTitle.stringValue }
     var markdownToggleHiddenForTesting: Bool { markdownToggle.isHidden }

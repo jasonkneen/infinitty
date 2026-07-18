@@ -277,4 +277,76 @@ final class NavigationTests: XCTestCase {
         hint.setNumber(8)
         XCTAssertEqual(hint.shortcutText, "⇧⌥8")
     }
+    func testSidebarToggleReflectsActualSidebarVisibility() throws {
+        let toggle = SidebarToggleView()
+        XCTAssertEqual(toggle.toolTip, "Show sidebar")
+        let icon = try XCTUnwrap(toggle.subviews.compactMap { $0 as? NSImageView }.first)
+        XCTAssertEqual(icon.contentTintColor, NSColor.labelColor)
+
+        toggle.setSidebarVisible(true)
+        XCTAssertEqual(toggle.toolTip, "Hide sidebar")
+
+        var clickCount = 0
+        toggle.onClick = { clickCount += 1 }
+        let click = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1))
+        toggle.mouseDown(with: click)
+        XCTAssertEqual(clickCount, 1)
+    }
+
+    func testSidebarIconUsesRightTitlebarAccessoryAndTogglesSidebar() throws {
+        _ = NSApplication.shared
+        let delegate = AppDelegate()
+        let originalContent = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let window = NSWindow(
+            contentRect: originalContent.frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.tabbingIdentifier = "infinitty"
+        window.contentView = originalContent
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification,
+                object: window))
+            window.close()
+        }
+
+        delegate.installSidebarToggle(in: window)
+        let accessory = try XCTUnwrap(
+            window.titlebarAccessoryViewControllers
+                .compactMap { $0 as? SidebarToggleAccessory }.first)
+        XCTAssertEqual(accessory.layoutAttribute, .right)
+        let toggle = accessory.toggleView
+        let click = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1))
+
+        toggle.mouseDown(with: click)
+        let split = try XCTUnwrap(window.contentView as? NSSplitView)
+        XCTAssertEqual(split.arrangedSubviews.count, 2)
+        XCTAssertEqual(toggle.toolTip, "Hide sidebar")
+
+        toggle.mouseDown(with: click)
+        XCTAssertTrue(window.contentView === originalContent)
+        XCTAssertTrue(split.arrangedSubviews.isEmpty)
+        XCTAssertEqual(toggle.toolTip, "Show sidebar")
+        XCTAssertTrue(window.titlebarAccessoryViewControllers.contains { $0 === accessory })
+    }
+
 }

@@ -181,12 +181,8 @@ final class TerminalView: NSView {
         // is obscured by the (transparent) titlebar and any tab bar — this
         // tracks tab-bar appearance automatically.
         if window.styleMask.contains(.fullSizeContentView) {
-            if renderer.config.titlebarStyle == "hidden" && renderer.config.trafficLights == "circle" {
-                renderer.topInsetPoints = 4
-            } else {
-                let layoutRect = convert(window.contentLayoutRect, from: nil)
-                renderer.topInsetPoints = max(bounds.height - layoutRect.maxY, 0) + 2
-            }
+            let layoutRect = convert(window.contentLayoutRect, from: nil)
+            renderer.topInsetPoints = max(bounds.height - layoutRect.maxY, 0) + 2
         } else {
             renderer.topInsetPoints = 0
         }

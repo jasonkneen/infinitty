@@ -41,7 +41,7 @@ enum CodeIcon {
         let image = NSImage(
             systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
-        image?.size = NSSize(width: 14, height: 14)
+        image?.size = NSSize(width: 16, height: 16)
         return image
     }
 }

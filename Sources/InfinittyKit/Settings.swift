@@ -38,7 +38,6 @@ final class SettingsWindowController: NSWindowController {
     private let glowCheck = NSButton(checkboxWithTitle: "Glow while an agent is in control", target: nil, action: nil)
     private let hintsCheck = NSButton(checkboxWithTitle: "Inline AI hints (ghost text)", target: nil, action: nil)
     private let hintsWarning = NSTextField(wrappingLabelWithString: "")
-    private let titlebarPopup = NSPopUpButton()
     private let lightsPopup = NSPopUpButton()
     private let petPopup = NSPopUpButton()
     private let petModePopup = NSPopUpButton()
@@ -162,7 +161,6 @@ final class SettingsWindowController: NSWindowController {
         fontCombo.target = self
         fontCombo.action = #selector(fontChanged(_:))
 
-        titlebarPopup.addItems(withTitles: ["native", "transparent", "hidden"])
         lightsPopup.addItems(withTitles: ["circle", "square", "rectangle", "diamond"])
         petModePopup.addItems(withTitles: ["one per window", "every pane"])
         notchPopup.addItems(withTitles: ["builtin", "external", "primary", "all"])
@@ -254,7 +252,6 @@ final class SettingsWindowController: NSWindowController {
             section("Window"),
             sliderRow("Opacity", opacitySlider, opacityValue),
             row("", blurCheck),
-            row("Titlebar", titlebarPopup, width: 160),
             row("Traffic lights", lightsPopup, width: 160),
             section("Pet"),
             row("Pet", petPopup, width: 200),
@@ -311,7 +308,6 @@ final class SettingsWindowController: NSWindowController {
         glowCheck.state = current.agentGlow ? .on : .off
         hintsCheck.state = current.hints ? .on : .off
         notchCheck.state = current.notch ? .on : .off
-        titlebarPopup.selectItem(withTitle: current.titlebarStyle)
         lightsPopup.selectItem(withTitle: current.trafficLights)
         notchPopup.selectItem(withTitle: current.notchDisplay)
         petPopup.selectItem(withTitle: current.pet ?? "none")
@@ -392,7 +388,6 @@ final class SettingsWindowController: NSWindowController {
         c.hints = hintsCheck.state == .on
         c.notch = notchCheck.state == .on
         c.notchDisplay = notchPopup.titleOfSelectedItem ?? "builtin"
-        c.titlebarStyle = titlebarPopup.titleOfSelectedItem ?? "native"
         c.trafficLights = lightsPopup.titleOfSelectedItem ?? "circle"
         let pet = petPopup.titleOfSelectedItem ?? "none"
         c.pet = pet == "none" ? nil : pet

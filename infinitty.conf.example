@@ -23,7 +23,6 @@
 # palette      = 4=#61AFEF         # ANSI/256 override (ghostty syntax, N=0-255)
 
 # window chrome
-# titlebar       = transparent     # native | transparent | hidden
 # traffic-lights = square          # circle | square | rectangle | diamond
 # background-opacity = 0.92
 # background-blur    = true        # frosted blur behind the window

@@ -268,7 +268,7 @@ Font to use one everywhere.
 
 - **Settings window** (⌘,): edits the config file, so changes apply live to
   every pane and persist
-- **Titlebar**: `titlebar = transparent | hidden`; traffic lights in
+- **Window chrome**: standard macOS titlebar and tabs; optional traffic lights in
   `circle | square | rectangle | diamond`
 - **Transparency**: `background-opacity = 0.9`, `background-blur = true`
   (frosted behind-window blur)

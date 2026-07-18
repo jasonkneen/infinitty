@@ -33,4 +33,33 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(controller.topLevelRowCountForTesting, 2)
         XCTAssertEqual(controller.cellTextForTesting(row: 0), "Sources/App.swift")
     }
+
+    func testChatTabEmbedsExistingAssistantAtFullHeight() {
+        let controller = CodeViewController(config: AppConfig())
+        let assistant = PetAssistant(config: AppConfig())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 600),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = controller.view
+        controller.attachAssistant(assistant)
+        controller.switchPageForTesting(2)
+        window.layoutIfNeeded()
+        controller.view.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(controller.chatPageIsVisibleForTesting)
+        XCTAssertTrue(controller.chatPageUsesAssistantForTesting(assistant))
+        XCTAssertGreaterThan(controller.chatPageFrameForTesting.height, 500)
+
+        let panel = assistant.makeSidebarPanelView()
+        XCTAssertEqual(panel.titleForTesting, "Assistant")
+        XCTAssertEqual(panel.newChatTitleForTesting, "New chat")
+        XCTAssertEqual(
+            panel.emptyStateForTesting,
+            "Choose an agent, ask a question, and keep chatting here.")
+        XCTAssertEqual(panel.modelLabelForTesting, "MODEL")
+        XCTAssertEqual(panel.modelValueForTesting, "Auto · Best available")
+        XCTAssertEqual(panel.attachmentSymbolForTesting, "paperclip")
+        XCTAssertEqual(panel.sendSymbolForTesting, "arrow.up")
+        XCTAssertTrue(panel.sendButtonIsCircularForTesting)
+    }
 }

@@ -63,4 +63,16 @@ final class ConfigTests: XCTestCase {
         reparsed.apply(fileContents: config.serialize())
         XCTAssertEqual(reparsed.palette, config.palette)
     }
+    func testCustomTitlebarStyleIsNotSerialized() {
+        var config = AppConfig()
+        config.apply(fileContents: """
+            titlebar = hidden
+            traffic-lights = diamond
+            """)
+
+        let serialized = config.serialize()
+        XCTAssertFalse(serialized.contains("titlebar ="))
+        XCTAssertTrue(serialized.contains("traffic-lights = diamond"))
+    }
+
 }

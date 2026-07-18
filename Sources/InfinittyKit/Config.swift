@@ -40,7 +40,6 @@ struct AppConfig {
     var cursorColor: UInt32?
     var selectionBackground: UInt32?
     var palette: [Int: UInt32] = [:] // index (0-255) -> 0xRRGGBB overrides
-    var titlebarStyle = "native" // native | transparent | hidden
     var trafficLights = "circle" // circle | square | rectangle | diamond
     var pet: String? = "infinitty" // built-in name, codex pet name, or directory path
     var petScale: CGFloat = 0.5
@@ -180,12 +179,6 @@ struct AppConfig {
                 if let (index, color) = AppConfig.parsePaletteEntry(value) {
                     palette[index] = color
                 }
-            case "titlebar", "macos-titlebar-style":
-                switch value.lowercased() {
-                case "transparent", "tabs": titlebarStyle = "transparent"
-                case "hidden": titlebarStyle = "hidden"
-                default: titlebarStyle = "native"
-                }
             case "traffic-lights", "trafficlights":
                 let v = value.lowercased()
                 if ["circle", "square", "rectangle", "diamond"].contains(v) {
@@ -313,7 +306,6 @@ struct AppConfig {
         out += "kerning = \(Double(kerning))\n"
         if backgroundOpacity < 1 { out += "background-opacity = \(Double(backgroundOpacity))\n" }
         if backgroundBlur { out += "background-blur = true\n" }
-        out += "titlebar = \(titlebarStyle)\n"
         out += "traffic-lights = \(trafficLights)\n"
         if let p = pet, !p.isEmpty {
             out += "pet = \(p)\n"

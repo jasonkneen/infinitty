@@ -106,8 +106,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
-    private var sidebarCollapseButtons: [ObjectIdentifier: SidebarCollapseView] = [:]
-    private var sidebarCollapsedState: [ObjectIdentifier: Bool] = [:]
+    private var sidebarToggleAccessories: [ObjectIdentifier: SidebarToggleAccessory] = [:]
     private var quickTerminalHotKey: GlobalHotKey?
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController(
@@ -316,10 +315,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self?.appControl.broadcast(["event": "title", "pane": session.id, "title": session.title])
         }
         s.view.onFocus = { [weak self, weak s] in
-            guard let s, let win = s.view.window else { return }
-            self?.quickTerminal.setFocusedSession(s)
-            self?.updateTitle(for: win)
-            self?.codeViews[ObjectIdentifier(win)]?.track(session: s)
+            guard let self, let s, let win = s.view.window else { return }
+            self.quickTerminal.setFocusedSession(s)
+            self.updateTitle(for: win)
+            if let controller = self.codeViews[ObjectIdentifier(win)] {
+                controller.track(session: s)
+                controller.attachAssistant(self.petAssistant(for: s))
+            }
         }
         s.view.onPetClick = { [weak self, weak s] in
             guard let self, let s else { return }
@@ -881,22 +883,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             window.delegate = self
         }
 
-        // Titlebar & traffic-light chrome.
+        // Quick terminal and custom traffic lights keep their existing bare chrome.
         let customLights = role == .standard && config.trafficLights != "circle"
-        let bareTitlebar = role == .quickTerminal
-            || config.titlebarStyle != "native" || customLights
+        let bareTitlebar = role == .quickTerminal || customLights
         if bareTitlebar {
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
         }
-        let hideNative = customLights || config.titlebarStyle == "hidden"
-        if hideNative {
+        if customLights {
             for b: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
                 window.standardWindowButton(b)?.isHidden = true
             }
-            // Deliberately NOT isMovableByWindowBackground: it hijacks
-            // selection drags. The top titlebar strip still moves the window.
+            // Deliberately NOT isMovableByWindowBackground: it hijacks selection drags.
         }
         // Top inset is derived per-layout from contentLayoutRect in
         // TerminalView.updateGeometry (tracks titlebar + tab bar).
@@ -918,21 +917,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         if role == .standard { window.center() }
 
-        // Process-icon accessory: only when the OS titlebar is actually visible.
-        // Bare-titlebar modes (transparent / hidden / custom traffic lights) make
-        // the titlebar invisible, so an accessory there would either be invisible
-        // or, worse, fight with the cell grid.
-        let useAccessory = role == .standard
-            && !bareTitlebar && config.titlebarStyle == "native"
-        if useAccessory {
-            let acc = TabIconAccessory()
-            acc.titlebarShowsTitle = true
-            acc.onClick = { [weak self, weak session] in
-                guard let self, let session else { return }
-                self.focusPane(for: session)
+        // Native titlebar accessories sit above AppKit's tab strip.
+        if role == .standard {
+            if !customLights {
+                let acc = TabIconAccessory()
+                acc.titlebarShowsTitle = true
+                acc.onClick = { [weak self, weak session] in
+                    guard let self, let session else { return }
+                    self.focusPane(for: session)
+                }
+                acc.attach(to: window)
+                tabIconAccessories[ObjectIdentifier(window)] = acc
             }
-            acc.attach(to: window)
-            tabIconAccessories[ObjectIdentifier(window)] = acc
+            installSidebarToggle(in: window)
         }
 
         return (window, session)
@@ -1151,22 +1148,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private static let codeViewWidth: CGFloat = 280
 
     @objc func toggleCodeView(_ sender: Any?) {
-        guard let win = NSApp.keyWindow,
-              win.tabbingIdentifier == "infinitty",
+        guard let win = NSApp.keyWindow else { return }
+        toggleCodeView(in: win)
+    }
+
+    func toggleCodeView(in win: NSWindow) {
+        guard win.tabbingIdentifier == "infinitty",
               win !== quickTerminal.window else { return }
         let id = ObjectIdentifier(win)
         if let controller = codeViews[id] {
             // Hide: unwrap the outer split and put the terminal content back.
             if let split = win.contentView as? NSSplitView,
                let content = split.arrangedSubviews.first(where: { $0 !== controller.view }) {
+                split.removeArrangedSubview(content)
                 content.removeFromSuperview()
+                split.removeArrangedSubview(controller.view)
+                controller.view.removeFromSuperview()
                 win.contentView = content
             }
             codeViews.removeValue(forKey: id)
-            // Remove the collapse button when sidebar closes
-            sidebarCollapseButtons[id]?.removeFromSuperview()
-            sidebarCollapseButtons.removeValue(forKey: id)
-            sidebarCollapsedState.removeValue(forKey: id)
+            sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(false)
             refocusTerminal(in: win)
             return
         }
@@ -1191,46 +1192,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         split.setHoldingPriority(.defaultLow, forSubviewAt: 0)
         split.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
         codeViews[id] = controller
-        sidebarCollapsedState[id] = false
+        sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(true)
         let source = focusedSession() ?? activeSessions(in: win).first
-        if let source { controller.track(session: source) }
+        if let source {
+            controller.track(session: source)
+            controller.attachAssistant(petAssistant(for: source))
+        }
         DispatchQueue.main.async {
             split.setPosition(split.bounds.width - Self.codeViewWidth, ofDividerAt: 0)
             self.refocusTerminal(in: win)
-            self.addSidebarCollapseButton(to: win, split: split)
         }
         return controller
     }
 
-    /// Add the sidebar collapse button to the window chrome.
-    private func addSidebarCollapseButton(to win: NSWindow, split: NSSplitView) {
-        guard let content = win.contentView else { return }
+    func installSidebarToggle(in win: NSWindow) {
         let id = ObjectIdentifier(win)
-        // Remove any existing button first
-        sidebarCollapseButtons[id]?.removeFromSuperview()
-
-        let button = SidebarCollapseView()
-        button.onClick = { [weak self, weak win, weak split] in
-            guard let self, let win, let split else { return }
-            let id = ObjectIdentifier(win)
-            let wasCollapsed = self.sidebarCollapsedState[id] ?? false
-            if wasCollapsed {
-                // Expand
-                split.setPosition(split.bounds.width - Self.codeViewWidth, ofDividerAt: 0)
-                self.sidebarCollapsedState[id] = false
-                button.setCollapsed(false)
-            } else {
-                // Collapse
-                split.setPosition(split.bounds.width - 20, ofDividerAt: 0)
-                self.sidebarCollapsedState[id] = true
-                button.setCollapsed(true)
-            }
+        if let existing = sidebarToggleAccessories[id] {
+            existing.toggleView.setSidebarVisible(codeViews[id] != nil)
+            return
         }
 
-        let topInset = activeSessions(in: win).first?.renderer.topInsetPoints ?? 0
-        button.place(in: content, topInset: topInset)
-        content.addSubview(button)
-        sidebarCollapseButtons[id] = button
+        let accessory = SidebarToggleAccessory()
+        accessory.toggleView.onClick = { [weak self, weak win] in
+            guard let self, let win else { return }
+            self.toggleCodeView(in: win)
+        }
+        accessory.toggleView.setSidebarVisible(codeViews[id] != nil)
+        accessory.attach(to: win)
+        sidebarToggleAccessories[id] = accessory
     }
 
     /// Keep keyboard input in the terminal after sidebar toggles.
@@ -1246,21 +1235,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// One assistant per session (kept so the popover survives focus changes).
     private var petAssistants: [Int: PetAssistant] = [:]
 
+    private func petAssistant(for session: TerminalSession) -> PetAssistant {
+        if let existing = petAssistants[session.id] { return existing }
+        let created = PetAssistant(config: config)
+        created.attach(to: session)
+        created.onShowInSidePanel = { [weak self] paths, query in
+            self?.showAssistantResults(paths, query: query, for: session)
+        }
+        petAssistants[session.id] = created
+        return created
+    }
+
     private func presentPetAssistant(for session: TerminalSession) {
         guard let anchor = session.renderer.petHitRect(in: session.view) else { return }
-        let assistant: PetAssistant
-        if let existing = petAssistants[session.id] {
-            assistant = existing
-        } else {
-            let created = PetAssistant(config: config)
-            created.attach(to: session)
-            created.onShowInSidePanel = { [weak self] paths, query in
-                self?.showAssistantResults(paths, query: query, for: session)
-            }
-            petAssistants[session.id] = created
-            assistant = created
-        }
-        assistant.presentInput(anchorRect: anchor, in: session.view)
+        petAssistant(for: session).presentInput(anchorRect: anchor, in: session.view)
     }
 
     /// "Show in Side Panel" from the pet's result bubble: open the code view
@@ -1273,6 +1261,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               win !== quickTerminal.window else { return }
         guard let controller = openCodeView(in: win) else { return }
         controller.track(session: session)
+        controller.attachAssistant(petAssistant(for: session))
         controller.showSearchResults(paths, query: query)
     }
 
@@ -1594,6 +1583,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
         tabIconAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
         codeViews.removeValue(forKey: ObjectIdentifier(win))
+        sidebarToggleAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
         win.subtitle = ""
         let closing = sessions.filter { $0.view.window === win }
         for s in closing { s.shutdown() }

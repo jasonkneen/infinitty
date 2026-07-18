@@ -112,6 +112,32 @@ final class CodeViewTests: XCTestCase {
         XCTAssertLessThanOrEqual(frame.height, 40, "frame=\(frame)")
     }
 
+    func testSidebarUsesDefaultTypographyAndLargerFileIcons() {
+        let (controller, window) = mountedController()
+        controller.reRootForTesting(tempDir)
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(controller.pageControlLabelsForTesting, ["FILES", "CHANGES", "CHAT"])
+        XCTAssertEqual(controller.pageControlFontSizeForTesting, 12)
+        XCTAssertEqual(
+            controller.pageControlFontWeightForTesting,
+            NSFont.Weight.medium.rawValue)
+        XCTAssertEqual(controller.searchFontSizeForTesting, NSFont.systemFontSize)
+        XCTAssertEqual(controller.cellFontSizeForTesting(row: 0), NSFont.systemFontSize)
+        XCTAssertEqual(controller.cellIconSizeForTesting(row: 0), 16)
+    }
+
+    func testSidebarChromeUsesSquaredSearchAndNeutralTabStates() {
+        let controller = CodeViewController(config: AppConfig())
+        _ = controller.view
+
+        XCTAssertEqual(controller.searchCornerRadiusForTesting, 6)
+        XCTAssertTrue(controller.pageControlHasOutlineForTesting)
+        XCTAssertTrue(controller.pageControlSelectionIsNeutralForTesting)
+        XCTAssertTrue(controller.rowSelectionIsNeutralForTesting)
+        XCTAssertTrue(controller.diffModeSelectionIsNeutralForTesting)
+    }
+
     /// In the live window the sidebar can get a layout pass at a stub size
     /// before reaching its real height (contentView swap on a visible
     /// window). The tree must survive that growth, not stay squashed.
