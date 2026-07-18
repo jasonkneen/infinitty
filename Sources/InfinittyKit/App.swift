@@ -106,6 +106,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
+    private var sidebarCollapseButtons: [ObjectIdentifier: SidebarCollapseView] = [:]
+    private var sidebarCollapsedState: [ObjectIdentifier: Bool] = [:]
     private var quickTerminalHotKey: GlobalHotKey?
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController(
@@ -1161,6 +1163,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 win.contentView = content
             }
             codeViews.removeValue(forKey: id)
+            // Remove the collapse button when sidebar closes
+            sidebarCollapseButtons[id]?.removeFromSuperview()
+            sidebarCollapseButtons.removeValue(forKey: id)
+            sidebarCollapsedState.removeValue(forKey: id)
             refocusTerminal(in: win)
             return
         }
@@ -1185,13 +1191,46 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         split.setHoldingPriority(.defaultLow, forSubviewAt: 0)
         split.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
         codeViews[id] = controller
+        sidebarCollapsedState[id] = false
         let source = focusedSession() ?? activeSessions(in: win).first
         if let source { controller.track(session: source) }
         DispatchQueue.main.async {
             split.setPosition(split.bounds.width - Self.codeViewWidth, ofDividerAt: 0)
             self.refocusTerminal(in: win)
+            self.addSidebarCollapseButton(to: win, split: split)
         }
         return controller
+    }
+
+    /// Add the sidebar collapse button to the window chrome.
+    private func addSidebarCollapseButton(to win: NSWindow, split: NSSplitView) {
+        guard let content = win.contentView else { return }
+        let id = ObjectIdentifier(win)
+        // Remove any existing button first
+        sidebarCollapseButtons[id]?.removeFromSuperview()
+
+        let button = SidebarCollapseView()
+        button.onClick = { [weak self, weak win, weak split] in
+            guard let self, let win, let split else { return }
+            let id = ObjectIdentifier(win)
+            let wasCollapsed = self.sidebarCollapsedState[id] ?? false
+            if wasCollapsed {
+                // Expand
+                split.setPosition(split.bounds.width - Self.codeViewWidth, ofDividerAt: 0)
+                self.sidebarCollapsedState[id] = false
+                button.setCollapsed(false)
+            } else {
+                // Collapse
+                split.setPosition(split.bounds.width - 20, ofDividerAt: 0)
+                self.sidebarCollapsedState[id] = true
+                button.setCollapsed(true)
+            }
+        }
+
+        let topInset = activeSessions(in: win).first?.renderer.topInsetPoints ?? 0
+        button.place(in: content, topInset: topInset)
+        content.addSubview(button)
+        sidebarCollapseButtons[id] = button
     }
 
     /// Keep keyboard input in the terminal after sidebar toggles.

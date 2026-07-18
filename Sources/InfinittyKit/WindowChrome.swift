@@ -61,6 +61,74 @@ final class UpdateIndicatorView: NSView {
     }
 }
 
+/// Sidebar collapse/expand toggle in the top-right corner. Collapses the
+/// code-view sidebar to a minimal width and expands it back.
+final class SidebarCollapseView: NSView {
+    var onClick: (() -> Void)?
+    private let icon = NSTextField(labelWithString: "")
+    private var hovering = false
+    private let accent = NSColor.controlAccentColor
+    private let size: CGFloat = 28
+    private var isCollapsed = false
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.masksToBounds = true
+
+        icon.stringValue = "⊟"
+        icon.font = .systemFont(ofSize: 13, weight: .semibold)
+        icon.alignment = .center
+        icon.isEditable = false
+        icon.isBezeled = false
+        icon.drawsBackground = false
+        addSubview(icon)
+
+        setFrameSize(NSSize(width: size, height: size))
+        icon.frame = bounds
+        icon.autoresizingMask = [.width, .height]
+        applyStyle()
+        updateTooltip()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func applyStyle() {
+        layer?.backgroundColor = accent.withAlphaComponent(hovering ? 0.16 : 0.08).cgColor
+        icon.textColor = accent.withAlphaComponent(hovering ? 1.0 : 0.75)
+    }
+
+    private func updateTooltip() {
+        toolTip = isCollapsed ? "Show sidebar" : "Hide sidebar"
+    }
+
+    func setCollapsed(_ collapsed: Bool) {
+        isCollapsed = collapsed
+        updateTooltip()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; applyStyle() }
+    override func mouseExited(with event: NSEvent) { hovering = false; applyStyle() }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+
+    /// Pin to the top-right corner, tight under the titlebar inset.
+    func place(in host: NSView, topInset: CGFloat) {
+        frame.origin = NSPoint(
+            x: host.bounds.width - frame.width - 8,
+            y: host.bounds.height - size - max(topInset, 4) - 3
+        )
+        autoresizingMask = [.minXMargin, .minYMargin]
+    }
+}
+
 /// Pulsing inner glow shown while an agent drives the pane through the
 /// control socket — an Apple-Intelligence-style rotating conic gradient ring.
 final class AgentGlowView: NSView {
