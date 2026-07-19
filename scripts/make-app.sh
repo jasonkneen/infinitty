@@ -12,6 +12,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN_DIR/infinitty" "$APP/Contents/MacOS/infinitty"
+cp "$BIN_DIR/infinitty-mcp" "$APP/Contents/MacOS/infinitty-mcp"
 cp assets/AppIcon.icns "$APP/Contents/Resources/"
 cp -R shell-integration "$APP/Contents/Resources/"
 cp -R Sources/InfinittyKit/Resources/Pets "$APP/Contents/Resources/"

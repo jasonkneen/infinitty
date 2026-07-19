@@ -60,6 +60,18 @@ struct AppConfig {
     var aiBaseURL: String? // OpenAI-compatible endpoint for hints
     var aiKey: String?
     var aiModel: String?
+    /// AI provider: "auto" | "apple" | "codex" | "claude". Driven by
+    /// ProviderDiscovery.preferredProvider. Powers inline hints AND the pet
+    /// assistant — they're the same "AI backend" axis.
+    var aiProvider: String = "auto"
+    /// Model override for Claude. Falls back to ProviderDiscovery default.
+    var claudeModel: String?
+    /// Model override for Codex. Falls back to ProviderDiscovery default.
+    var codexModel: String?
+    /// Auto-register `infinitty-mcp` with Codex (`~/.codex/config.toml`)
+    /// and Claude (`~/.claude.json`) on launch so the CLI gains terminal
+    /// control tools. Off by default because it touches the user's dotfiles.
+    var mcpAutoRegister = false
     var agentGlow = true // pulsing inner glow while an agent drives the pane
     var sourcePath: String? // config file in use (for live reload)
 
@@ -236,6 +248,15 @@ struct AppConfig {
                 aiKey = value
             case "ai-model":
                 aiModel = value
+            case "ai-provider", "ai":
+                let v = value.lowercased()
+                if ["auto", "apple", "codex", "claude"].contains(v) { aiProvider = v }
+            case "claude-model":
+                claudeModel = value
+            case "codex-model":
+                codexModel = value
+            case "mcp-auto-register", "mcp-register":
+                mcpAutoRegister = AppConfig.parseBool(value)
             case "agent-glow":
                 agentGlow = AppConfig.parseBool(value)
             default:
@@ -338,6 +359,10 @@ struct AppConfig {
         if let v = aiBaseURL, !v.isEmpty { out += "ai-base-url = \(v)\n" }
         if let v = aiKey, !v.isEmpty { out += "ai-key = \(v)\n" }
         if let v = aiModel, !v.isEmpty { out += "ai-model = \(v)\n" }
+        if aiProvider != "auto" { out += "ai-provider = \(aiProvider)\n" }
+        if let v = claudeModel, !v.isEmpty { out += "claude-model = \(v)\n" }
+        if let v = codexModel, !v.isEmpty { out += "codex-model = \(v)\n" }
+        if mcpAutoRegister { out += "mcp-auto-register = true\n" }
         if markdownCommand != "glow -p" { out += "markdown-command = \(markdownCommand)\n" }
         if markdownRender != "off" { out += "markdown-render = \(markdownRender)\n" }
         if notch {

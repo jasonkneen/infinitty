@@ -159,6 +159,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         launchCompleted = true
         watchConfigFile()
         configureQuickTerminalHotKey()
+        if config.mcpAutoRegister { _ = MCPConfiguration.registerIfNeeded() }
         if config.notch { notch.show(display: config.notchDisplay) }
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
             openSettings(nil) // UI testing hook

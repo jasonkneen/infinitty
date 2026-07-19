@@ -1,3 +1,25 @@
+import Foundation
+
+/// Append-only tracer for the pet-assistant ask path, so a GUI-only failure
+/// ("I hit send, nothing happens") leaves evidence in /tmp/infinitty-pet.log.
+/// Best-effort — never throws, never blocks the UI meaningfully.
+enum PetLog {
+    private static let url = URL(fileURLWithPath: "/tmp/infinitty-pet.log")
+    private static let queue = DispatchQueue(label: "infinitty.petlog")
+    static func log(_ message: String) {
+        queue.async {
+            let line = "[\(ProcessInfo.processInfo.systemUptime)] \(message)\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+}
 import AppKit
 #if canImport(FoundationModels)
 import FoundationModels
@@ -201,14 +223,7 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func composerModelTitles() -> [String] {
-        var titles = ["Auto · Best available"]
-        titles += agentTitles
-        if let model = config.aiModel, !model.isEmpty {
-            titles.append(model)
-        } else if let base = config.aiBaseURL, !base.isEmpty {
-            titles.append("gpt-4o-mini")
-        }
-        return titles
+        ["Auto · Best available"] + agentTitles
     }
 
     /// The composer's currently-selected MODEL title ("Auto · Best available",
@@ -418,15 +433,35 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private var lastQuery: String?
     private var sidebarMessages: [(role: String, text: String)] = []
     private weak var sidebarPanel: PetAssistantPanelView?
-    /// Locally-installed coding-agent CLIs, detected once at construction.
-    let detectedAgents: [DetectedAgent]
+    /// AI provider choices available in the composer's MODEL picker,
+    /// gated by which CLIs/models this Mac actually has.
+    let availableChoices: [AgentChoice]
 
     /// Hand-off: file results the user wants to see in the code-view sidebar.
     var onShowInSidePanel: ((_ paths: [String], _ query: String?) -> Void)?
 
-    init(config: AppConfig, detectedAgents: [DetectedAgent] = AgentDetector.detect()) {
+    init(config: AppConfig, availableChoices: [AgentChoice]? = nil) {
         self.config = config
-        self.detectedAgents = detectedAgents
+        self.availableChoices = availableChoices ?? PetAssistant.resolveChoices(config: config)
+        super.init()
+    }
+
+    /// Build the ordered picker choices: always Auto, plus each provider
+    /// whose backend is actually available on this machine.
+    static func resolveChoices(
+        config: AppConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [AgentChoice] {
+        var choices: [AgentChoice] = [.auto]
+        for provider in [InfinittyAIProvider.claude, .codex, .apple]
+        where ProviderDiscovery.isAvailable(provider, environment: environment) {
+            switch provider {
+            case .claude: choices.append(.claude)
+            case .codex: choices.append(.codex)
+            case .apple: choices.append(.apple)
+            }
+        }
+        return choices
     }
 
     func attach(to session: TerminalSession) {
@@ -445,7 +480,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     ) -> PetAssistantPanelView {
         let panel = PetAssistantPanelView(
             presentation: presentation, config: config,
-            agentTitles: detectedAgents.map(\.label))
+            agentTitles: availableChoices.filter { $0 != .auto }.map { $0.menuTitle(config: config) })
         panel.setMessages(sidebarMessages)
         panel.setHasFiles(!lastFiles.isEmpty)
         panel.onSubmit = { [weak self] request, model in
@@ -499,6 +534,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     func presentInput(anchorRect: NSRect, in view: NSView) {
         closePopover()
+        PetAssistant.prewarm(config: config)
         let contentSize = NSSize(width: 380, height: 420)
         let panel = makePanelView(presentation: .popover)
         panel.frame = NSRect(origin: .zero, size: contentSize)
@@ -557,7 +593,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             return
         }
         session.petAnimator?.startThinking()
-        let chain = backendChain(for: model)
+        let backend = resolveBackend(forSelectedTitle: model)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -569,8 +605,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             \(session.terminal.historyText(lines: 60))
             """
             let user = context + "\n--- user request ---\n" + request
+            let runCwd = cwd ?? NSHomeDirectory()
 
-            Self.runChain(chain, system: Self.systemPrompt, user: user, cwd: cwd) { reply in
+            Self.askAI(backend: backend, system: Self.systemPrompt, user: user, cwd: runCwd) { reply in
                 if let query = Self.parseSearchDirective(reply), let cwd {
                     let all = CodeSearch.listFilesSync(root: cwd)
                     let matches = CodeSearch.filter(all, query: query, limit: 50)
@@ -579,7 +616,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                     let followUp = context
                         + "\n--- files matching \"\(query)\" ---\n" + fileBlock
                         + "\n--- user request ---\n" + request
-                    Self.runChain(chain, system: Self.systemPrompt, user: followUp, cwd: cwd) { final in
+                    Self.askAI(backend: backend, system: Self.systemPrompt, user: followUp, cwd: runCwd) { final in
                         self.finish(
                             answer: final ?? "…", files: matches, query: query,
                             completion: completion)
@@ -595,56 +632,102 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
     }
 
-    /// A resolved chat backend: a detected CLI agent or the hint-style source.
-    enum ChatBackend {
-        case agent(DetectedAgent)
-        case smart(HintEngine.SmartSource)
+    /// Map the composer's selected MODEL title to a concrete backend.
+    func resolveBackend(forSelectedTitle title: String) -> Backend {
+        let choice = availableChoices.first { $0.menuTitle(config: config) == title } ?? .auto
+        return PetAssistant.resolveBackend(choice: choice, config: config)
     }
 
-    /// Ordered backends to try for `model`. Explicit picks force a single
-    /// backend; "Auto" prefers detected agents, then OpenAI, then Foundation.
-    func backendChain(for model: String) -> [ChatBackend] {
-        if let agent = detectedAgents.first(where: { $0.label == model }) {
-            return [.agent(agent)]
-        }
-        if let base = config.aiBaseURL, !base.isEmpty,
-           model != "Auto · Best available" {
-            return [.smart(.openai(base: base, key: config.aiKey ?? "", model: model))]
-        }
-        // Auto: detected agents first, then configured smart source.
-        var chain: [ChatBackend] = detectedAgents.map { .agent($0) }
-        let smart = HintEngine.resolveSmart(
-            hints: true, hintCommand: config.hintCommand,
-            aiBaseURL: config.aiBaseURL, aiKey: config.aiKey, aiModel: config.aiModel)
-        if case .none = smart {} else { chain.append(.smart(smart)) }
-        return chain
-    }
+    enum AgentChoice: Int, CaseIterable {
+        case auto
+        case claude
+        case codex
+        case apple
 
-    /// Try each backend in order until one returns a non-empty answer.
-    static func runChain(
-        _ chain: [ChatBackend], system: String, user: String,
-        cwd: String? = nil,
-        done: @escaping (String?) -> Void
-    ) {
-        guard let first = chain.first else { done(nil); return }
-        let rest = Array(chain.dropFirst())
-        run(first, system: system, user: user, cwd: cwd) { reply in
-            if let reply, !reply.isEmpty { done(reply); return }
-            runChain(rest, system: system, user: user, cwd: cwd, done: done)
+        var configuredProvider: String {
+            switch self {
+            case .auto: return "auto"
+            case .claude: return "claude"
+            case .codex: return "codex"
+            case .apple: return "apple"
+            }
+        }
+
+        func menuTitle(config: AppConfig) -> String {
+            switch self {
+            case .auto: return "Auto · Best available"
+            case .claude: return "Claude · \(config.claudeModel ?? "Haiku 4.5")"
+            case .codex: return "Codex · \(config.codexModel ?? "GPT-5.4")"
+            case .apple: return "Apple · On-device"
+            }
         }
     }
 
-    static func run(
-        _ backend: ChatBackend, system: String, user: String,
-        cwd: String? = nil,
-        done: @escaping (String?) -> Void
-    ) {
-        switch backend {
-        case .agent(let agent):
-            spawnAgent(agent, system: system, user: user, cwd: cwd, done: done)
-        case .smart(let source):
-            askAI(source: source, system: system, user: user, done: done)
+    enum Backend: Equatable {
+        case none
+        case command(String)
+        case openai(base: String, key: String, model: String)
+        case codex(model: String?)
+        case claude(model: String?)
+        case foundation
+    }
+
+    /// Warm whichever CLI bridge the config resolves to, so its cold start
+    /// overlaps the user typing. No-op for HTTP/Apple/none.
+    static func prewarm(config: AppConfig) {
+        switch resolveBackend(config: config) {
+        case .claude(let model):
+            ClaudeBridge.shared.warmUp(system: systemPrompt, model: model)
+        case .codex(let model):
+            CodexAppServer.shared.warmUp(model: model ?? "gpt-5.4")
+        case .openai, .foundation, .command, .none:
+            break
         }
+    }
+
+    /// Pick a backend, honoring `ai-provider` (auto = Claude → Codex →
+    /// Apple → OpenAI → hint-command → none).
+    static func resolveBackend(
+        choice: AgentChoice,
+        config: AppConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Backend {
+        resolveBackend(
+            configuredProvider: choice == .auto ? config.aiProvider : choice.configuredProvider,
+            config: config, environment: environment)
+    }
+
+    static func resolveBackend(
+        config: AppConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Backend {
+        resolveBackend(
+            configuredProvider: config.aiProvider, config: config, environment: environment)
+    }
+
+    private static func resolveBackend(
+        configuredProvider: String, config: AppConfig, environment: [String: String]
+    ) -> Backend {
+        let pick = ProviderDiscovery.preferredProvider(
+            configured: configuredProvider, environment: environment)
+        switch pick {
+        case .codex: return .codex(model: config.codexModel)
+        case .claude: return .claude(model: config.claudeModel)
+        case .apple:
+            #if canImport(FoundationModels)
+            if #available(macOS 26.0, *), FoundationModelHinter.isAvailable {
+                return .foundation
+            }
+            #endif
+        case .none:
+            break
+        }
+        if let base = config.aiBaseURL, !base.isEmpty {
+            return .openai(base: base, key: config.aiKey ?? "",
+                           model: config.aiModel ?? "gpt-4o-mini")
+        }
+        if let cmd = config.hintCommand, !cmd.isEmpty { return .command(cmd) }
+        return .none
     }
 
     /// "SEARCH: keywords" as the entire reply → keywords, else nil.
@@ -679,39 +762,42 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Calls `done` on whatever thread the backend completes on; callers hop
     /// to main as needed.
     static func askAI(
-        source: HintEngine.SmartSource,
-        system: String, user: String,
+        backend: Backend,
+        system: String, user: String, cwd: String,
         done: @escaping (String?) -> Void
     ) {
-        switch source {
+        switch backend {
         case .none:
             done(nil)
         case .command(let cmd):
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-c", cmd]
-            let stdin = Pipe()
-            let stdout = Pipe()
-            p.standardInput = stdin
-            p.standardOutput = stdout
-            p.standardError = Pipe()
-            guard let _ = try? p.run() else { done(nil); return }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            proc.arguments = ["-c", cmd]
+            let stdin = Pipe(), stdout = Pipe()
+            proc.standardInput = stdin
+            proc.standardOutput = stdout
+            proc.standardError = Pipe()
+            guard (try? proc.run()) != nil else { done(nil); return }
             stdin.fileHandleForWriting.write(Data((system + "\n\n" + user).utf8))
             try? stdin.fileHandleForWriting.close()
             let data = stdout.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            guard p.terminationStatus == 0 else { done(nil); return }
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { done(nil); return }
             let text = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             done(text?.isEmpty == false ? text : nil)
         case .openai(let base, let key, let model):
             askOpenAI(base: base, key: key, model: model, system: system, user: user, done: done)
+        case .codex(let model):
+            askCodex(model: model, cwd: cwd, system: system, user: user, done: done)
+        case .claude(let model):
+            askClaude(model: model, system: system, user: user, done: done)
         case .foundation:
             #if canImport(FoundationModels)
             if #available(macOS 26.0, *) {
                 Task {
-                    let r = await PetAssistantFM.answer(system: system, user: user)
-                    done(r)
+                    let reply = await PetAssistantFM.answer(system: system, user: user)
+                    done(reply)
                 }
             } else { done(nil) }
             #else
@@ -720,70 +806,47 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
     }
 
-    /// Drive a detected coding-agent CLI non-interactively: prompt on stdin,
-    /// answer read from stdout (or codex's last-message file). stderr is
-    /// drained on a background read so verbose agent logs never deadlock the
-    /// pipe. A watchdog kills a run that exceeds `timeout`.
-    static func spawnAgent(
-        _ agent: DetectedAgent, system: String, user: String,
-        cwd: String? = nil,
-        timeout: TimeInterval = 90,
+    /// Codex CLI via the persistent `codex app-server` bridge. One-time cold
+    /// start, then warm turns. Tool calls run between Codex and infinitty-mcp.
+    private static func askCodex(
+        model: String?, cwd: String,
+        system: String, user: String,
         done: @escaping (String?) -> Void
     ) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: agent.path)
-        if let cwd, !cwd.isEmpty {
-            proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        let prompt = system + "\n\n" + user
+        DispatchQueue.global(qos: .userInitiated).async {
+            Task {
+                do {
+                    let reply = try await CodexAppServer.shared.turn(
+                        prompt: prompt, cwd: cwd, model: model ?? "gpt-5.4")
+                    done(reply.trimmingCharacters(in: .whitespacesAndNewlines))
+                } catch {
+                    PetLog.log("codex failed: \(error.localizedDescription)")
+                    done(nil)
+                }
+            }
         }
-        var lastMessageFile: String?
-        var args = AgentDetector.args(for: agent.kind, model: nil)
-        if agent.kind == .codex {
-            let tmp = NSTemporaryDirectory() + "infinitty-codex-\(UUID().uuidString).txt"
-            FileManager.default.createFile(atPath: tmp, contents: nil)
-            lastMessageFile = tmp
-            args += ["-o", tmp]
-        }
-        proc.arguments = args
+    }
 
-        let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-        proc.standardInput = stdin
-        proc.standardOutput = stdout
-        proc.standardError = stderr
-        // Drain stderr so a full pipe can't block the child.
-        stderr.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+    /// Claude Code CLI via the persistent stream-json bridge. Same warm-turn
+    /// shape as Codex; tools route through the injected infinitty-mcp config.
+    private static func askClaude(
+        model: String?,
+        system: String, user: String,
+        done: @escaping (String?) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            Task {
+                do {
+                    let reply = try await ClaudeBridge.shared.turn(
+                        prompt: user, system: system, model: model)
+                    done(reply.trimmingCharacters(in: .whitespacesAndNewlines))
+                } catch {
+                    PetLog.log("claude failed: \(error.localizedDescription)")
+                    done(nil)
+                }
+            }
         }
-
-        guard (try? proc.run()) != nil else {
-            if let lastMessageFile { try? FileManager.default.removeItem(atPath: lastMessageFile) }
-            done(nil)
-            return
-        }
-
-        let watchdog = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-
-        stdin.fileHandleForWriting.write(Data((system + "\n\n" + user).utf8))
-        try? stdin.fileHandleForWriting.close()
-        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        watchdog.cancel()
-        stderr.fileHandleForReading.readabilityHandler = nil
-
-        var answer: String?
-        if let lastMessageFile {
-            answer = try? String(contentsOfFile: lastMessageFile, encoding: .utf8)
-            try? FileManager.default.removeItem(atPath: lastMessageFile)
-        }
-        if answer == nil || answer?.isEmpty == true {
-            answer = String(data: stdoutData, encoding: .utf8)
-        }
-        let trimmed = answer?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard proc.terminationStatus == 0, let trimmed, !trimmed.isEmpty else {
-            done(nil)
-            return
-        }
-        done(trimmed)
     }
 
     private static func askOpenAI(
