@@ -51,6 +51,7 @@ final class SettingsWindowController: NSWindowController {
     private let hintsWarning = NSTextField(wrappingLabelWithString: "")
     private let lightsPopup = NSPopUpButton()
     private let petPopup = NSPopUpButton()
+    private var sidebarButtons: [NSButton] = []
     private let petModePopup = NSPopUpButton()
     private let petScaleSlider = NSSlider(value: 0.5, minValue: 0.2, maxValue: 1.2, target: nil, action: nil)
     private let petScaleValue = NSTextField(labelWithString: "")
@@ -62,7 +63,6 @@ final class SettingsWindowController: NSWindowController {
     private let selectionWell = NSColorWell()
     private let accentWell = NSColorWell()
     private var panels: [String: NSView] = [:]
-    private var switcher: NSSegmentedControl?
     private var panelHost: NSView?
 
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
@@ -158,12 +158,8 @@ final class SettingsWindowController: NSWindowController {
             item("Accent", accentWell),
         ])
         group.orientation = .horizontal
-        group.spacing = 20
-        let stack = NSStackView(views: [label(""), group])
-        stack.orientation = .horizontal
-        stack.spacing = 10
-        stack.alignment = .top
-        return stack
+        group.spacing = 14
+        return group
     }
 
     // MARK: build
@@ -305,31 +301,53 @@ final class SettingsWindowController: NSWindowController {
             ]),
         ]
 
-        // Icon switcher (segmented control with SF Symbols).
-        let switcher = NSSegmentedControl(
-            labels: ["Appearance", "Terminal", "Pet", "Agents", "About"],
-            trackingMode: .selectOne, target: self, action: #selector(panelSwitched(_:)))
+        // Left source list of panels (options down the side).
+        let names = ["Appearance", "Terminal", "Pet", "Agents", "About"]
         let icons = ["paintpalette", "terminal", "pawprint", "sparkles", "info.circle"]
-        for (i, name) in icons.enumerated() {
-            switcher.setImage(NSImage(systemSymbolName: name, accessibilityDescription: nil), forSegment: i)
-            switcher.setImageScaling(.scaleProportionallyDown, forSegment: i)
+        let sidebar = NSStackView()
+        sidebar.orientation = .vertical
+        sidebar.alignment = .leading
+        sidebar.spacing = 2
+        sidebar.edgeInsets = NSEdgeInsets(top: 14, left: 8, bottom: 14, right: 8)
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        sidebarButtons = names.enumerated().map { index, name in
+            let button = NSButton(title: "  \(name)", target: self, action: #selector(sidebarPicked(_:)))
+            button.tag = index
+            button.image = NSImage(systemSymbolName: icons[index], accessibilityDescription: name)
+            button.imagePosition = .imageLeading
+            button.alignment = .left
+            button.isBordered = false
+            button.bezelStyle = .inline
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 6
+            button.contentTintColor = .labelColor
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 150).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+            sidebar.addArrangedSubview(button)
+            return button
         }
-        switcher.segmentStyle = .texturedRounded
-        switcher.selectedSegment = 0
-        switcher.translatesAutoresizingMaskIntoConstraints = false
-        self.switcher = switcher
 
         let panelHost = NSView()
         panelHost.translatesAutoresizingMaskIntoConstraints = false
         self.panelHost = panelHost
 
-        let root = NSStackView(views: [switcher, NSBox.separatorLine(), panelHost, NSBox.separatorLine(), footer])
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+
+        let bodyRow = NSStackView(views: [sidebar, divider, panelHost])
+        bodyRow.orientation = .horizontal
+        bodyRow.alignment = .top
+        bodyRow.spacing = 0
+        bodyRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSStackView(views: [bodyRow, NSBox.separatorLine(), footer])
         root.orientation = .vertical
         root.alignment = .centerX
         root.spacing = 12
-        root.edgeInsets = NSEdgeInsets(top: 14, left: 0, bottom: 14, right: 0)
+        root.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 14, right: 0)
         root.translatesAutoresizingMaskIntoConstraints = false
-        root.setHuggingPriority(.defaultLow, for: .horizontal)
 
         let content = NSView()
         content.addSubview(root)
@@ -338,19 +356,28 @@ final class SettingsWindowController: NSWindowController {
             root.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             root.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            content.widthAnchor.constraint(equalToConstant: 480),
+            panelHost.widthAnchor.constraint(equalToConstant: 340),
+            panelHost.topAnchor.constraint(equalTo: bodyRow.topAnchor),
         ])
         window?.contentView = content
         showPanel("Appearance")
     }
 
-    @objc private func panelSwitched(_ sender: NSSegmentedControl) {
+    @objc private func sidebarPicked(_ sender: NSButton) {
         let names = ["Appearance", "Terminal", "Pet", "Agents", "About"]
-        showPanel(names[sender.selectedSegment])
+        showPanel(names[sender.tag])
     }
 
     private func showPanel(_ name: String) {
         guard let host = panelHost, let view = panels[name] else { return }
+        let names = ["Appearance", "Terminal", "Pet", "Agents", "About"]
+        for (index, button) in sidebarButtons.enumerated() {
+            let active = names[index] == name
+            button.layer?.backgroundColor = active
+                ? CodePalette.selectionAccent.withAlphaComponent(0.9).cgColor
+                : NSColor.clear.cgColor
+            button.contentTintColor = active ? .white : .labelColor
+        }
         host.subviews.forEach { $0.removeFromSuperview() }
         host.addSubview(view)
         NSLayoutConstraint.activate([
@@ -360,8 +387,8 @@ final class SettingsWindowController: NSWindowController {
             view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
         ])
         window?.layoutIfNeeded()
-        let target = view.fittingSize.height + 120
-        window?.setContentSize(NSSize(width: 480, height: max(target, 320)))
+        let target = max(view.fittingSize.height + 90, 340)
+        window?.setContentSize(NSSize(width: 560, height: target))
     }
 
     // MARK: populate & actions
@@ -398,6 +425,7 @@ final class SettingsWindowController: NSWindowController {
         bgWell.color = color(current.background, 0x0F1216)
         cursorWell.color = color(current.cursorColor, 0xAEB8C4)
         selectionWell.color = color(current.selectionBackground, 0x2F4368)
+        accentWell.color = color(current.accentColor, 0x6370EB)
         refreshValueLabels()
     }
 
@@ -438,7 +466,7 @@ final class SettingsWindowController: NSWindowController {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: path) {
             // Seed with the current settings so there's something to edit.
-            try? current.serialize().write(toFile: path, atomically: true, encoding: .utf8)
+            try? current.serializeTerminal().write(toFile: path, atomically: true, encoding: .utf8)
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
@@ -475,6 +503,7 @@ final class SettingsWindowController: NSWindowController {
         c.background = pack(bgWell)
         c.cursorColor = pack(cursorWell)
         c.selectionBackground = pack(selectionWell)
+        c.accentColor = pack(accentWell)
 
         current = c
         onSave(c)

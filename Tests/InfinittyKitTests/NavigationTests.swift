@@ -381,4 +381,34 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(chrome.body.frame.height, 400 - TerminalTabStripView.height, accuracy: 0.5)
     }
 
+    /// Pinned tabs render as compact fixed-width chips; unpinned tabs take the
+    /// remaining width.
+    func testTabStripPinnedTabsAreCompact() {
+        let strip = TerminalTabStripView(frame: NSRect(x: 0, y: 0, width: 600, height: 34))
+        let pin = TerminalTabStripView.Pin(icon: "pin.fill", color: .systemRed)
+        strip.update(titles: ["pinned", "normal", "normal2"], selectedIndex: 1, pins: [0: pin])
+        strip.layoutSubtreeIfNeeded()
+        let frames = strip.tabButtonFramesForTesting
+        XCTAssertEqual(frames.count, 3)
+        // The pinned tab (index 0) is narrower than an unpinned tab.
+        XCTAssertLessThan(frames[0].width, frames[1].width)
+        XCTAssertLessThanOrEqual(frames[0].width, 40)
+    }
+
+    /// Side-tabs mode lays the strip out as a left column and the body fills
+    /// the remaining width.
+    func testChromeSideTabsLeftColumn() {
+        let chrome = TerminalChromeView(frame: NSRect(x: 0, y: 0, width: 800, height: 400))
+        chrome.sideTabs = true
+        chrome.showsStrip = true
+        chrome.layoutSubtreeIfNeeded()
+        // Strip is a full-height left column, not a top row.
+        XCTAssertEqual(chrome.strip.frame.height, 400, accuracy: 0.5)
+        XCTAssertEqual(chrome.strip.frame.minX, 0, accuracy: 0.5)
+        XCTAssertEqual(chrome.strip.frame.width, TerminalChromeView.sideWidth, accuracy: 0.5)
+        // Body sits to the right of the strip.
+        XCTAssertEqual(chrome.body.frame.minX, TerminalChromeView.sideWidth, accuracy: 0.5)
+        XCTAssertEqual(chrome.body.frame.width, 800 - TerminalChromeView.sideWidth, accuracy: 0.5)
+    }
+
 }

@@ -76,6 +76,7 @@ struct AppConfig {
     /// control tools. Off by default because it touches the user's dotfiles.
     var mcpAutoRegister = false
     var agentGlow = true // pulsing inner glow while an agent drives the pane
+    var sideTabs = false // tabs as a left column instead of a top row
     var sourcePath: String? // config file in use (for live reload)
 
     var atlasKey: String {
@@ -106,6 +107,13 @@ struct AppConfig {
                 c.sourcePath = expanded
                 break
             }
+        }
+        // App/behaviour settings live in a separate file so the terminal conf
+        // stays purely about the terminal's appearance. Applied AFTER the
+        // terminal conf; additive parser means keys here win if duplicated.
+        let settingsExpanded = NSString(string: Self.appSettingsPath).expandingTildeInPath
+        if let text = try? String(contentsOfFile: settingsExpanded, encoding: .utf8) {
+            c.apply(fileContents: text)
         }
 
         func envValue(_ key: String) -> String? {
@@ -264,6 +272,8 @@ struct AppConfig {
                 mcpAutoRegister = AppConfig.parseBool(value)
             case "agent-glow":
                 agentGlow = AppConfig.parseBool(value)
+            case "side-tabs":
+                sideTabs = AppConfig.parseBool(value)
             default:
                 break // unknown keys (themes, cursor styles, ...) ignored
             }
@@ -318,11 +328,17 @@ struct AppConfig {
         return (1.0, CGFloat(pts))
     }
 
-    /// Serialize for the Settings window. Regenerates the whole file.
-    func serialize() -> String {
-        func hex(_ c: UInt32) -> String { String(format: "#%06X", c) }
-        var out = "# infinitty configuration — written by infinitty Settings (⌘,)\n"
-        out += "# Edits apply live. See infinitty.conf.example for all keys.\n\n"
+    /// Default path for the separate app/behaviour settings file.
+    static let appSettingsPath = "~/.config/infinitty/settings.conf"
+
+    private static func hex(_ c: UInt32) -> String { String(format: "#%06X", c) }
+
+    /// Terminal-appearance config (written to infinitty.conf): fonts, spacing,
+    /// window backing, and colors — everything that defines how the terminal
+    /// itself looks.
+    func serializeTerminal() -> String {
+        var out = "# infinitty terminal configuration — written by infinitty Settings (⌘,)\n"
+        out += "# Terminal appearance only. App/behaviour settings live in settings.conf.\n\n"
         if let f = fontName { out += "font = \(f)\n" }
         if let s = fontStyle, !s.isEmpty { out += "font-style = \(s)\n" }
         out += "font-size = \(Double(fontSize))\n"
@@ -333,25 +349,35 @@ struct AppConfig {
         if backgroundOpacity < 1 { out += "background-opacity = \(Double(backgroundOpacity))\n" }
         if backgroundBlur { out += "background-blur = true\n" }
         out += "traffic-lights = \(trafficLights)\n"
+        if let c = foreground { out += "foreground = \(Self.hex(c))\n" }
+        if let c = background { out += "background = \(Self.hex(c))\n" }
+        if let c = cursorColor { out += "cursor-color = \(Self.hex(c))\n" }
+        if let c = selectionBackground { out += "selection-background = \(Self.hex(c))\n" }
+        if let c = accentColor { out += "accent-color = \(Self.hex(c))\n" }
+        for (index, color) in palette.sorted(by: { $0.key < $1.key }) {
+            out += "palette = \(index)=\(Self.hex(color))\n"
+        }
+        return out
+    }
+
+    /// App/behaviour config (written to settings.conf): pet, agents, hints,
+    /// AI providers, quick terminal, notch — everything that isn't the
+    /// terminal's own appearance.
+    func serializeApp() -> String {
+        var out = "# infinitty app settings — written by infinitty Settings (⌘,)\n"
+        out += "# Pet, agents, AI, quick terminal, notch. Terminal appearance is in infinitty.conf.\n\n"
         if let p = pet, !p.isEmpty {
             out += "pet = \(p)\n"
             out += "pet-scale = \(Double(petScale))\n"
             if petMode != "window" { out += "pet-mode = pane\n" }
         } else {
-            // The built-in pet is enabled by default, so an explicit opt-out
-            // must survive Settings rewrites and subsequent launches.
             out += "pet = none\n"
         }
         if !agentGlow { out += "agent-glow = false\n" }
-        // Settings rewrites the managed config. Do not perpetuate a malformed
-        // shortcut that can never be registered; valid-but-currently-busy
-        // shortcuts still serialize because registration availability is
-        // transient.
+        if sideTabs { out += "side-tabs = true\n" }
         if let key = quickTerminalKey, GlobalHotKeySpec.parse(key) != nil {
             out += "quick-terminal-key = \(key)\n"
         }
-        // The remaining quick-terminal settings also govern menu/socket
-        // toggles, so they persist independently of the hot key.
         if quickTerminalScreen != .main {
             out += "quick-terminal-screen = \(quickTerminalScreen.rawValue)\n"
         }
@@ -374,21 +400,32 @@ struct AppConfig {
             out += "notch = true\n"
             if notchDisplay != "builtin" { out += "notch-display = \(notchDisplay)\n" }
         }
-        if let c = foreground { out += "foreground = \(hex(c))\n" }
-        if let c = background { out += "background = \(hex(c))\n" }
-        if let c = cursorColor { out += "cursor-color = \(hex(c))\n" }
-        if let c = selectionBackground { out += "selection-background = \(hex(c))\n" }
-        if let c = accentColor { out += "accent-color = \(hex(c))\n" }
-        for (index, color) in palette.sorted(by: { $0.key < $1.key }) {
-            out += "palette = \(index)=\(hex(color))\n"
-        }
         return out
     }
 
-    /// The path the Settings window writes to (the loaded file, or the
-    /// default location when no config exists yet).
+    /// The path the Settings window writes terminal config to (the loaded
+    /// file, or the default location when no config exists yet).
     var writePath: String {
         sourcePath ?? NSString(string: "~/.config/infinitty/infinitty.conf").expandingTildeInPath
+    }
+
+    /// Write both config files (terminal appearance + app settings).
+    func saveAll() throws {
+        let terminalPath = writePath
+        let appPath = NSString(string: Self.appSettingsPath).expandingTildeInPath
+        for path in [terminalPath, appPath] {
+            let dir = (path as NSString).deletingLastPathComponent
+            try? FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true)
+        }
+        try serializeTerminal().write(toFile: terminalPath, atomically: true, encoding: .utf8)
+        try serializeApp().write(toFile: appPath, atomically: true, encoding: .utf8)
+    }
+
+    /// Legacy single-file serialize (terminal + app combined) — kept for any
+    /// caller expecting one blob; new code should use saveAll().
+    func serialize() -> String {
+        serializeTerminal() + "\n" + serializeApp()
     }
 
     private mutating func clamp() {

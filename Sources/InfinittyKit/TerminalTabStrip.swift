@@ -20,8 +20,14 @@ final class TerminalTabStripView: NSView {
     var onNewTab: (() -> Void)?
     var onRenameCommit: ((String) -> Void)?
     var onRenameCancel: (() -> Void)?
+    /// Reorder the tab from `from` to `to` (drag within the strip).
+    var onReorder: ((Int, Int) -> Void)?
+    /// Tear the tab at `index` out into its own new window (drag out).
+    var onTearOut: ((Int) -> Void)?
 
     static let height: CGFloat = 34
+    /// Vertical column layout (side tabs) instead of a horizontal row.
+    var vertical = false { didSet { needsLayout = true } }
     private static var accent: NSColor { CodePalette.selectionAccent }
 
     private var titles: [String] = []
@@ -34,6 +40,9 @@ final class TerminalTabStripView: NSView {
     private var renamingIndex: Int?
     private weak var renameEditor: TabRenameTextView?
     private var endingRename = false
+    private var dragIndex: Int?
+    private var dragStart = NSPoint.zero
+    private var dragMoved = false
 
     var isRenaming: Bool { renameEditor != nil }
 
@@ -69,9 +78,21 @@ final class TerminalTabStripView: NSView {
     var tabButtonFramesForTesting: [NSRect] { tabButtons.map { $0.frame } }
     var addButtonFrameForTesting: NSRect { addButton.frame }
 
-    /// Rebuild the strip from the tab group's window titles + selection.
-    func update(titles: [String], selectedIndex: Int) {
+    /// Pin metadata for a tab: a compact SF-symbol icon + accent color shown
+    /// instead of the title. Pinned tabs render first, icon-only, fixed width.
+    struct Pin: Equatable {
+        var icon: String
+        var color: NSColor
+    }
+    /// Pin state keyed by tab index (from the last update()).
+    private var pins: [Int: Pin] = [:]
+    /// Right-click a tab to pin/unpin or restyle.
+    var onContextMenu: ((Int, NSButton) -> Void)?
+
+    /// Rebuild the strip from the tab group's titles + selection + pins.
+    func update(titles: [String], selectedIndex: Int, pins: [Int: Pin] = [:]) {
         self.selectedIndex = selectedIndex
+        self.pins = pins
         if titles.count != self.titles.count {
             // Structure changed mid-rename: positional target is now ambiguous.
             if renameEditor != nil { finishRename(committing: false) }
@@ -81,16 +102,24 @@ final class TerminalTabStripView: NSView {
         for (index, title) in titles.enumerated() {
             let button = tabButtons[index]
             let active = index == selectedIndex
-            button.title = title
-            button.font = .systemFont(ofSize: 12, weight: active ? .semibold : .regular)
-            button.contentTintColor = active ? .white : .secondaryLabelColor
-            button.layer?.backgroundColor = active
-                ? Self.accent.cgColor
-                : NSColor.clear.cgColor
+            let pin = pins[index]
+            if let pin {
+                button.title = ""
+                button.image = NSImage(systemSymbolName: pin.icon, accessibilityDescription: title)
+                button.imagePosition = .imageOnly
+                button.contentTintColor = .white
+                button.layer?.backgroundColor = pin.color.cgColor
+            } else {
+                button.image = nil
+                button.title = title
+                button.imagePosition = .noImage
+                button.font = .systemFont(ofSize: 12, weight: active ? .semibold : .regular)
+                button.contentTintColor = active ? .white : .secondaryLabelColor
+                button.layer?.backgroundColor = active ? Self.accent.cgColor : NSColor.clear.cgColor
+            }
             button.toolTip = title
-            closeButtons[index].isHidden = !active || renamingIndex != nil
-            closeButtons[index].contentTintColor = active
-                ? .white : .secondaryLabelColor
+            closeButtons[index].isHidden = pin != nil || !active || renamingIndex != nil
+            closeButtons[index].contentTintColor = active ? .white : .secondaryLabelColor
         }
         if let renamingIndex, tabButtons.indices.contains(renamingIndex) {
             tabButtons[renamingIndex].isHidden = true
@@ -103,7 +132,8 @@ final class TerminalTabStripView: NSView {
         tabButtons.forEach { $0.removeFromSuperview() }
         closeButtons.forEach { $0.removeFromSuperview() }
         tabButtons = (0..<count).map { index in
-            let button = NSButton(title: "", target: self, action: #selector(tabPressed(_:)))
+            let button = DraggableTabButton(title: "", target: nil, action: nil)
+            button.strip = self
             button.tag = index
             button.isBordered = false
             button.alignment = .center
@@ -130,28 +160,63 @@ final class TerminalTabStripView: NSView {
 
     override func layout() {
         super.layout()
-        hairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
         let pad: CGFloat = 6
         let addSize: CGFloat = 28
+        if vertical {
+            hairline.frame = NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height)
+            addButton.frame = NSRect(
+                x: (bounds.width - addSize) / 2, y: bounds.maxY - addSize - pad,
+                width: addSize, height: addSize)
+            guard !tabButtons.isEmpty else { return }
+            let rowH: CGFloat = 30
+            for (index, button) in tabButtons.enumerated() {
+                let frame = NSRect(
+                    x: pad, y: bounds.maxY - pad - CGFloat(index + 1) * (rowH + 4) + 4,
+                    width: bounds.width - pad * 2, height: rowH)
+                button.frame = frame
+                button.alignment = .left
+                closeButtons[index].frame = NSRect(
+                    x: frame.maxX - 22, y: frame.minY + (rowH - 20) / 2,
+                    width: 20, height: 20)
+            }
+            if let renamingIndex, tabButtons.indices.contains(renamingIndex), let renameEditor {
+                renameEditor.frame = tabButtons[renamingIndex].frame.insetBy(dx: 8, dy: 5)
+            }
+            return
+        }
+        hairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
         addButton.frame = NSRect(
             x: bounds.maxX - addSize - pad, y: (bounds.height - addSize) / 2,
             width: addSize, height: addSize)
         guard !tabButtons.isEmpty else { return }
         let available = max(addButton.frame.minX - pad, 1)
-        // Tabs fill the available terminal width evenly (no dead space).
-        let tabWidth = min(220, max(available / CGFloat(tabButtons.count) - pad, 1))
+        let pinWidth: CGFloat = 34
+        let pinnedCount = pins.count
+        let unpinnedCount = max(tabButtons.count - pinnedCount, 0)
+        let usedByPins = CGFloat(pinnedCount) * (pinWidth + pad)
+        let remaining = max(available - usedByPins, 1)
+        let tabWidth = unpinnedCount > 0
+            ? min(220, max(remaining / CGFloat(unpinnedCount) - pad, 1))
+            : 1
         let tabHeight = bounds.height - 8
+        var xPos = pad
         for (index, button) in tabButtons.enumerated() {
-            let frame = NSRect(
-                x: pad + CGFloat(index) * (tabWidth + pad), y: 4,
-                width: tabWidth, height: tabHeight)
+            let isPinned = pins[index] != nil
+            let width = isPinned ? pinWidth : tabWidth
+            button.alignment = isPinned ? .center : .center
+            let frame = NSRect(x: xPos, y: 4, width: width, height: tabHeight)
             button.frame = frame
             closeButtons[index].frame = NSRect(
                 x: frame.maxX - 22, y: frame.minY, width: 20, height: frame.height)
+            xPos += width + pad
         }
         if let renamingIndex, tabButtons.indices.contains(renamingIndex), let renameEditor {
             renameEditor.frame = tabButtons[renamingIndex].frame.insetBy(dx: 8, dy: 5)
         }
+    }
+
+    func showTabContextMenu(index: Int, button: NSButton) {
+        onContextMenu?(index, button)
     }
 
     @objc private func tabPressed(_ sender: NSButton) {
@@ -235,6 +300,74 @@ final class TerminalTabStripView: NSView {
     }
 }
 
+extension TerminalTabStripView {
+    /// Handle a press-drag-release cycle originating on the tab button at
+    /// `index`. Reorders within the strip when dragged horizontally; tears the
+    /// tab out into a new window when dragged vertically beyond the strip.
+    func handleTabDrag(index: Int, startEvent: NSEvent) {
+        guard let window else { return }
+        let startInWindow = startEvent.locationInWindow
+        var moved = false
+        var currentIndex = index
+        var tornOut = false
+
+        trackingLoop: while true {
+            guard let event = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp])
+            else { break }
+            switch event.type {
+            case .leftMouseDragged:
+                let now = event.locationInWindow
+                let dx = now.x - startInWindow.x
+                let dy = now.y - startInWindow.y
+                if abs(dx) > 4 || abs(dy) > 4 { moved = true }
+                // Vertical drag beyond the strip height → tear out.
+                if abs(dy) > Self.height + 12 {
+                    tornOut = true
+                    break trackingLoop
+                }
+                // Horizontal reorder: find the tab slot under the cursor.
+                let localX = convert(now, from: nil).x
+                if let target = tabIndex(atX: localX), target != currentIndex {
+                    onReorder?(currentIndex, target)
+                    currentIndex = target
+                }
+            case .leftMouseUp:
+                break trackingLoop
+            default:
+                break
+            }
+        }
+        if tornOut {
+            onTearOut?(currentIndex)
+        } else if !moved {
+            // A plain click (no drag) still selects / renames.
+            let clicks = startEvent.clickCount
+            if clicks >= 2 { onRename?(currentIndex) } else { onSelect?(currentIndex) }
+        }
+    }
+
+    private func tabIndex(atX x: CGFloat) -> Int? {
+        for (index, button) in tabButtons.enumerated() where !button.isHidden {
+            if x >= button.frame.minX && x <= button.frame.maxX { return index }
+        }
+        return nil
+    }
+}
+
+/// Tab button that hands its full press-drag-release cycle to the strip so
+/// drags reorder / tear out instead of just clicking.
+final class DraggableTabButton: NSButton {
+    weak var strip: TerminalTabStripView?
+
+    override func mouseDown(with event: NSEvent) {
+        strip?.handleTabDrag(index: tag, startEvent: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        strip?.showTabContextMenu(index: tag, button: self)
+    }
+}
+
 /// Terminal-column chrome: the custom tab strip stacked above the terminal
 /// body. The window's content is this view (or a sidebar split wrapping it),
 /// so the strip never extends across the code-view sidebar.
@@ -244,6 +377,12 @@ final class TerminalChromeView: NSView {
     /// When false (single tab), the strip is hidden and the body fills the
     /// whole chrome — matching macOS's "no tab bar for one tab" behaviour.
     var showsStrip = false { didSet { needsLayout = true; strip.isHidden = !showsStrip } }
+    /// When true the strip is a vertical column on the LEFT instead of a row
+    /// on top (config: side-tabs).
+    var sideTabs = false {
+        didSet { strip.vertical = sideTabs; needsLayout = true }
+    }
+    static let sideWidth: CGFloat = 150
 
     private let stripBlur = NSVisualEffectView()
 
@@ -276,14 +415,19 @@ final class TerminalChromeView: NSView {
 
     override func layout() {
         super.layout()
-        let stripH = showsStrip ? min(TerminalTabStripView.height, bounds.height) : 0
-        strip.frame = NSRect(
-            x: 0, y: bounds.height - stripH, width: bounds.width, height: stripH)
-        stripBlur.frame = strip.frame
-        body.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripH)
-        // Terminal (or its blur wrapper) fills the body explicitly — relying on
-        // autoresizing from a zero-sized base at addSubview time misplaced the
-        // metal layer.
+        if sideTabs {
+            let stripW = showsStrip ? min(Self.sideWidth, bounds.width) : 0
+            strip.frame = NSRect(x: 0, y: 0, width: stripW, height: bounds.height)
+            stripBlur.frame = strip.frame
+            body.frame = NSRect(
+                x: stripW, y: 0, width: bounds.width - stripW, height: bounds.height)
+        } else {
+            let stripH = showsStrip ? min(TerminalTabStripView.height, bounds.height) : 0
+            strip.frame = NSRect(
+                x: 0, y: bounds.height - stripH, width: bounds.width, height: stripH)
+            stripBlur.frame = strip.frame
+            body.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripH)
+        }
         for sub in body.subviews { sub.frame = body.bounds }
     }
 }

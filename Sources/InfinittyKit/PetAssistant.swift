@@ -142,7 +142,7 @@ final class PetAssistantPanelView: NSView {
     private let presentation: Presentation
     private let config: AppConfig
     private let glassBackground = NSVisualEffectView()
-    var onSubmit: ((String, String) -> Void)?
+    var onSubmit: ((String, String, String) -> Void)?
     /// Concrete model choices for the composer picker, injected at init so
     /// UI construction stays machine-independent and testable.
     private let choices: [PetAssistant.AgentChoice]
@@ -355,6 +355,9 @@ final class PetAssistantPanelView: NSView {
         modelPicker.selectedItem?.representedObject as? PetAssistant.AgentChoice ?? .auto
     }
 
+    /// The composer's selected reasoning effort (Auto/Low/Medium/High).
+    var selectedEffort: String { effortPicker.titleOfSelectedItem ?? "Auto" }
+
     /// Provider glyph for a picker row: the real models.dev brand logo
     /// (bundled SVG, tinted as a template) for Claude/Codex/Apple, or the
     /// SF Symbol for Auto / when an asset is missing.
@@ -551,7 +554,7 @@ final class PetAssistantPanelView: NSView {
         let request = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty else { return }
         input.string = ""
-        onSubmit?(request, selectedChoice.displayName)
+        onSubmit?(request, selectedChoice.displayName, selectedEffort)
     }
 
     @objc private func sendTapped(_ sender: Any?) { submit() }
@@ -711,8 +714,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             choices: availableChoices)
         panel.setMessages(sidebarMessages)
         panel.setHasFiles(!lastFiles.isEmpty)
-        panel.onSubmit = { [weak self] request, model in
-            self?.submitFromPanel(request, model: model)
+        panel.onSubmit = { [weak self] request, model, effort in
+            self?.submitFromPanel(request, model: model, effort: effort)
         }
         panel.onShowFiles = { [weak self] in
             guard let self, !self.lastFiles.isEmpty else { return }
@@ -741,11 +744,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             panel.setThinking(thinking)
         }
     }
-    private func submitFromPanel(_ request: String, model: String) {
+
+    private func submitFromPanel(_ request: String, model: String, effort: String = "Auto") {
         sidebarMessages.append((role: "You", text: request))
         updatePanels()
         setPanelsThinking(true)
-        ask(request, model: model) { [weak self] answer, _, _ in
+        ask(request, model: model, effort: effort) { [weak self] answer, _, _ in
             guard let self else { return }
             self.sidebarMessages.append((role: "Assistant", text: answer))
             self.updatePanels()
@@ -831,6 +835,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     private func ask(
         _ request: String, model: String = "Auto · Best available",
+        effort: String = "Auto",
         completion: AskCompletion? = nil
     ) {
         guard let session else {
@@ -839,6 +844,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
         session.petAnimator?.startThinking()
         let backend = resolveBackend(forSelectedTitle: model)
+        let system = Self.systemPrompt + Self.effortDirective(effort)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -852,7 +858,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             let user = context + "\n--- user request ---\n" + request
             let runCwd = cwd ?? NSHomeDirectory()
 
-            Self.askAI(backend: backend, system: Self.systemPrompt, user: user, cwd: runCwd) { reply in
+            Self.askAI(backend: backend, system: system, user: user, cwd: runCwd) { reply in
                 if let query = Self.parseSearchDirective(reply), let cwd {
                     let all = CodeSearch.listFilesSync(root: cwd)
                     let matches = CodeSearch.filter(all, query: query, limit: 50)
@@ -861,7 +867,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                     let followUp = context
                         + "\n--- files matching \"\(query)\" ---\n" + fileBlock
                         + "\n--- user request ---\n" + request
-                    Self.askAI(backend: backend, system: Self.systemPrompt, user: followUp, cwd: runCwd) { final in
+                    Self.askAI(backend: backend, system: system, user: followUp, cwd: runCwd) { final in
                         self.finish(
                             answer: final ?? "…", files: matches, query: query,
                             completion: completion)
@@ -874,6 +880,21 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                         files: [], query: nil, completion: completion)
                 }
             }
+        }
+    }
+
+    /// Reasoning-effort directive appended to the system prompt. "Auto" adds
+    /// nothing (let the model/backend decide); the rest steer depth.
+    private static func effortDirective(_ effort: String) -> String {
+        switch effort.lowercased() {
+        case "low":
+            return "\n\nReasoning effort: LOW. Be fast and direct; minimal deliberation."
+        case "medium":
+            return "\n\nReasoning effort: MEDIUM. Balance speed and thoroughness."
+        case "high":
+            return "\n\nReasoning effort: HIGH. Think carefully and verify before acting."
+        default:
+            return ""
         }
     }
 

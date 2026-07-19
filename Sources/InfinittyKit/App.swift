@@ -234,11 +234,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if settings == nil {
             settings = SettingsWindowController(config: config) { [weak self] newConfig in
                 guard let self else { return }
-                let path = newConfig.writePath
-                let dir = (path as NSString).deletingLastPathComponent
-                try? FileManager.default.createDirectory(
-                    atPath: dir, withIntermediateDirectories: true)
-                try? newConfig.serialize().write(toFile: path, atomically: true, encoding: .utf8)
+                try? newConfig.saveAll() // writes infinitty.conf + settings.conf
                 self.reloadConfig() // instant apply; also re-arms the watcher
             }
         }
@@ -604,6 +600,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private var titleOverrides: [ObjectIdentifier: String] = [:]
+    /// Per-window pin metadata (icon + color). Pinned tabs render as compact
+    /// colored icon chips. Keyed by window identity like titleOverrides.
+    private var tabPins: [ObjectIdentifier: TerminalTabStripView.Pin] = [:]
     private var tabIconAccessories: [ObjectIdentifier: TabIconAccessory] = [:]
 
     /// Tab/window title: custom name if renamed, else the focused pane's
@@ -880,6 +879,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             // over the terminal column only, so the sidebar owns its column.
             let chrome = TerminalChromeView(frame: NSRect(origin: .zero, size: contentSize))
             chrome.autoresizingMask = [.width, .height]
+            chrome.sideTabs = config.sideTabs
             chrome.body.addSubview(config.backgroundBlur
                 ? wrapInBackgroundBlur(session.view)
                 : session.view)
@@ -1186,8 +1186,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         for (index, tabWin) in tabs.enumerated() {
             tabWin.hideNativeTabBar()
             guard let chrome = terminalChromes[ObjectIdentifier(tabWin)] else { continue }
+            var pins: [Int: TerminalTabStripView.Pin] = [:]
+            for (i, w) in tabs.enumerated() where tabPins[ObjectIdentifier(w)] != nil {
+                pins[i] = tabPins[ObjectIdentifier(w)]
+            }
+            chrome.sideTabs = config.sideTabs
             chrome.showsStrip = tabs.count > 1
-            chrome.strip.update(titles: titles, selectedIndex: index)
+            chrome.strip.update(titles: titles, selectedIndex: index, pins: pins)
         }
     }
 
@@ -1234,6 +1239,98 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let self, let win else { return }
             self.refocusTerminal(in: win)
         }
+        chrome.strip.onReorder = { [weak self, weak win] from, to in
+            guard let self, let win, let tabs = win.tabbedWindows,
+                  tabs.indices.contains(from), tabs.indices.contains(to),
+                  from != to else { return }
+            let moving = tabs[from]
+            let anchor = tabs[to]
+            // Reposition within the native group: re-add the moving window
+            // before/after the anchor depending on drag direction.
+            moving.tabGroup?.removeWindow(moving)
+            anchor.addTabbedWindow(moving, ordered: from < to ? .above : .below)
+            win.tabGroup?.selectedWindow = moving
+            self.refreshTabStrips(in: win)
+        }
+        chrome.strip.onTearOut = { [weak self, weak win] index in
+            guard let self, let win, let tabs = win.tabbedWindows,
+                  tabs.count > 1, tabs.indices.contains(index) else { return }
+            let torn = tabs[index]
+            torn.tabGroup?.removeWindow(torn)
+            torn.makeKeyAndOrderFront(nil)
+            var frame = torn.frame
+            frame.origin.x += 40
+            frame.origin.y -= 40
+            torn.setFrame(frame, display: true)
+            self.refreshTabStrips(in: win)
+            self.refreshTabStrips(in: torn)
+            self.refocusTerminal(in: torn)
+        }
+        chrome.strip.onContextMenu = { [weak self, weak win] index, button in
+            guard let self, let win, let tabs = win.tabbedWindows,
+                  tabs.indices.contains(index) else { return }
+            self.showTabPinMenu(for: tabs[index], anchor: button, host: win)
+        }
+    }
+
+    /// Context menu for a tab: pin/unpin and pick a pin color.
+    private func showTabPinMenu(for tabWin: NSWindow, anchor: NSView, host: NSWindow) {
+        let id = ObjectIdentifier(tabWin)
+        let menu = NSMenu()
+        if tabPins[id] == nil {
+            let pin = menu.addItem(withTitle: "Pin Tab", action: #selector(pinTabAction(_:)), keyEquivalent: "")
+            pin.target = self
+            pin.representedObject = tabWin
+        } else {
+            let unpin = menu.addItem(withTitle: "Unpin Tab", action: #selector(unpinTabAction(_:)), keyEquivalent: "")
+            unpin.target = self
+            unpin.representedObject = tabWin
+            menu.addItem(.separator())
+            let colors: [(String, NSColor)] = [
+                ("Indigo", CodePalette.selectionAccent),
+                ("Red", .systemRed), ("Orange", .systemOrange),
+                ("Green", .systemGreen), ("Blue", .systemBlue),
+                ("Purple", .systemPurple), ("Gray", .systemGray),
+            ]
+            for (name, color) in colors {
+                let item = menu.addItem(withTitle: name, action: #selector(setPinColorAction(_:)), keyEquivalent: "")
+                item.target = self
+                let swatch = NSImage(size: NSSize(width: 12, height: 12))
+                swatch.lockFocus()
+                color.setFill()
+                NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 12, height: 12), xRadius: 3, yRadius: 3).fill()
+                swatch.unlockFocus()
+                item.image = swatch
+                item.representedObject = TabPinColorChoice(window: tabWin, color: color)
+            }
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+    }
+
+    private final class TabPinColorChoice: NSObject {
+        let window: NSWindow
+        let color: NSColor
+        init(window: NSWindow, color: NSColor) { self.window = window; self.color = color }
+    }
+
+    @objc private func pinTabAction(_ sender: NSMenuItem) {
+        guard let win = sender.representedObject as? NSWindow else { return }
+        tabPins[ObjectIdentifier(win)] = TerminalTabStripView.Pin(
+            icon: "pin.fill", color: CodePalette.selectionAccent)
+        refreshTabStrips(in: win)
+    }
+
+    @objc private func unpinTabAction(_ sender: NSMenuItem) {
+        guard let win = sender.representedObject as? NSWindow else { return }
+        tabPins.removeValue(forKey: ObjectIdentifier(win))
+        refreshTabStrips(in: win)
+    }
+
+    @objc private func setPinColorAction(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? TabPinColorChoice else { return }
+        tabPins[ObjectIdentifier(choice.window)] = TerminalTabStripView.Pin(
+            icon: "pin.fill", color: choice.color)
+        refreshTabStrips(in: choice.window)
     }
 
     /// Begin an inline rename in the window's own custom strip.
