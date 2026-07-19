@@ -45,4 +45,20 @@ extension NSWindow {
         }
         return nil
     }
+
+    /// Hide the native window tab bar while keeping the tab group fully
+    /// functional. The tab bar is an NSTitlebarAccessoryViewController AppKit
+    /// attaches when tabbing is active; hiding it sticks across tab add/remove
+    /// /select (verified), unlike resizing the private NSTabBar. We render our
+    /// own TerminalTabStripView inside the content instead. Safe no-op if the
+    /// private view layout changes in a future macOS.
+    func hideNativeTabBar() {
+        for accessory in titlebarAccessoryViewControllers where !accessory.isHidden {
+            if accessory.view.nativeTabDescendants(withClassName: "NSTabBar").isEmpty,
+               String(describing: type(of: accessory.view)) != "NSTabBar" {
+                continue
+            }
+            accessory.isHidden = true
+        }
+    }
 }

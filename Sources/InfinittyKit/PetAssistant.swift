@@ -25,6 +25,112 @@ import AppKit
 import FoundationModels
 #endif
 
+/// A top-anchored document view so stacked chat bubbles fill from the top and
+/// the scroll view pins new messages at the bottom naturally.
+final class FlippedClipDocument: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// One chat message row spanning the full transcript width. User turns show a
+/// right-aligned rounded accent bubble (≤78% width); assistant turns render as
+/// full-width flowing text on the transparent surface — the ChatGPT/Stream
+/// layout convention.
+final class ChatMessageView: NSView {
+    static let accent = NSColor(calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1)
+
+    init(role: String, text: String) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        let isUser = role.caseInsensitiveCompare("You") == .orderedSame
+
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.isSelectable = true
+        label.isEditable = false
+        label.drawsBackground = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
+
+        if isUser {
+            let bubble = NSView()
+            bubble.wantsLayer = true
+            bubble.layer?.backgroundColor = Self.accent.cgColor
+            bubble.layer?.cornerRadius = 13
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            label.textColor = .white
+            bubble.addSubview(label)
+            addSubview(bubble)
+            NSLayoutConstraint.activate([
+                label.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 7),
+                label.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -7),
+                label.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 12),
+                label.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -12),
+                bubble.topAnchor.constraint(equalTo: topAnchor),
+                bubble.bottomAnchor.constraint(equalTo: bottomAnchor),
+                bubble.trailingAnchor.constraint(equalTo: trailingAnchor),
+                bubble.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 44),
+                bubble.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.78),
+            ])
+        } else {
+            label.textColor = NSColor(white: 0.92, alpha: 1)
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                label.topAnchor.constraint(equalTo: topAnchor),
+                label.bottomAnchor.constraint(equalTo: bottomAnchor),
+                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+                label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            ])
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// Animated "Thinking" row shown while the assistant generates — three pulsing
+/// dots, matching the Stream AITypingIndicator pattern.
+final class ChatTypingIndicator: NSView {
+    private let dots = (0..<3).map { _ -> NSView in
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.backgroundColor = NSColor(white: 0.6, alpha: 1).cgColor
+        dot.layer?.cornerRadius = 3
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        return dot
+    }
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        let row = NSStackView(views: dots)
+        row.orientation = .horizontal
+        row.spacing = 5
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ] + dots.flatMap { [
+            $0.widthAnchor.constraint(equalToConstant: 6),
+            $0.heightAnchor.constraint(equalToConstant: 6),
+        ] })
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func startAnimating() {
+        for (index, dot) in dots.enumerated() {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.3
+            pulse.toValue = 1.0
+            pulse.duration = 0.6
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.beginTime = CACurrentMediaTime() + Double(index) * 0.2
+            dot.layer?.add(pulse, forKey: "pulse")
+        }
+    }
+}
+
 /// Full-height presentation of the pet assistant for the sidebar CHAT page.
 /// It owns its own AppKit views while sharing the assistant's request state.
 final class PetAssistantPanelView: NSView {
@@ -47,11 +153,12 @@ final class PetAssistantPanelView: NSView {
     private let newChatButton = NSButton(title: "New", target: nil, action: nil)
     private let closeButton = NSButton()
     private let separator = NSView()
-    private let transcript = NSTextView()
+    private let transcriptStack = NSStackView()
     private let transcriptScroll = NSScrollView()
     private let emptyStateLabel = NSTextField(
         labelWithString: "Choose an agent, ask a question, and keep chatting here.")
     private let modelPicker = NSPopUpButton()
+    private let effortPicker = NSPopUpButton()
     private let inputContainer = NSView()
     private let inputScroll = NSScrollView()
     private let input = TabRenameTextView()
@@ -92,10 +199,9 @@ final class PetAssistantPanelView: NSView {
             glassBackground.layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
             glassBackground.layer?.masksToBounds = true
         } else {
-            layer?.backgroundColor = NSColor(
-                calibratedRed: 0.105, green: 0.11, blue: 0.145, alpha: 1).cgColor
-            layer?.borderWidth = 1
-            layer?.borderColor = NSColor(white: 1, alpha: 0.10).cgColor
+            // Sidebar chat sits directly on the terminal-theme (black) host —
+            // no panel fill or border.
+            layer?.backgroundColor = NSColor.clear.cgColor
         }
     }
 
@@ -122,18 +228,32 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func configureMessages() {
-        transcript.isEditable = false
-        transcript.isSelectable = true
-        transcript.drawsBackground = false
-        transcript.textColor = .labelColor
-        transcript.font = .systemFont(ofSize: NSFont.systemFontSize)
-        transcript.textContainerInset = NSSize(width: 12, height: 10)
+        // Bubble transcript: a vertical stack of per-message views inside a
+        // scroll view. Assistant replies render as plain text on the black
+        // surface; user messages get a rounded bubble panel.
+        transcriptStack.orientation = .vertical
+        transcriptStack.alignment = .width
+        transcriptStack.spacing = 14
+        transcriptStack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        transcriptStack.translatesAutoresizingMaskIntoConstraints = false
+        let flipped = FlippedClipDocument()
+        flipped.translatesAutoresizingMaskIntoConstraints = false
+        flipped.addSubview(transcriptStack)
         transcriptScroll.borderType = .noBorder
         transcriptScroll.drawsBackground = false
         transcriptScroll.hasVerticalScroller = true
         transcriptScroll.autohidesScrollers = true
-        transcriptScroll.documentView = transcript
+        transcriptScroll.documentView = flipped
         transcriptScroll.isHidden = true
+        NSLayoutConstraint.activate([
+            flipped.leadingAnchor.constraint(equalTo: transcriptScroll.contentView.leadingAnchor),
+            flipped.trailingAnchor.constraint(equalTo: transcriptScroll.contentView.trailingAnchor),
+            flipped.topAnchor.constraint(equalTo: transcriptScroll.contentView.topAnchor),
+            transcriptStack.topAnchor.constraint(equalTo: flipped.topAnchor),
+            transcriptStack.leadingAnchor.constraint(equalTo: flipped.leadingAnchor),
+            transcriptStack.trailingAnchor.constraint(equalTo: flipped.trailingAnchor),
+            transcriptStack.bottomAnchor.constraint(equalTo: flipped.bottomAnchor),
+        ])
 
         emptyStateLabel.font = .systemFont(ofSize: 12, weight: .regular)
         emptyStateLabel.textColor = NSColor(white: 0.56, alpha: 1)
@@ -159,6 +279,15 @@ final class PetAssistantPanelView: NSView {
             item.image = PetAssistantPanelView.providerImage(for: choice)
             modelPicker.menu?.addItem(item)
         }
+
+        effortPicker.controlSize = .regular
+        effortPicker.font = .systemFont(ofSize: NSFont.systemFontSize)
+        effortPicker.menu?.removeAllItems()
+        for level in ["Auto", "Low", "Medium", "High"] {
+            effortPicker.menu?.addItem(
+                NSMenuItem(title: level, action: nil, keyEquivalent: ""))
+        }
+        effortPicker.selectItem(at: 0)
 
         inputContainer.wantsLayer = true
         inputContainer.layer?.backgroundColor = NSColor(white: 0.055, alpha: 0.72).cgColor
@@ -295,14 +424,14 @@ final class PetAssistantPanelView: NSView {
         let views = [
             newChatButton, closeButton,
             separator, transcriptScroll, emptyStateLabel, showFilesButton,
-            modelPicker, inputContainer, attachmentButton,
+            modelPicker, effortPicker, inputContainer, attachmentButton,
             inputScroll, sendButton, sendWrap,
         ]
         for view in views { view.translatesAutoresizingMaskIntoConstraints = false }
         for view in [
             newChatButton, closeButton, separator,
             transcriptScroll, emptyStateLabel, showFilesButton,
-            modelPicker, inputContainer,
+            modelPicker, effortPicker, inputContainer,
         ] { addSubview(view) }
 
         NSLayoutConstraint.activate(headerConstraints() + bodyConstraints() + composerConstraints())
@@ -347,9 +476,13 @@ final class PetAssistantPanelView: NSView {
             inputContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             inputContainer.heightAnchor.constraint(equalToConstant: 44),
             modelPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            modelPicker.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            modelPicker.trailingAnchor.constraint(equalTo: effortPicker.leadingAnchor, constant: -6),
             modelPicker.bottomAnchor.constraint(equalTo: inputContainer.topAnchor, constant: -10),
             modelPicker.heightAnchor.constraint(equalToConstant: 30),
+            effortPicker.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            effortPicker.centerYAnchor.constraint(equalTo: modelPicker.centerYAnchor),
+            effortPicker.heightAnchor.constraint(equalToConstant: 30),
+            effortPicker.widthAnchor.constraint(equalToConstant: 96),
             attachmentButton.leadingAnchor.constraint(equalTo: inputContainer.leadingAnchor, constant: 8),
             attachmentButton.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
             attachmentButton.widthAnchor.constraint(equalToConstant: 24),
@@ -368,33 +501,47 @@ final class PetAssistantPanelView: NSView {
         ]
     }
 
+    private var lastMessages: [(role: String, text: String)] = []
+    private var typingIndicator: ChatTypingIndicator?
+
     func setMessages(_ messages: [(role: String, text: String)]) {
-        let rendered = NSMutableAttributedString()
-        for (index, message) in messages.enumerated() {
-            if index > 0 { rendered.append(NSAttributedString(string: "\n\n")) }
-            rendered.append(NSAttributedString(
-                string: message.role.uppercased() + "\n",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                    .foregroundColor: NSColor.secondaryLabelColor,
-                ]))
-            rendered.append(NSAttributedString(
-                string: message.text,
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
-                    .foregroundColor: NSColor.labelColor,
-                ]))
+        lastMessages = messages
+        rebuildTranscript()
+    }
+
+    private func rebuildTranscript() {
+        transcriptStack.arrangedSubviews.forEach {
+            transcriptStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
         }
-        transcript.textStorage?.setAttributedString(rendered)
-        let isEmpty = messages.isEmpty
-        emptyStateLabel.isHidden = !isEmpty
-        transcriptScroll.isHidden = isEmpty
-        transcript.scrollRangeToVisible(NSRange(location: rendered.length, length: 0))
+        for message in lastMessages {
+            transcriptStack.addArrangedSubview(
+                ChatMessageView(role: message.role, text: message.text))
+        }
+        if let typingIndicator {
+            transcriptStack.addArrangedSubview(typingIndicator)
+            typingIndicator.startAnimating()
+        }
+        let showTranscript = !lastMessages.isEmpty || typingIndicator != nil
+        emptyStateLabel.isHidden = showTranscript
+        transcriptScroll.isHidden = !showTranscript
+        layoutSubtreeIfNeeded()
+        if let doc = transcriptScroll.documentView {
+            transcriptScroll.contentView.scrollToVisible(
+                NSRect(x: 0, y: doc.bounds.maxY - 1, width: 1, height: 1))
+        }
     }
 
     func setThinking(_ thinking: Bool) {
         input.isEditable = !thinking
         sendWrap.alphaValue = thinking ? 0.45 : 1
+        if thinking, typingIndicator == nil {
+            typingIndicator = ChatTypingIndicator()
+            rebuildTranscript()
+        } else if !thinking, typingIndicator != nil {
+            typingIndicator = nil
+            rebuildTranscript()
+        }
     }
 
     func setHasFiles(_ hasFiles: Bool) { showFilesButton.isHidden = !hasFiles }
@@ -433,6 +580,21 @@ final class PetAssistantPanelView: NSView {
     func selectModelForTesting(_ index: Int) { modelPicker.selectItem(at: index) }
     var selectedChoiceForTesting: PetAssistant.AgentChoice { selectedChoice }
     var modelItemTitlesForTesting: [String] { modelPicker.itemTitles }
+    var effortTitlesForTesting: [String] { effortPicker.itemTitles }
+    var effortValueForTesting: String { effortPicker.titleOfSelectedItem ?? "" }
+    /// The sidebar chat surface is transparent (sits on the black host); the
+    /// popover keeps its glass. nil layer color reads as clear.
+    var surfaceIsClearForTesting: Bool {
+        let color = layer?.backgroundColor
+        return color == nil || color?.alpha == 0
+    }
+    /// Count of user-bubble message views currently in the transcript.
+    var userBubbleCountForTesting: Int {
+        transcriptStack.arrangedSubviews.filter { row in
+            row.subviews.contains { $0.layer?.cornerRadius == 13 }
+        }.count
+    }
+    var isShowingTypingIndicatorForTesting: Bool { typingIndicator != nil }
     var inputFrameForTesting: NSRect { input.frame }
     var inputIsFirstResponderForTesting: Bool { input.window?.firstResponder === input }
     var attachmentSymbolForTesting: String { "paperclip" }
@@ -464,7 +626,9 @@ final class PetAssistantPanelView: NSView {
     var presentationForTesting: Presentation { presentation }
     var showsCloseButtonForTesting: Bool { !closeButton.isHidden }
     var usesGlassSurfaceForTesting: Bool { presentation == .popover }
-    var transcriptForTesting: String { transcript.string }
+    var transcriptForTesting: String {
+        lastMessages.map { "\($0.role.uppercased())\n\($0.text)" }.joined(separator: "\n\n")
+    }
     var showsEmptyStateForTesting: Bool { !emptyStateLabel.isHidden }
     func submitForTesting(_ request: String) {
         input.string = request

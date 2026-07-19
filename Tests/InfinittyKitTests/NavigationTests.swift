@@ -349,4 +349,48 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(window.titlebarAccessoryViewControllers.contains { $0 === accessory })
     }
 
+    /// Native window tabs span the full titlebar; with the sidebar open the
+    /// tab strip must be clamped to end at the sidebar's leading edge so the
+    /// tabs don't paint across it. Reverts to full width on hide.
+    func testTabBarClampsToSidebarEdge() throws {
+        _ = NSApplication.shared
+        let first = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let host = NSWindow(
+            contentRect: first.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false)
+        host.tabbingIdentifier = "infinitty"
+        host.contentView = first
+        let second = NSWindow(
+            contentRect: first.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false)
+        second.tabbingIdentifier = "infinitty"
+        second.contentView = NSView(frame: first.frame)
+        host.addTabbedWindow(second, ordered: .above)
+        host.makeKeyAndOrderFront(nil)
+        host.layoutIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        defer { host.orderOut(nil) }
+
+        // The private NSTabBar must be resolvable — the whole clamp depends on
+        // it. If a future macOS hides it, the clamp is a safe no-op.
+        guard let bar = host.nativeTabBarView, let parent = bar.superview else {
+            throw XCTSkip("native NSTabBar not resolvable on this macOS build")
+        }
+        let full = parent.bounds.width
+        XCTAssertEqual(bar.frame.width, full, accuracy: 1)
+
+        // Apply the same resize clampTabBar performs and confirm AppKit keeps
+        // it after a relayout (it does not re-expand the strip).
+        var clamped = bar.frame
+        clamped.size.width = full - 280
+        bar.frame = clamped
+        bar.autoresizingMask = [.maxXMargin, .height]
+        host.layoutIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(bar.frame.width, full - 280, accuracy: 1,
+                       "clamped tab strip must hold through a relayout")
+    }
+
 }

@@ -236,7 +236,7 @@ final class CodeTableCellView: NSTableCellView {
 /// Draws the selection as a rounded indigo pill instead of the system gray.
 /// Draws a compact neutral selection without using the system accent color.
 final class CodeRowView: NSTableRowView {
-    static let emphasizedSelectionColor = CodePalette.selectionFill
+    static let emphasizedSelectionColor = CodePalette.selectionAccent
 
     override func drawSelection(in dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 4, dy: 1)
@@ -432,7 +432,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
-        outlineView.rowSizeStyle = .medium
+        outlineView.rowSizeStyle = .custom
+        outlineView.rowHeight = 22
         outlineView.style = .sourceList
         outlineView.backgroundColor = .clear
         outlineView.indentationPerLevel = 13
@@ -1627,11 +1628,9 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         CodeIcon.image(for: URL(fileURLWithPath: "file.swift"), isDirectory: false)?.size ?? .zero
     }
     var searchCornerRadiusForTesting: CGFloat { searchField.layer?.cornerRadius ?? 0 }
-    var pageControlSelectionIsNeutralForTesting: Bool {
-        CodePalette.isNeutral(pageControl.selectionFillColor)
-    }
-    var rowSelectionIsNeutralForTesting: Bool {
-        CodePalette.isNeutral(CodeRowView.emphasizedSelectionColor)
+    var tabAndRowSelectionMatchForTesting: Bool {
+        pageControl.selectionFillColor == CodeRowView.emphasizedSelectionColor
+            && pageControl.selectionFillColor == CodePalette.selectionAccent
     }
     var diffModeSelectionIsNeutralForTesting: Bool {
         CodePalette.isNeutral(unifiedButton.contentTintColor ?? .clear)

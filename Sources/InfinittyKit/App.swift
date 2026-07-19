@@ -24,30 +24,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                   let sourceWindow = event.window,
                   sourceWindow.tabbingIdentifier == "infinitty"
             else { return event }
-
-            // Only the clicked window's own tab strip is hit-tested: matching
-            // other windows' buttons by raw screen geometry would hit occluded
-            // windows or windows on another Space.
-            let screenPoint = sourceWindow.convertPoint(toScreen: event.locationInWindow)
-            if let hit = sourceWindow.nativeTabButton(atScreenPoint: screenPoint),
-               let tabs = sourceWindow.tabbedWindows,
-               tabs.indices.contains(hit.index) {
-                let target = tabs[hit.index]
-                sourceWindow.tabGroup?.selectedWindow = target
-                target.makeKeyAndOrderFront(nil)
-                DispatchQueue.main.async { [weak self, weak target] in
-                    guard let self, let target else { return }
-                    self.beginInlineRename(for: target)
-                }
-                return nil
-            }
-
-            // No native tab button means this is a single-window/bare-titlebar
-            // layout. Preserve the documented titlebar double-click gesture.
-            guard sourceWindow.nativeTabButtonsInVisualOrder().isEmpty,
-                  self.eventIsInTitlebar(event, of: sourceWindow)
-            else { return event }
-            self.beginInlineRename(for: sourceWindow)
+            // The custom tab strip handles its own double-click rename. Here we
+            // only cover a double-click on the native titlebar (single tab, or
+            // empty titlebar area) → rename the active tab via the strip.
+            guard self.eventIsInTitlebar(event, of: sourceWindow) else { return event }
+            self.beginStripRename(for: sourceWindow)
             return nil
         }
     }
@@ -107,6 +88,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
     private var sidebarToggleAccessories: [ObjectIdentifier: SidebarToggleAccessory] = [:]
+    /// Per-window terminal chrome (custom tab strip + terminal body). The
+    /// window's terminal column lives here; the code-view sidebar is a split
+    /// beside it, so the strip never crosses the sidebar.
+    private var terminalChromes: [ObjectIdentifier: TerminalChromeView] = [:]
     private var quickTerminalHotKey: GlobalHotKey?
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController(
@@ -130,9 +115,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         return controller
     }()
-    /// Currently visible rename UI, if any. Capped to one at a time so the
-    /// gestures can't stack.
-    private var activeRename: TabRenameField?
     /// Local mouse monitor that turns titlebar double-clicks into inline rename.
     private var titlebarClickMonitor: Any?
     private var modifierHintMonitor: Any?
@@ -403,9 +385,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 view.subviews.forEach { collect(from: $0) }
             }
         }
-        let root = win === quickTerminal.window
-            ? quickTerminal.activeRootView
-            : win.contentView
+        let root = terminalRoot(of: win)
         if let root { collect(from: root) }
         return views.compactMap { view in sessions.first { $0.view === view } }
     }
@@ -481,6 +461,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func windowDidBecomeKey(_ notification: Notification) {
+        if let win = notification.object as? NSWindow,
+           win.tabbingIdentifier == "infinitty" {
+            refreshTabStrips(in: win)
+        }
         guard showPaneShortcutHints else { return }
         refreshShortcutHints()
     }
@@ -658,6 +642,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
         // also poke the accessory if the title changed in a way that affects it
         tabIconAccessories[ObjectIdentifier(win)]?.refreshFromHost()
+        // Keep the custom tab strip's labels/selection in sync.
+        if let chrome = terminalChromes[ObjectIdentifier(win)], !chrome.strip.isRenaming {
+            let tabs = win.tabbedWindows ?? [win]
+            if let index = tabs.firstIndex(where: { $0 === win }) {
+                chrome.showsStrip = tabs.count > 1
+                chrome.strip.update(
+                    titles: tabs.map { self.tabTitle(for: $0) }, selectedIndex: index)
+            }
+        }
     }
 
     /// The foreground process for the focused pane in `win`, if any session
@@ -688,13 +681,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func renameTab(_ sender: Any?) {
-        // Treat the shortcut as a mode toggle. Repeating it while an editor
-        // is open abandons the pending value instead of replacing the editor.
-        if let activeRename {
-            activeRename.dismiss(committed: false)
-            self.activeRename = nil
-            return
-        }
         guard let win = NSApp.keyWindow
                 ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
               win === quickTerminal.window || win.tabbingIdentifier == "infinitty"
@@ -703,43 +689,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             _ = quickTerminal.toggleRenamingActiveTab()
             return
         }
-        beginInlineRename(for: win)
-    }
-
-    /// Show the inline rename UI over `win`'s titlebar. If a rename is
-    /// already in flight for some other window, cancel it and replace it
-    /// rather than stack two UIs fighting over first responder.
-    func beginInlineRename(for win: NSWindow) {
-        // A new rename supersedes any unfinished edit without saving it.
-        activeRename?.dismiss(committed: false)
-        activeRename = nil
-
-        // Use the stored override if set, otherwise derive the bare title
-        // (stripping any " (N)" pane-count suffix that updateTitle adds).
-        let current: String
-        if let override = titleOverrides[ObjectIdentifier(win)] {
-            current = override
-        } else {
-            current = self.baseTitle(for: win)
+        // Toggle: a second invocation while editing abandons the edit.
+        if let chrome = terminalChromes[ObjectIdentifier(win)], chrome.strip.isRenaming {
+            _ = chrome.strip.cancelRename()
+            return
         }
-        let field = TabRenameField(hostWindow: win, currentName: current)
-        field.onCommit = { [weak self, weak win, weak field] name in
-            guard let self, let win else { return }
-            if name.isEmpty {
-                self.titleOverrides.removeValue(forKey: ObjectIdentifier(win))
-            } else {
-                self.titleOverrides[ObjectIdentifier(win)] = name
-            }
-            self.updateTitle(for: win)
-            // Clear our ref if the panel still references itself.
-            if self.activeRename === field { self.activeRename = nil }
-        }
-        field.onCancel = { [weak self, weak field] in
-            guard let self else { return }
-            if self.activeRename === field { self.activeRename = nil }
-        }
-        activeRename = field
-        field.present()
+        beginStripRename(for: win)
     }
 
     /// One pet per window (furthest bottom-right pane) unless pet-mode=pane.
@@ -918,9 +873,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         session.view.frame = NSRect(origin: .zero, size: contentSize)
         session.view.autoresizingMask = [.width, .height]
-        window.contentView = config.backgroundBlur
-            ? wrapInBackgroundBlur(session.view)
-            : session.view
+        if role == .standard {
+            // Standard windows host the terminal inside a chrome view (custom
+            // tab strip + body). The native tab bar is hidden; our strip lives
+            // over the terminal column only, so the sidebar owns its column.
+            let chrome = TerminalChromeView(frame: NSRect(origin: .zero, size: contentSize))
+            chrome.autoresizingMask = [.width, .height]
+            chrome.body.addSubview(config.backgroundBlur
+                ? wrapInBackgroundBlur(session.view)
+                : session.view)
+            terminalChromes[ObjectIdentifier(window)] = chrome
+            wireStrip(chrome, for: window)
+            window.contentView = chrome
+        } else {
+            window.contentView = config.backgroundBlur
+                ? wrapInBackgroundBlur(session.view)
+                : session.view
+        }
 
         if customLights, let shape = TrafficLightsView.Shape(rawValue: config.trafficLights) {
             let lights = TrafficLightsView(shape: shape)
@@ -1034,6 +1003,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.refreshPets()
             self.updateTitle(for: window)
             self.refreshShortcutHints()
+            self.refreshTabStrips(in: window)
         }
         return session
     }
@@ -1060,6 +1030,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.refreshPets()
             self.updateTitle(for: window)
             self.refreshShortcutHints()
+            self.refreshTabStrips(in: window)
         }
     }
 
@@ -1188,6 +1159,86 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return
         }
         openCodeView(in: win)
+    }
+
+    /// The view that hosts a window's terminal panes/splits. For standard
+    /// windows that's the chrome body (below the custom tab strip); the
+    /// quick terminal uses its own tab page; fall back to contentView.
+    private func terminalRoot(of win: NSWindow) -> NSView? {
+        if let chrome = terminalChromes[ObjectIdentifier(win)] { return chrome.body }
+        if win === quickTerminal.window { return quickTerminal.activeRootView }
+        return win.contentView
+    }
+
+    /// Refresh the custom tab strip in every window of `win`'s tab group so
+    /// each shows the shared title list with its own tab highlighted. Also
+    /// hides the native tab bar and toggles strip visibility (hidden for a
+    /// single tab, like macOS).
+    private func refreshTabStrips(in win: NSWindow) {
+        let tabs = win.tabbedWindows ?? [win]
+        let titles = tabs.map { self.tabTitle(for: $0) }
+        for (index, tabWin) in tabs.enumerated() {
+            tabWin.hideNativeTabBar()
+            guard let chrome = terminalChromes[ObjectIdentifier(tabWin)] else { continue }
+            chrome.showsStrip = tabs.count > 1
+            chrome.strip.update(titles: titles, selectedIndex: index)
+        }
+    }
+
+    private func tabTitle(for win: NSWindow) -> String {
+        if let override = titleOverrides[ObjectIdentifier(win)], !override.isEmpty {
+            return override
+        }
+        return activeSessions(in: win).first?.title ?? "infinitty"
+    }
+
+    /// Wire a chrome's strip callbacks to native tab-group operations.
+    private func wireStrip(_ chrome: TerminalChromeView, for win: NSWindow) {
+        chrome.strip.onSelect = { [weak self, weak win] index in
+            guard let self, let win, let tabs = win.tabbedWindows,
+                  tabs.indices.contains(index) else { return }
+            let target = tabs[index]
+            win.tabGroup?.selectedWindow = target
+            target.makeKeyAndOrderFront(nil)
+            self.refocusTerminal(in: target)
+        }
+        chrome.strip.onRename = { [weak self, weak win] index in
+            guard let self, let win, let tabs = win.tabbedWindows,
+                  tabs.indices.contains(index) else { return }
+            let target = tabs[index]
+            win.tabGroup?.selectedWindow = target
+            target.makeKeyAndOrderFront(nil)
+            self.beginStripRename(for: target)
+        }
+        chrome.strip.onClose = { [weak win] index in
+            guard let win, let tabs = win.tabbedWindows,
+                  tabs.indices.contains(index) else { return }
+            tabs[index].performClose(nil)
+        }
+        chrome.strip.onNewTab = { [weak self] in self?.newTab(nil) }
+        chrome.strip.onRenameCommit = { [weak self, weak win] name in
+            guard let self, let win else { return }
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.titleOverrides[ObjectIdentifier(win)] = trimmed.isEmpty ? nil : trimmed
+            self.updateTitle(for: win)
+            self.refreshTabStrips(in: win)
+            self.refocusTerminal(in: win)
+        }
+        chrome.strip.onRenameCancel = { [weak self, weak win] in
+            guard let self, let win else { return }
+            self.refocusTerminal(in: win)
+        }
+    }
+
+    /// Begin an inline rename in the window's own custom strip.
+    private func beginStripRename(for win: NSWindow) {
+        guard let chrome = terminalChromes[ObjectIdentifier(win)],
+              let tabs = win.tabbedWindows,
+              let index = tabs.firstIndex(where: { $0 === win }) else { return }
+        chrome.showsStrip = true
+        chrome.strip.update(
+            titles: tabs.map { self.tabTitle(for: $0) }, selectedIndex: index)
+        _ = chrome.strip.beginRename(at: index, currentName: tabTitle(for: win))
     }
 
     /// Open the code-view sidebar in `win` (no-op if already open).
@@ -1392,6 +1443,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     self.refreshPets()
                     self.updateTitle(for: window)
                     self.refreshShortcutHints()
+                    self.refreshTabStrips(in: window)
                 }
                 return session.id
             } ?? nil
@@ -1483,10 +1535,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "toggle-quick-terminal":
             _ = onMain { self.quickTerminal.toggle() }
             return "ok"
+        case "toggle-sidebar":
+            _ = onMain {
+                if let win = NSApp.keyWindow
+                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) {
+                    self.toggleCodeView(in: win)
+                }
+            }
+            return "ok"
         default:
             return "error: unknown command '\(cmd)' (ping | version | list | new-window | new-tab | "
                 + "split | focus | close | send | send-line | screen | history | last-output | "
-                + "last-command | exit-code | run | activity | toggle-quick-terminal | subscribe)"
+                + "last-command | exit-code | run | activity | toggle-quick-terminal | toggle-sidebar | subscribe)"
         }
     }
 
@@ -1590,16 +1650,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     public func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
-        // If a rename is currently anchored to this window, cancel it so the
-        // monitors and panel don't outlive their host.
-        if activeRename != nil {
-            activeRename?.dismiss(committed: false)
-            activeRename = nil
-        }
+        // Cancel any in-flight tab rename in this window's strip.
+        terminalChromes[ObjectIdentifier(win)]?.strip.cancelRename()
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
         tabIconAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
         codeViews.removeValue(forKey: ObjectIdentifier(win))
         sidebarToggleAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
+        terminalChromes.removeValue(forKey: ObjectIdentifier(win))
         win.subtitle = ""
         let closing = sessions.filter { $0.view.window === win }
         for s in closing { s.shutdown() }
@@ -1629,11 +1686,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             withTitle: "Settings…",
             action: #selector(AppDelegate.openSettings(_:)),
             keyEquivalent: ","
-        )
-        appMenu.addItem(
-            withTitle: "Screen Recording Permission…",
-            action: #selector(AppDelegate.showScreenRecordingPermission(_:)),
-            keyEquivalent: ""
         )
         appMenu.addItem(.separator())
         appMenu.addItem(

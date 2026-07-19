@@ -68,6 +68,32 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertTrue(panel.inputIsFirstResponderForTesting)
     }
 
+    func testChatComposerHasEffortAndTransparentSurface() {
+        let assistant = PetAssistant(config: AppConfig())
+        let panel = assistant.makeSidebarPanelView()
+        panel.frame = NSRect(x: 0, y: 0, width: 320, height: 600)
+        panel.layoutSubtreeIfNeeded()
+
+        // (b) sidebar chat has no panel background — sits on the black host.
+        XCTAssertTrue(panel.surfaceIsClearForTesting)
+        // (d) an effort/thinking control sits beside the model picker.
+        XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "Low", "Medium", "High"])
+        XCTAssertEqual(panel.effortValueForTesting, "Auto")
+
+        // (c) user turns render as bubbles; assistant turns do not.
+        panel.setMessages([(role: "You", text: "hi"), (role: "Assistant", text: "hello")])
+        panel.layoutSubtreeIfNeeded()
+        XCTAssertEqual(panel.userBubbleCountForTesting, 1)
+        XCTAssertEqual(panel.transcriptForTesting, "YOU\nhi\n\nASSISTANT\nhello")
+
+        // Typing indicator appears while thinking and clears afterwards.
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+        panel.setThinking(true)
+        XCTAssertTrue(panel.isShowingTypingIndicatorForTesting)
+        panel.setThinking(false)
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
     func testComposerListsInjectedProviderChoices() {
         let claude = PetAssistant.AgentChoice(
             kind: .claude, modelID: "claude-sonnet-5",

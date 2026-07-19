@@ -3,6 +3,10 @@ import AppKit
 /// Shared chrome colors for the code view.
 enum CodePalette {
     static let selectionFill = NSColor(calibratedWhite: 0.23, alpha: 1)
+    /// Indigo used for the active selection across the sidebar — the file-tree
+    /// row highlight and the FILES/CHANGES/CHAT segmented control match.
+    static let selectionAccent = NSColor(
+        calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1)
     static let outline = NSColor(white: 1, alpha: 0.22)
     static let hairline = NSColor(white: 1, alpha: 0.08)
 
@@ -25,7 +29,7 @@ final class CodeSegmentedBar: NSView {
     private let font: NSFont
     private let fontWeight: NSFont.Weight
     private let squared: Bool
-    let selectionFillColor = CodePalette.selectionFill
+    let selectionFillColor = CodePalette.selectionAccent
     let outlineColor = CodePalette.outline
 
     init(
