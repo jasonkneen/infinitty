@@ -137,6 +137,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self?.handleAppRequest(request) ?? "error: shutting down"
         }
         appControl.start()
+        CodePalette.apply(config)
         openWindow(cwd: initialWorkingDirectory)
         launchCompleted = true
         watchConfigFile()
@@ -882,6 +883,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             chrome.body.addSubview(config.backgroundBlur
                 ? wrapInBackgroundBlur(session.view)
                 : session.view)
+            let bg = session.renderer.backgroundColor
+            chrome.setBacking(
+                color: NSColor(srgbRed: CGFloat(bg.x), green: CGFloat(bg.y),
+                               blue: CGFloat(bg.z), alpha: 1),
+                blur: config.backgroundBlur)
             terminalChromes[ObjectIdentifier(window)] = chrome
             wireStrip(chrome, for: window)
             window.contentView = chrome
@@ -1582,6 +1588,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func reloadConfig() {
         config = AppConfig.load()
+        CodePalette.apply(config)
         quickTerminal.applyConfig(config)
         configureQuickTerminalHotKey()
         var windows = Set<NSWindow>()

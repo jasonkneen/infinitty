@@ -39,6 +39,9 @@ struct AppConfig {
     var background: UInt32?
     var cursorColor: UInt32?
     var selectionBackground: UInt32?
+    /// UI accent for chrome selection (active tab, file-row highlight, chat
+    /// bubbles, send button, pinned-tab default). nil = built-in indigo.
+    var accentColor: UInt32?
     var palette: [Int: UInt32] = [:] // index (0-255) -> 0xRRGGBB overrides
     var trafficLights = "circle" // circle | square | rectangle | diamond
     var pet: String? = "infinitty" // built-in name, codex pet name, or directory path
@@ -187,6 +190,8 @@ struct AppConfig {
                 cursorColor = AppConfig.parseColor(value)
             case "selection-background":
                 selectionBackground = AppConfig.parseColor(value)
+            case "accent-color", "accent":
+                accentColor = AppConfig.parseColor(value)
             case "palette":
                 if let (index, color) = AppConfig.parsePaletteEntry(value) {
                     palette[index] = color
@@ -373,6 +378,7 @@ struct AppConfig {
         if let c = background { out += "background = \(hex(c))\n" }
         if let c = cursorColor { out += "cursor-color = \(hex(c))\n" }
         if let c = selectionBackground { out += "selection-background = \(hex(c))\n" }
+        if let c = accentColor { out += "accent-color = \(hex(c))\n" }
         for (index, color) in palette.sorted(by: { $0.key < $1.key }) {
             out += "palette = \(index)=\(hex(color))\n"
         }

@@ -22,7 +22,7 @@ final class TerminalTabStripView: NSView {
     var onRenameCancel: (() -> Void)?
 
     static let height: CGFloat = 34
-    private static let accent = CodePalette.selectionAccent
+    private static var accent: NSColor { CodePalette.selectionAccent }
 
     private var titles: [String] = []
     private var selectedIndex = 0
@@ -54,6 +54,12 @@ final class TerminalTabStripView: NSView {
         hairline.wantsLayer = true
         hairline.layer?.backgroundColor = CodePalette.hairline.cgColor
         addSubview(hairline)
+    }
+
+    /// Fill the strip so the transparent titlebar region (fullSizeContentView
+    /// + titlebarAppearsTransparent) doesn't show the desktop behind the tabs.
+    func setBackgroundColor(_ color: NSColor) {
+        layer?.backgroundColor = color.cgColor
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -239,12 +245,31 @@ final class TerminalChromeView: NSView {
     /// whole chrome — matching macOS's "no tab bar for one tab" behaviour.
     var showsStrip = false { didSet { needsLayout = true; strip.isHidden = !showsStrip } }
 
+    private let stripBlur = NSVisualEffectView()
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         body.autoresizingMask = [.width, .height]
         addSubview(body)
+        stripBlur.material = .hudWindow
+        stripBlur.blendingMode = .behindWindow
+        stripBlur.state = .active
+        stripBlur.isHidden = true
+        addSubview(stripBlur)
         strip.isHidden = true
         addSubview(strip)
+    }
+
+    /// Match the terminal's backing so the transparent titlebar region doesn't
+    /// show the desktop behind the tabs. With blur, the strip gets a frosted
+    /// backing plus a subtle tint; otherwise a solid theme colour.
+    func setBacking(color: NSColor, blur: Bool) {
+        stripBlur.isHidden = !blur
+        if blur {
+            strip.setBackgroundColor(color.withAlphaComponent(0.42))
+        } else {
+            strip.setBackgroundColor(color)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -254,6 +279,11 @@ final class TerminalChromeView: NSView {
         let stripH = showsStrip ? min(TerminalTabStripView.height, bounds.height) : 0
         strip.frame = NSRect(
             x: 0, y: bounds.height - stripH, width: bounds.width, height: stripH)
+        stripBlur.frame = strip.frame
         body.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripH)
+        // Terminal (or its blur wrapper) fills the body explicitly — relying on
+        // autoresizing from a zero-sized base at addSubview time misplaced the
+        // metal layer.
+        for sub in body.subviews { sub.frame = body.bounds }
     }
 }

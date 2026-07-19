@@ -36,7 +36,7 @@ final class FlippedClipDocument: NSView {
 /// full-width flowing text on the transparent surface — the ChatGPT/Stream
 /// layout convention.
 final class ChatMessageView: NSView {
-    static let accent = NSColor(calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1)
+    static var accent: NSColor { CodePalette.selectionAccent }
 
     init(role: String, text: String) {
         super.init(frame: .zero)
@@ -345,8 +345,7 @@ final class PetAssistantPanelView: NSView {
         // (~36pt) that beats an explicit height, distorting the button into a
         // vertical oval. The wrapper is a plain NSView, so its 30x30 is exact.
         sendWrap.wantsLayer = true
-        sendWrap.layer?.backgroundColor = NSColor(
-            calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1).cgColor
+        sendWrap.layer?.backgroundColor = CodePalette.selectionAccent.cgColor
         sendWrap.layer?.cornerRadius = 15
         sendWrap.layer?.masksToBounds = true
     }
@@ -491,7 +490,7 @@ final class PetAssistantPanelView: NSView {
             inputScroll.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
             inputScroll.heightAnchor.constraint(equalToConstant: 32),
             sendWrap.trailingAnchor.constraint(equalTo: inputContainer.trailingAnchor, constant: -7),
-            sendWrap.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
+            sendWrap.bottomAnchor.constraint(equalTo: inputContainer.bottomAnchor, constant: -7),
             sendWrap.widthAnchor.constraint(equalToConstant: 30),
             sendWrap.heightAnchor.constraint(equalToConstant: 30),
             sendButton.centerXAnchor.constraint(equalTo: sendWrap.centerXAnchor),
@@ -803,12 +802,29 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     // MARK: - the ask pipeline
 
     private static let systemPrompt = """
-    You are the user's pet assistant living inside their terminal. Answer \
-    concisely — a few short sentences, plain text, no markdown. Use the \
-    terminal context when it's relevant. If fulfilling the request requires \
-    finding files in the project, reply with EXACTLY one line in the form \
-    "SEARCH: <filename or path keywords>" and nothing else; you will receive \
-    the matching files to compose the final answer.
+    You are infinitty — an agentic terminal. You are not a chatbot describing \
+    a terminal; you ARE the terminal, and you control it directly.
+
+    You have infinitty tools (infinitty_list_panes, infinitty_run, \
+    infinitty_send, infinitty_screen, infinitty_history, infinitty_last_output, \
+    infinitty_exit_code, infinitty_new_tab, infinitty_split, infinitty_focus, \
+    infinitty_close). When the user asks you to DO something in the terminal — \
+    run a command, type text, open a tab, launch a program — you MUST call the \
+    matching tool. Never describe an action as done unless the tool call \
+    returned success. Never invent output, exit codes, or state: read them with \
+    infinitty_screen / infinitty_last_output / infinitty_exit_code and report \
+    exactly what came back. If a tool returns an error, say so plainly.
+
+    To act on a specific pane, first call infinitty_list_panes to get pane ids \
+    (the focused pane is marked). "Type X and press enter" = infinitty_send \
+    with submit:true. "Type X" without running = submit:false. To run a command \
+    and capture its result, prefer infinitty_run.
+
+    For plain questions that need no terminal action, answer concisely in a few \
+    sentences of plain text (no markdown). If answering requires finding files \
+    in the project, reply with EXACTLY one line "SEARCH: <filename or path \
+    keywords>" and nothing else; you will receive the matching files to compose \
+    the final answer.
     """
 
     private typealias AskCompletion = (String, [String], String?) -> Void

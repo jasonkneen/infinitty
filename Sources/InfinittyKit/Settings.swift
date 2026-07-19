@@ -1,5 +1,16 @@
 import AppKit
 
+extension NSBox {
+    /// A thin horizontal separator line for settings panels.
+    static func separatorLine() -> NSBox {
+        let box = NSBox()
+        box.boxType = .separator
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        return box
+    }
+}
+
 /// Opens an associated URL when its button is clicked.
 final class LinkOpener: NSObject {
     @objc func open(_ sender: NSButton) {
@@ -49,6 +60,10 @@ final class SettingsWindowController: NSWindowController {
     private let bgWell = NSColorWell()
     private let cursorWell = NSColorWell()
     private let selectionWell = NSColorWell()
+    private let accentWell = NSColorWell()
+    private var panels: [String: NSView] = [:]
+    private var switcher: NSSegmentedControl?
+    private var panelHost: NSView?
 
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
         self.current = config
@@ -140,6 +155,7 @@ final class SettingsWindowController: NSWindowController {
         let group = NSStackView(views: [
             item("Text", fgWell), item("Background", bgWell),
             item("Cursor", cursorWell), item("Selection", selectionWell),
+            item("Accent", accentWell),
         ])
         group.orientation = .horizontal
         group.spacing = 20
@@ -240,57 +256,112 @@ final class SettingsWindowController: NSWindowController {
         versionRow.spacing = 10
         versionRow.alignment = .centerY
 
-        let stack = NSStackView(views: [
-            section("Font"),
-            row("Family", fontCombo),
-            row("Style", stylePopup),
-            sliderRow("Size", sizeSlider, sizeValue),
-            section("Layout"),
-            sliderRow("Margin", marginSlider, marginValue),
-            sliderRow("Line spacing", lineSlider, lineValue),
-            sliderRow("Kerning", kernSlider, kernValue),
-            section("Window"),
-            sliderRow("Opacity", opacitySlider, opacityValue),
-            row("", blurCheck),
-            row("Traffic lights", lightsPopup, width: 160),
-            section("Pet"),
-            row("Pet", petPopup, width: 200),
-            row("Placement", petModePopup, width: 160),
-            sliderRow("Size", petScaleSlider, petScaleValue),
-            section("Agents"),
-            row("Notch", notchGroup),
-            row("", glowCheck),
-            row("", hintsCheck),
-            row("", hintsWarning),
-            section("Colors"),
-            colorRow(),
-            section("About"),
-            versionRow,
-            footer,
-        ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.setCustomSpacing(16, after: stack.views[3]) // breathe after sections
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        // Sections and footer span the full width.
-        for view in stack.views {
-            stack.setVisibilityPriority(.mustHold, for: view)
+        // Grouped into compact icon panels switched by a top segmented bar.
+        func panel(_ rows: [NSView]) -> NSView {
+            let s = NSStackView(views: rows)
+            s.orientation = .vertical
+            s.alignment = .leading
+            s.spacing = 12
+            s.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
+            s.translatesAutoresizingMaskIntoConstraints = false
+            for view in rows { s.setVisibilityPriority(.mustHold, for: view) }
+            return s
         }
+        panels = [
+            "Appearance": panel([
+                section("Font"),
+                row("Family", fontCombo),
+                row("Style", stylePopup),
+                sliderRow("Size", sizeSlider, sizeValue),
+                section("Colors"),
+                colorRow(),
+            ]),
+            "Terminal": panel([
+                section("Layout"),
+                sliderRow("Margin", marginSlider, marginValue),
+                sliderRow("Line spacing", lineSlider, lineValue),
+                sliderRow("Kerning", kernSlider, kernValue),
+                section("Window"),
+                sliderRow("Opacity", opacitySlider, opacityValue),
+                row("", blurCheck),
+                row("Traffic lights", lightsPopup, width: 160),
+            ]),
+            "Pet": panel([
+                section("Pet"),
+                row("Pet", petPopup, width: 200),
+                row("Placement", petModePopup, width: 160),
+                sliderRow("Size", petScaleSlider, petScaleValue),
+            ]),
+            "Agents": panel([
+                section("Agents"),
+                row("Notch", notchGroup),
+                row("", glowCheck),
+                row("", hintsCheck),
+                row("", hintsWarning),
+            ]),
+            "About": panel([
+                section("About"),
+                versionRow,
+            ]),
+        ]
+
+        // Icon switcher (segmented control with SF Symbols).
+        let switcher = NSSegmentedControl(
+            labels: ["Appearance", "Terminal", "Pet", "Agents", "About"],
+            trackingMode: .selectOne, target: self, action: #selector(panelSwitched(_:)))
+        let icons = ["paintpalette", "terminal", "pawprint", "sparkles", "info.circle"]
+        for (i, name) in icons.enumerated() {
+            switcher.setImage(NSImage(systemSymbolName: name, accessibilityDescription: nil), forSegment: i)
+            switcher.setImageScaling(.scaleProportionallyDown, forSegment: i)
+        }
+        switcher.segmentStyle = .texturedRounded
+        switcher.selectedSegment = 0
+        switcher.translatesAutoresizingMaskIntoConstraints = false
+        self.switcher = switcher
+
+        let panelHost = NSView()
+        panelHost.translatesAutoresizingMaskIntoConstraints = false
+        self.panelHost = panelHost
+
+        let root = NSStackView(views: [switcher, NSBox.separatorLine(), panelHost, NSBox.separatorLine(), footer])
+        root.orientation = .vertical
+        root.alignment = .centerX
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 14, left: 0, bottom: 14, right: 0)
+        root.translatesAutoresizingMaskIntoConstraints = false
+        root.setHuggingPriority(.defaultLow, for: .horizontal)
 
         let content = NSView()
-        content.addSubview(stack)
+        content.addSubview(root)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: content.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.widthAnchor.constraint(equalToConstant: 480),
+            root.topAnchor.constraint(equalTo: content.topAnchor),
+            root.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            root.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            root.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            content.widthAnchor.constraint(equalToConstant: 480),
         ])
         window?.contentView = content
-        window?.setContentSize(NSSize(width: 480, height: stack.fittingSize.height))
+        showPanel("Appearance")
+    }
+
+    @objc private func panelSwitched(_ sender: NSSegmentedControl) {
+        let names = ["Appearance", "Terminal", "Pet", "Agents", "About"]
+        showPanel(names[sender.selectedSegment])
+    }
+
+    private func showPanel(_ name: String) {
+        guard let host = panelHost, let view = panels[name] else { return }
+        host.subviews.forEach { $0.removeFromSuperview() }
+        host.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: host.topAnchor),
+            view.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+        ])
+        window?.layoutIfNeeded()
+        let target = view.fittingSize.height + 120
+        window?.setContentSize(NSSize(width: 480, height: max(target, 320)))
     }
 
     // MARK: populate & actions

@@ -236,7 +236,7 @@ final class CodeTableCellView: NSTableCellView {
 /// Draws the selection as a rounded indigo pill instead of the system gray.
 /// Draws a compact neutral selection without using the system accent color.
 final class CodeRowView: NSTableRowView {
-    static let emphasizedSelectionColor = CodePalette.selectionAccent
+    static var emphasizedSelectionColor: NSColor { CodePalette.selectionAccent }
 
     override func drawSelection(in dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 4, dy: 1)

@@ -349,48 +349,36 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(window.titlebarAccessoryViewControllers.contains { $0 === accessory })
     }
 
-    /// Native window tabs span the full titlebar; with the sidebar open the
-    /// tab strip must be clamped to end at the sidebar's leading edge so the
-    /// tabs don't paint across it. Reverts to full width on hide.
-    func testTabBarClampsToSidebarEdge() throws {
-        _ = NSApplication.shared
-        let first = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
-        let host = NSWindow(
-            contentRect: first.frame,
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered, defer: false)
-        host.tabbingIdentifier = "infinitty"
-        host.contentView = first
-        let second = NSWindow(
-            contentRect: first.frame,
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered, defer: false)
-        second.tabbingIdentifier = "infinitty"
-        second.contentView = NSView(frame: first.frame)
-        host.addTabbedWindow(second, ordered: .above)
-        host.makeKeyAndOrderFront(nil)
-        host.layoutIfNeeded()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-        defer { host.orderOut(nil) }
+    /// The custom in-pane tab strip renders one button per title, highlights
+    /// the selected index, and shows/hides its close + selection state.
+    func testTabStripRendersTitlesAndSelection() {
+        let strip = TerminalTabStripView(frame: NSRect(x: 0, y: 0, width: 600, height: 34))
+        strip.update(titles: ["one", "two", "three"], selectedIndex: 1)
+        strip.layoutSubtreeIfNeeded()
+        XCTAssertEqual(strip.titlesForTesting, ["one", "two", "three"])
+        XCTAssertEqual(strip.selectedIndexForTesting, 1)
+        XCTAssertEqual(strip.tabButtonFramesForTesting.count, 3)
+        // Tabs fill left-to-right without overlap.
+        let frames = strip.tabButtonFramesForTesting
+        XCTAssertLessThanOrEqual(frames[0].maxX, frames[1].minX + 0.5)
+        XCTAssertLessThanOrEqual(frames[1].maxX, frames[2].minX + 0.5)
+        // The + button sits to the right of the last tab.
+        XCTAssertGreaterThan(strip.addButtonFrameForTesting.minX, frames[2].minX)
+    }
 
-        // The private NSTabBar must be resolvable — the whole clamp depends on
-        // it. If a future macOS hides it, the clamp is a safe no-op.
-        guard let bar = host.nativeTabBarView, let parent = bar.superview else {
-            throw XCTSkip("native NSTabBar not resolvable on this macOS build")
-        }
-        let full = parent.bounds.width
-        XCTAssertEqual(bar.frame.width, full, accuracy: 1)
-
-        // Apply the same resize clampTabBar performs and confirm AppKit keeps
-        // it after a relayout (it does not re-expand the strip).
-        var clamped = bar.frame
-        clamped.size.width = full - 280
-        bar.frame = clamped
-        bar.autoresizingMask = [.maxXMargin, .height]
-        host.layoutIfNeeded()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-        XCTAssertEqual(bar.frame.width, full - 280, accuracy: 1,
-                       "clamped tab strip must hold through a relayout")
+    /// The chrome hides the strip for a single tab (matching macOS) and shows
+    /// it once there are multiple.
+    func testChromeHidesStripForSingleTab() {
+        let chrome = TerminalChromeView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        chrome.showsStrip = false
+        chrome.layoutSubtreeIfNeeded()
+        XCTAssertTrue(chrome.strip.isHidden)
+        XCTAssertEqual(chrome.body.frame.height, 400, accuracy: 0.5)
+        chrome.showsStrip = true
+        chrome.layoutSubtreeIfNeeded()
+        XCTAssertFalse(chrome.strip.isHidden)
+        XCTAssertEqual(chrome.strip.frame.height, TerminalTabStripView.height, accuracy: 0.5)
+        XCTAssertEqual(chrome.body.frame.height, 400 - TerminalTabStripView.height, accuracy: 0.5)
     }
 
 }
