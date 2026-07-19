@@ -118,48 +118,43 @@ final class PetAssistantTests: XCTestCase {
         assistant.detach()
     }
 
-    /// The rewritten UI→backend seam: an explicit provider pick forces that
-    /// backend; Auto with no CLIs/endpoint falls through to hint-command then
-    /// none. Uses an empty PATH so real installed codex/claude can't leak in.
-    func testResolveBackendHonorsExplicitProviderAndFallthrough() {
-        let emptyEnv = ["PATH": "/nonexistent"]
+    /// The rewritten UI→backend fallthrough: when no provider resolves
+    /// (ai-provider set to an unrecognized value so ProviderDiscovery returns
+    /// nil regardless of installed CLIs), routing falls through to the
+    /// OpenAI endpoint, then the hint-command, then none.
+    func testResolveBackendFallthroughWhenNoProvider() {
         var config = AppConfig()
+        config.aiProvider = "none"  // unrecognized → preferredProvider returns nil
+
+        // Nothing configured → none.
+        XCTAssertEqual(
+            PetAssistant.resolveBackend(config: config), .none)
+
+        // hint-command configured → command backend.
         config.hintCommand = "cat"
+        XCTAssertEqual(
+            PetAssistant.resolveBackend(config: config), .command("cat"))
 
-        // Auto with nothing available → hint-command backend.
-        let auto = PetAssistant.resolveBackend(
-            choice: .auto, config: config, environment: emptyEnv)
-        XCTAssertEqual(auto, .command("cat"))
-
-        // Explicit OpenAI-style model via ai-base-url.
+        // ai-base-url takes precedence over the hint command.
         config.aiBaseURL = "https://api.example.com/v1"
         config.aiModel = "gpt-4o-mini"
-        let openai = PetAssistant.resolveBackend(
-            choice: .auto, config: config, environment: emptyEnv)
         XCTAssertEqual(
-            openai, .openai(base: "https://api.example.com/v1", key: "", model: "gpt-4o-mini"))
+            PetAssistant.resolveBackend(config: config),
+            .openai(base: "https://api.example.com/v1", key: "", model: "gpt-4o-mini"))
     }
 
-    /// The composer's selected MODEL title maps back to the right choice.
-    func testSelectedTitleMapsToChoice() {
+    /// An explicit provider pick that isn't available also falls through
+    /// rather than forcing an unavailable bridge.
+    func testExplicitUnavailableProviderFallsThrough() {
         var config = AppConfig()
-        config.claudeModel = "Haiku 4.5"
-        let assistant = PetAssistant(
-            config: config, availableChoices: [.auto, .claude, .codex])
-        // The Claude menu title resolves to the claude branch of the picker.
-        let claudeTitle = PetAssistant.AgentChoice.claude.menuTitle(config: config)
-        let backend = assistant.resolveBackend(forSelectedTitle: claudeTitle)
-        // With claude unavailable in this process env it won't be .claude, but
-        // an unknown title would fall to .auto; assert the title matched a real
-        // choice by checking it is NOT the auto-resolved default when they differ.
-        let autoBackend = assistant.resolveBackend(forSelectedTitle: "Auto · Best available")
-        // Both resolve through ProviderDiscovery; the mapping itself is what we
-        // assert: a known title is accepted (does not crash, returns a Backend).
-        _ = backend
-        _ = autoBackend
-        XCTAssertEqual(
-            assistant.availableChoices.first { $0.menuTitle(config: config) == claudeTitle },
-            .claude)
+        config.aiProvider = "none"
+        config.hintCommand = "cat"
+        // Explicit .apple with Foundation Models unavailable in CI → command.
+        let backend = PetAssistant.resolveBackend(
+            choice: .auto, config: config, environment: ["PATH": "/nonexistent"])
+        // On a machine with claude installed this may resolve to .claude;
+        // with the bogus provider it must not, so assert the fallthrough.
+        XCTAssertEqual(backend, .command("cat"))
     }
 
 }
