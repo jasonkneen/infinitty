@@ -118,7 +118,7 @@ final class CodeViewTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
 
         XCTAssertEqual(controller.pageControlLabelsForTesting, ["FILES", "CHANGES", "CHAT"])
-        XCTAssertEqual(controller.pageControlFontSizeForTesting, 12)
+        XCTAssertEqual(controller.pageControlFontSizeForTesting, 10)
         XCTAssertEqual(
             controller.pageControlFontWeightForTesting,
             NSFont.Weight.medium.rawValue)
@@ -284,7 +284,6 @@ final class CodeViewTests: XCTestCase {
                        true, controller.headerTextForTesting)
         XCTAssertEqual(controller.cellTextForTesting(row: 0), "Package.swift")
         XCTAssertEqual(controller.cellBadgeForTesting(row: 0), "M")
-        XCTAssertEqual(controller.statCountsForTesting, [1, 0, 0, 0])
     }
 
     /// The footer picks up the branch without visiting the Changes page, and
@@ -374,15 +373,13 @@ final class CodeViewTests: XCTestCase {
         waitForCondition("changes loaded") {
             controller.topLevelRowCountForTesting == 2
         }
-        XCTAssertEqual(controller.statCountsForTesting, [1, 1, 0, 0])
-
         controller.stageAllForTesting()
         waitForCondition("all staged") {
             let staged = git("diff", "--cached", "--name-only")
             return staged.contains("Package.swift") && staged.contains("new.swift")
         }
-        waitForCondition("stats refreshed") {
-            controller.statCountsForTesting == [1, 0, 1, 0]
+        waitForCondition("changes refreshed") {
+            controller.cellBadgeForTesting(row: 1) == "A"
         }
         XCTAssertEqual(controller.cellBadgeForTesting(row: 1), "A")
     }

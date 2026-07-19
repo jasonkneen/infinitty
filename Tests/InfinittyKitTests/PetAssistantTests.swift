@@ -51,13 +51,11 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertGreaterThan(controller.chatPageFrameForTesting.height, 500)
 
         let panel = assistant.makeSidebarPanelView()
-        XCTAssertEqual(panel.titleForTesting, "Assistant")
-        XCTAssertEqual(panel.newChatTitleForTesting, "New chat")
+        XCTAssertEqual(panel.newChatTitleForTesting, "New")
         XCTAssertEqual(
             panel.emptyStateForTesting,
             "Choose an agent, ask a question, and keep chatting here.")
-        XCTAssertEqual(panel.modelLabelForTesting, "MODEL")
-        XCTAssertEqual(panel.modelValueForTesting, "Auto · Best available")
+        XCTAssertEqual(panel.modelValueForTesting, "Auto")
         XCTAssertEqual(panel.attachmentSymbolForTesting, "paperclip")
         XCTAssertEqual(panel.sendSymbolForTesting, "arrow.up")
         XCTAssertTrue(panel.sendButtonIsCircularForTesting)
@@ -71,14 +69,27 @@ final class PetAssistantTests: XCTestCase {
     }
 
     func testComposerListsInjectedProviderChoices() {
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude, modelID: "claude-sonnet-5",
+            displayName: "Claude Sonnet 5", symbolName: "a.circle")
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-5.6",
+            displayName: "GPT-5.6", symbolName: "o.circle")
         let assistant = PetAssistant(
-            config: AppConfig(), availableChoices: [.auto, .claude, .codex])
+            config: AppConfig(), availableChoices: [.auto, claude, codex])
         let panel = assistant.makeSidebarPanelView()
-        XCTAssertEqual(panel.modelValueForTesting, "Auto · Best available")
+        XCTAssertEqual(panel.modelValueForTesting, "Auto")
         let titles = panel.modelItemTitlesForTesting
-        XCTAssertEqual(titles.first, "Auto · Best available")
-        XCTAssertTrue(titles.contains { $0.hasPrefix("Claude") })
-        XCTAssertTrue(titles.contains { $0.hasPrefix("Codex") })
+        XCTAssertEqual(titles.first, "Auto")
+        XCTAssertTrue(titles.contains("Claude Sonnet 5"))
+        XCTAssertTrue(titles.contains("GPT-5.6"))
+
+        // Selecting a model routes that exact model id into the backend.
+        panel.selectModelForTesting(1)
+        XCTAssertEqual(panel.selectedChoiceForTesting.modelID, "claude-sonnet-5")
+        XCTAssertEqual(
+            PetAssistant.resolveBackend(choice: panel.selectedChoiceForTesting, config: AppConfig()),
+            .claude(model: "claude-sonnet-5"))
     }
     func testPetClickPresentsIndependentAssistantPanel() throws {
         let assistant = PetAssistant(config: AppConfig())
@@ -95,9 +106,8 @@ final class PetAssistantTests: XCTestCase {
 
         let popoverPanel = try XCTUnwrap(assistant.popoverPanelForTesting)
         XCTAssertFalse(popoverPanel === sidebarPanel)
-        XCTAssertEqual(popoverPanel.titleForTesting, "Assistant")
-        XCTAssertEqual(popoverPanel.newChatTitleForTesting, "New chat")
-        XCTAssertEqual(popoverPanel.modelValueForTesting, "Auto · Best available")
+        XCTAssertEqual(popoverPanel.newChatTitleForTesting, "New")
+        XCTAssertEqual(popoverPanel.modelValueForTesting, "Auto")
         XCTAssertTrue(popoverPanel.sendButtonIsCircularForTesting)
         XCTAssertEqual(popoverPanel.presentationForTesting, .popover)
         XCTAssertTrue(popoverPanel.showsCloseButtonForTesting)
@@ -141,20 +151,6 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(
             PetAssistant.resolveBackend(config: config),
             .openai(base: "https://api.example.com/v1", key: "", model: "gpt-4o-mini"))
-    }
-
-    /// An explicit provider pick that isn't available also falls through
-    /// rather than forcing an unavailable bridge.
-    func testExplicitUnavailableProviderFallsThrough() {
-        var config = AppConfig()
-        config.aiProvider = "none"
-        config.hintCommand = "cat"
-        // Explicit .apple with Foundation Models unavailable in CI → command.
-        let backend = PetAssistant.resolveBackend(
-            choice: .auto, config: config, environment: ["PATH": "/nonexistent"])
-        // On a machine with claude installed this may resolve to .claude;
-        // with the bogus provider it must not, so assert the fallthrough.
-        XCTAssertEqual(backend, .command("cat"))
     }
 
 }

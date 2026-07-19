@@ -279,10 +279,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     // UI
     private let pageControl = CodeSegmentedBar(
         labels: ["FILES", "CHANGES", "CHAT"],
-        fontSize: 12, fontWeight: .medium, squared: true)
+        fontSize: 10, fontWeight: .medium, squared: true)
     private let searchField = NSSearchField()
-    private let statsRow = NSView()
-    private var statCountFields: [NSTextField] = []
     private let commitRow = NSView()
     private let commitField = NSTextField()
     private let commitButton = NSButton()
@@ -303,6 +301,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private var selectedChange: CodeChange?
     private var headerTopToSearch: NSLayoutConstraint?
     private var headerTopToCommit: NSLayoutConstraint?
+    private var pageControlTop: NSLayoutConstraint?
     private var splitBottomToFooter: NSLayoutConstraint?
     private var splitBottomToContainer: NSLayoutConstraint?
 
@@ -383,23 +382,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         searchField.layer?.borderColor = CodePalette.hairline.cgColor
         searchField.layer?.masksToBounds = true
         searchField.delegate = self
-        // Changes-page stats: one compact centered line of badge + count chips.
-        let statsStack = NSStackView()
-        statsStack.orientation = .horizontal
-        statsStack.spacing = 12
-        statsStack.alignment = .centerY
-        for (name, color) in Self.statCategories {
-            let chip = Self.statChip(name: name, color: color)
-            statCountFields.append(chip.count)
-            statsStack.addArrangedSubview(chip.view)
-        }
-        statsRow.addSubview(statsStack)
-        statsStack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            statsStack.centerXAnchor.constraint(equalTo: statsRow.centerXAnchor),
-            statsStack.centerYAnchor.constraint(equalTo: statsRow.centerYAnchor),
-        ])
-        statsRow.isHidden = true
 
         // Commit row: message field + button (Changes page only). Enabled
         // when there's a message and at least one staged change.
@@ -663,7 +645,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
         container.addSubview(pageControl)
         container.addSubview(searchField)
-        container.addSubview(statsRow)
         container.addSubview(commitRow)
         container.addSubview(header)
         container.addSubview(split)
@@ -671,7 +652,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         container.addSubview(chatHost)
         pageControl.translatesAutoresizingMaskIntoConstraints = false
         searchField.translatesAutoresizingMaskIntoConstraints = false
-        statsRow.translatesAutoresizingMaskIntoConstraints = false
         commitRow.translatesAutoresizingMaskIntoConstraints = false
         commitField.translatesAutoresizingMaskIntoConstraints = false
         commitButton.translatesAutoresizingMaskIntoConstraints = false
@@ -691,27 +671,23 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         headerTopToCommit = header.topAnchor.constraint(
             equalTo: commitRow.bottomAnchor, constant: 6)
         headerTopToCommit?.isActive = false
+        pageControlTop = pageControl.topAnchor.constraint(
+            equalTo: container.topAnchor, constant: 6)
         splitBottomToFooter = split.bottomAnchor.constraint(equalTo: branchFooter.topAnchor)
         splitBottomToContainer = split.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         splitBottomToFooter?.isActive = false
         NSLayoutConstraint.activate([
-            pageControl.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            pageControlTop!,
             // Natural width, centered — a compact tabbed bar, not a banner.
             pageControl.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             // Explicit height: relying on intrinsicContentSize proved fragile
             // in the live window's split-view layout (the bar ballooned).
-            pageControl.heightAnchor.constraint(equalToConstant: 26),
+            pageControl.heightAnchor.constraint(equalToConstant: 21),
 
             searchField.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6),
             searchField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             searchField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-
-            statsRow.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6),
-            statsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            statsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            statsRow.heightAnchor.constraint(equalToConstant: 20),
-
-            commitRow.topAnchor.constraint(equalTo: statsRow.bottomAnchor, constant: 4),
+            commitRow.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6),
             commitRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             commitRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             commitRow.heightAnchor.constraint(equalToConstant: 26),
@@ -771,61 +747,20 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         view = container
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let window = view.window else { return }
+        let layoutRect = view.convert(window.contentLayoutRect, from: nil)
+        let obscured = max(view.bounds.height - layoutRect.maxY, 0)
+        let target = obscured + 6
+        if pageControlTop?.constant != target { pageControlTop?.constant = target }
+    }
+
     private static func hairline() -> NSView {
         let view = NSView()
         view.wantsLayer = true
         view.layer?.backgroundColor = CodePalette.hairline.cgColor
         return view
-    }
-
-    private static let statCategories: [(name: String, color: NSColor)] = [
-        ("M", NSColor(calibratedRed: 0xE5 / 255, green: 0xC0 / 255, blue: 0x7B / 255, alpha: 1)),
-        ("??", diffAddColor),
-        ("A", diffAddColor),
-        ("D", diffDelColor),
-    ]
-
-    private static func statChip(name: String, color: NSColor) -> (view: NSView, count: NSTextField) {
-        let chip = NSView()
-        let badge = NSTextField(labelWithString: name)
-        badge.alignment = .center
-        badge.font = .systemFont(ofSize: 9, weight: .semibold)
-        badge.textColor = color
-        badge.wantsLayer = true
-        badge.layer?.backgroundColor = color.withAlphaComponent(0.22).cgColor
-        badge.layer?.cornerRadius = 4
-        let count = NSTextField(labelWithString: "0")
-        count.font = .systemFont(ofSize: 11, weight: .semibold)
-        count.textColor = .labelColor
-        chip.addSubview(badge)
-        chip.addSubview(count)
-        badge.translatesAutoresizingMaskIntoConstraints = false
-        count.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            badge.leadingAnchor.constraint(equalTo: chip.leadingAnchor),
-            badge.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
-            badge.widthAnchor.constraint(equalToConstant: 20),
-            badge.heightAnchor.constraint(equalToConstant: 14),
-            count.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 4),
-            count.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
-            count.trailingAnchor.constraint(equalTo: chip.trailingAnchor),
-        ])
-        return (chip, count)
-    }
-
-    private func updateChangeStats() {
-        var counts = [0, 0, 0, 0] // modified, untracked, added, deleted
-        for change in changes {
-            switch change.label {
-            case "??": counts[1] += 1
-            case "A": counts[2] += 1
-            case "D": counts[3] += 1
-            default: counts[0] += 1
-            }
-        }
-        for (i, field) in statCountFields.enumerated() {
-            field.stringValue = "\(counts[i])"
-        }
     }
 
     // MARK: - staging + branch switching
@@ -1037,7 +972,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         notARepo = false
         statusError = nil
         selectedChange = nil
-        updateChangeStats()
         updateStageButton()
         updateBranchFooter()
         updateHeader()
@@ -1053,7 +987,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         page = newPage
         pageControl.setSelectedIndex(newPage.rawValue)
         searchField.isHidden = newPage != .files
-        statsRow.isHidden = newPage != .changes
         commitRow.isHidden = newPage != .changes
         let showingChat = newPage == .chat
         chatHost.isHidden = !showingChat
@@ -1185,7 +1118,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         notARepo = repo == nil
         statusError = status?.error
         selectedChange = nil
-        updateChangeStats()
         updateStageButton()
         updateStageAllButton()
         updateCommitControls()
@@ -1746,7 +1678,6 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             as? NSTableCellView
         return cell?.textField?.stringValue
     }
-    var statCountsForTesting: [Int] { statCountFields.map { Int($0.stringValue) ?? 0 } }
     func reRootForTesting(_ path: String) { reRoot(path) }
     func loadPreviewForTesting(_ url: URL) { loadPreview(for: url) }
     func setMarkdownRenderedForTesting(_ rendered: Bool) {

@@ -37,36 +37,34 @@ final class PetAssistantPanelView: NSView {
     private let config: AppConfig
     private let glassBackground = NSVisualEffectView()
     var onSubmit: ((String, String) -> Void)?
-    /// Agent backend labels ("Codex", "Claude") the owner detected; injected
-    /// at init so UI construction stays machine-independent and testable.
-    private let agentTitles: [String]
+    /// Concrete model choices for the composer picker, injected at init so
+    /// UI construction stays machine-independent and testable.
+    private let choices: [PetAssistant.AgentChoice]
     var onShowFiles: (() -> Void)?
     var onNewChat: (() -> Void)?
     var onClose: (() -> Void)?
 
-    private let titleLabel = NSTextField(labelWithString: "Assistant")
-    private let newChatButton = NSButton(title: "New chat", target: nil, action: nil)
+    private let newChatButton = NSButton(title: "New", target: nil, action: nil)
     private let closeButton = NSButton()
-    private let sparkleTile = NSView()
-    private let sparkleIcon = NSImageView()
     private let separator = NSView()
     private let transcript = NSTextView()
     private let transcriptScroll = NSScrollView()
     private let emptyStateLabel = NSTextField(
         labelWithString: "Choose an agent, ask a question, and keep chatting here.")
-    private let modelLabel = NSTextField(labelWithString: "MODEL")
     private let modelPicker = NSPopUpButton()
     private let inputContainer = NSView()
     private let inputScroll = NSScrollView()
     private let input = TabRenameTextView()
     private let attachmentButton = NSButton()
     private let sendButton = NSButton()
+    private let sendWrap = NSView()
     private let showFilesButton = NSButton(title: "Show Files", target: nil, action: nil)
 
-    init(presentation: Presentation, config: AppConfig, agentTitles: [String] = []) {
+    init(presentation: Presentation, config: AppConfig,
+         choices: [PetAssistant.AgentChoice] = [.auto]) {
         self.presentation = presentation
         self.config = config
-        self.agentTitles = agentTitles
+        self.choices = choices
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         configureSurface()
@@ -102,17 +100,6 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func configureHeader() {
-        sparkleTile.wantsLayer = true
-        sparkleTile.layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
-        sparkleTile.layer?.cornerRadius = 6
-        sparkleIcon.image = NSImage(
-            systemSymbolName: "sparkles", accessibilityDescription: "Assistant")
-        sparkleIcon.contentTintColor = NSColor(
-            calibratedRed: 0.48, green: 0.52, blue: 1, alpha: 1)
-
-        titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-        titleLabel.textColor = .labelColor
-
         newChatButton.image = NSImage(
             systemSymbolName: "plus", accessibilityDescription: "New chat")
         newChatButton.imagePosition = .imageLeading
@@ -163,11 +150,15 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func configureComposer() {
-        modelLabel.font = .systemFont(ofSize: 9, weight: .semibold)
-        modelLabel.textColor = .secondaryLabelColor
-        for title in composerModelTitles() { modelPicker.addItem(withTitle: title) }
         modelPicker.controlSize = .regular
         modelPicker.font = .systemFont(ofSize: NSFont.systemFontSize)
+        modelPicker.menu?.removeAllItems()
+        for choice in choices {
+            let item = NSMenuItem(title: choice.displayName, action: nil, keyEquivalent: "")
+            item.representedObject = choice
+            item.image = PetAssistantPanelView.providerImage(for: choice)
+            modelPicker.menu?.addItem(item)
+        }
 
         inputContainer.wantsLayer = true
         inputContainer.layer?.backgroundColor = NSColor(white: 0.055, alpha: 0.72).cgColor
@@ -208,30 +199,75 @@ final class PetAssistantPanelView: NSView {
         inputScroll.hasVerticalScroller = false
         inputScroll.documentView = input
 
+        let sendConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         sendButton.image = NSImage(
-            systemSymbolName: "arrow.up", accessibilityDescription: "Send")
+            systemSymbolName: "arrow.up", accessibilityDescription: "Send")?
+            .withSymbolConfiguration(sendConfig)
         sendButton.isBordered = false
         sendButton.imagePosition = .imageOnly
+        sendButton.bezelStyle = .regularSquare
         sendButton.focusRingType = .none
         sendButton.contentTintColor = .white
-        sendButton.wantsLayer = true
-        sendButton.layer?.backgroundColor = NSColor(
-            calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1).cgColor
-        sendButton.layer?.cornerRadius = 15
         sendButton.target = self
         sendButton.action = #selector(sendTapped)
+
+        // The circle lives on a fixed-size wrapper, not the button: NSButton's
+        // .regularSquare bezel installs a required intrinsic-height constraint
+        // (~36pt) that beats an explicit height, distorting the button into a
+        // vertical oval. The wrapper is a plain NSView, so its 30x30 is exact.
+        sendWrap.wantsLayer = true
+        sendWrap.layer?.backgroundColor = NSColor(
+            calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1).cgColor
+        sendWrap.layer?.cornerRadius = 15
+        sendWrap.layer?.masksToBounds = true
     }
 
-    private func composerModelTitles() -> [String] {
-        ["Auto · Best available"] + agentTitles
+    /// The composer's currently-selected model choice. Read at submit time.
+    var selectedChoice: PetAssistant.AgentChoice {
+        modelPicker.selectedItem?.representedObject as? PetAssistant.AgentChoice ?? .auto
     }
 
-    /// The composer's currently-selected MODEL title ("Auto · Best available",
-    /// "Codex", "Claude", or a configured model name). Read at submit time.
-    var selectedModelTitle: String { modelPicker.titleOfSelectedItem ?? "Auto · Best available" }
+    /// Provider glyph for a picker row: the real models.dev brand logo
+    /// (bundled SVG, tinted as a template) for Claude/Codex/Apple, or the
+    /// SF Symbol for Auto / when an asset is missing.
+    static func providerImage(for choice: PetAssistant.AgentChoice) -> NSImage? {
+        let logoAsset: String?
+        switch choice.kind {
+        case .claude: logoAsset = "anthropic"
+        case .codex: logoAsset = "openai"
+        case .apple: logoAsset = "apple"
+        case .auto: logoAsset = nil
+        }
+        if let logoAsset,
+           let url = Bundle.main.url(
+               forResource: logoAsset, withExtension: "svg", subdirectory: "Logos")
+               ?? Bundle.module.url(
+                   forResource: logoAsset, withExtension: "svg", subdirectory: "Logos"),
+           let data = try? Data(contentsOf: url),
+           let image = NSImage(data: data), image.isValid {
+            image.size = NSSize(width: 14, height: 14)
+            image.isTemplate = true
+            let tinted = NSImage(size: image.size, flipped: false) { rect in
+                choice.tint.set()
+                rect.fill()
+                image.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1)
+                return true
+            }
+            tinted.isTemplate = false
+            return tinted
+        }
+        guard let symbol = NSImage(
+            systemSymbolName: choice.symbolName, accessibilityDescription: choice.displayName)
+        else { return nil }
+        let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(hierarchicalColor: choice.tint))
+        return symbol.withSymbolConfiguration(cfg)
+    }
 
     override func layout() {
         super.layout()
+        let side = min(sendWrap.bounds.width, sendWrap.bounds.height)
+        if side > 0 { sendWrap.layer?.cornerRadius = side / 2 }
         let clip = inputScroll.contentView.bounds
         guard clip.width > 0, clip.height > 0 else { return }
         input.minSize = NSSize(width: 0, height: clip.height)
@@ -252,20 +288,20 @@ final class PetAssistantPanelView: NSView {
             ])
         }
 
-        sparkleTile.addSubview(sparkleIcon)
         inputContainer.addSubview(attachmentButton)
         inputContainer.addSubview(inputScroll)
-        inputContainer.addSubview(sendButton)
+        sendWrap.addSubview(sendButton)
+        inputContainer.addSubview(sendWrap)
         let views = [
-            sparkleTile, sparkleIcon, titleLabel, newChatButton, closeButton,
+            newChatButton, closeButton,
             separator, transcriptScroll, emptyStateLabel, showFilesButton,
-            modelLabel, modelPicker, inputContainer, attachmentButton,
-            inputScroll, sendButton,
+            modelPicker, inputContainer, attachmentButton,
+            inputScroll, sendButton, sendWrap,
         ]
         for view in views { view.translatesAutoresizingMaskIntoConstraints = false }
         for view in [
-            sparkleTile, titleLabel, newChatButton, closeButton, separator,
-            transcriptScroll, emptyStateLabel, showFilesButton, modelLabel,
+            newChatButton, closeButton, separator,
+            transcriptScroll, emptyStateLabel, showFilesButton,
             modelPicker, inputContainer,
         ] { addSubview(view) }
 
@@ -274,25 +310,16 @@ final class PetAssistantPanelView: NSView {
 
     private func headerConstraints() -> [NSLayoutConstraint] {
         let newChatTrailing = presentation == .popover
-            ? newChatButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8)
-            : newChatButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -13)
+            ? newChatButton.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -8)
+            : newChatButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -13)
         return [
-            sparkleTile.topAnchor.constraint(equalTo: topAnchor, constant: 13),
-            sparkleTile.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
-            sparkleTile.widthAnchor.constraint(equalToConstant: 24),
-            sparkleTile.heightAnchor.constraint(equalToConstant: 24),
-            sparkleIcon.centerXAnchor.constraint(equalTo: sparkleTile.centerXAnchor),
-            sparkleIcon.centerYAnchor.constraint(equalTo: sparkleTile.centerYAnchor),
-            sparkleIcon.widthAnchor.constraint(equalToConstant: 14),
-            sparkleIcon.heightAnchor.constraint(equalToConstant: 14),
-            titleLabel.leadingAnchor.constraint(equalTo: sparkleTile.trailingAnchor, constant: 8),
-            titleLabel.centerYAnchor.constraint(equalTo: sparkleTile.centerYAnchor),
-            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -11),
-            closeButton.centerYAnchor.constraint(equalTo: sparkleTile.centerYAnchor),
-            closeButton.widthAnchor.constraint(equalToConstant: 22),
+            newChatButton.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            newChatButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
             newChatTrailing,
-            newChatButton.centerYAnchor.constraint(equalTo: sparkleTile.centerYAnchor),
-            separator.topAnchor.constraint(equalTo: topAnchor, constant: 50),
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -11),
+            closeButton.centerYAnchor.constraint(equalTo: newChatButton.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 22),
+            separator.topAnchor.constraint(equalTo: topAnchor, constant: 46),
             separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             separator.heightAnchor.constraint(equalToConstant: 1),
@@ -319,9 +346,7 @@ final class PetAssistantPanelView: NSView {
             inputContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             inputContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             inputContainer.heightAnchor.constraint(equalToConstant: 44),
-            modelLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            modelLabel.centerYAnchor.constraint(equalTo: modelPicker.centerYAnchor),
-            modelPicker.leadingAnchor.constraint(equalTo: modelLabel.trailingAnchor, constant: 10),
+            modelPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             modelPicker.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             modelPicker.bottomAnchor.constraint(equalTo: inputContainer.topAnchor, constant: -10),
             modelPicker.heightAnchor.constraint(equalToConstant: 30),
@@ -329,11 +354,15 @@ final class PetAssistantPanelView: NSView {
             attachmentButton.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
             attachmentButton.widthAnchor.constraint(equalToConstant: 24),
             inputScroll.leadingAnchor.constraint(equalTo: attachmentButton.trailingAnchor, constant: 4),
-            inputScroll.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -6),
+            inputScroll.trailingAnchor.constraint(equalTo: sendWrap.leadingAnchor, constant: -6),
             inputScroll.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
             inputScroll.heightAnchor.constraint(equalToConstant: 32),
-            sendButton.trailingAnchor.constraint(equalTo: inputContainer.trailingAnchor, constant: -7),
-            sendButton.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
+            sendWrap.trailingAnchor.constraint(equalTo: inputContainer.trailingAnchor, constant: -7),
+            sendWrap.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
+            sendWrap.widthAnchor.constraint(equalToConstant: 30),
+            sendWrap.heightAnchor.constraint(equalToConstant: 30),
+            sendButton.centerXAnchor.constraint(equalTo: sendWrap.centerXAnchor),
+            sendButton.centerYAnchor.constraint(equalTo: sendWrap.centerYAnchor),
             sendButton.widthAnchor.constraint(equalToConstant: 30),
             sendButton.heightAnchor.constraint(equalToConstant: 30),
         ]
@@ -365,7 +394,7 @@ final class PetAssistantPanelView: NSView {
 
     func setThinking(_ thinking: Bool) {
         input.isEditable = !thinking
-        sendButton.alphaValue = thinking ? 0.45 : 1
+        sendWrap.alphaValue = thinking ? 0.45 : 1
     }
 
     func setHasFiles(_ hasFiles: Bool) { showFilesButton.isHidden = !hasFiles }
@@ -376,7 +405,7 @@ final class PetAssistantPanelView: NSView {
         let request = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty else { return }
         input.string = ""
-        onSubmit?(request, selectedModelTitle)
+        onSubmit?(request, selectedChoice.displayName)
     }
 
     @objc private func sendTapped(_ sender: Any?) { submit() }
@@ -398,17 +427,40 @@ final class PetAssistantPanelView: NSView {
         }
     }
 
-    var titleForTesting: String { titleLabel.stringValue }
     var newChatTitleForTesting: String { newChatButton.title }
     var emptyStateForTesting: String { emptyStateLabel.stringValue }
-    var modelLabelForTesting: String { modelLabel.stringValue }
     var modelValueForTesting: String { modelPicker.titleOfSelectedItem ?? "" }
+    func selectModelForTesting(_ index: Int) { modelPicker.selectItem(at: index) }
+    var selectedChoiceForTesting: PetAssistant.AgentChoice { selectedChoice }
     var modelItemTitlesForTesting: [String] { modelPicker.itemTitles }
     var inputFrameForTesting: NSRect { input.frame }
     var inputIsFirstResponderForTesting: Bool { input.window?.firstResponder === input }
     var attachmentSymbolForTesting: String { "paperclip" }
     var sendSymbolForTesting: String { "arrow.up" }
-    var sendButtonIsCircularForTesting: Bool { sendButton.layer?.cornerRadius == 15 }
+    var sendButtonIsCircularForTesting: Bool { sendWrap.layer?.cornerRadius == 15 }
+    /// The send affordance's actual laid-out frame — used to confirm it is a
+    /// true circle (square bounds + cornerRadius == half the side).
+    var sendButtonFrameForTesting: NSRect { sendWrap.frame }
+    var sendButtonIsTrueCircleForTesting: Bool {
+        let frame = sendWrap.frame
+        return abs(frame.width - frame.height) < 0.5
+            && sendWrap.layer?.cornerRadius == frame.width / 2
+            && sendWrap.layer?.masksToBounds == true
+    }
+    /// No standalone title/label chrome remains in the header/composer.
+    var hasTitleChromeForTesting: Bool {
+        subviews.contains { ($0 as? NSTextField)?.stringValue == "Assistant" }
+    }
+    var hasModelLabelForTesting: Bool {
+        subviews.contains { ($0 as? NSTextField)?.stringValue == "MODEL" }
+    }
+    /// The picker's leading edge, to confirm it moved into the old MODEL slot.
+    var modelPickerLeadingForTesting: CGFloat { modelPicker.frame.minX }
+    /// Each non-Auto picker row carries a provider logo image.
+    var pickerRowsHaveImagesForTesting: Bool {
+        guard let items = modelPicker.menu?.items, items.count > 1 else { return false }
+        return items.dropFirst().allSatisfy { $0.image != nil }
+    }
     var presentationForTesting: Presentation { presentation }
     var showsCloseButtonForTesting: Bool { !closeButton.isHidden }
     var usesGlassSurfaceForTesting: Bool { presentation == .popover }
@@ -456,9 +508,22 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         for provider in [InfinittyAIProvider.claude, .codex, .apple]
         where ProviderDiscovery.isAvailable(provider, environment: environment) {
             switch provider {
-            case .claude: choices.append(.claude)
-            case .codex: choices.append(.codex)
-            case .apple: choices.append(.apple)
+            case .claude:
+                for model in ModelCatalog.claude {
+                    choices.append(AgentChoice(
+                        kind: .claude, modelID: model.id,
+                        displayName: model.name, symbolName: "a.circle"))
+                }
+            case .codex:
+                for model in ModelCatalog.codex {
+                    choices.append(AgentChoice(
+                        kind: .codex, modelID: model.id,
+                        displayName: model.name, symbolName: "o.circle"))
+                }
+            case .apple:
+                choices.append(AgentChoice(
+                    kind: .apple, modelID: nil,
+                    displayName: "Apple On-device", symbolName: "apple.logo"))
             }
         }
         return choices
@@ -480,7 +545,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     ) -> PetAssistantPanelView {
         let panel = PetAssistantPanelView(
             presentation: presentation, config: config,
-            agentTitles: availableChoices.filter { $0 != .auto }.map { $0.menuTitle(config: config) })
+            choices: availableChoices)
         panel.setMessages(sidebarMessages)
         panel.setHasFiles(!lastFiles.isEmpty)
         panel.onSubmit = { [weak self] request, model in
@@ -638,14 +703,24 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         return PetAssistant.resolveBackend(choice: choice, config: config)
     }
 
-    enum AgentChoice: Int, CaseIterable {
-        case auto
-        case claude
-        case codex
-        case apple
+    /// One row in the composer's model picker: a concrete provider + model.
+    /// `.auto` carries no model (resolves the best available at send time).
+    struct AgentChoice: Equatable {
+        enum Kind: Equatable { case auto, claude, codex, apple }
+        let kind: Kind
+        /// Exact API/CLI model id (e.g. "claude-sonnet-5"). Nil for Auto/Apple.
+        let modelID: String?
+        /// Display label shown in the picker (e.g. "Claude Sonnet 5").
+        let displayName: String
+        /// SF Symbol used as the provider glyph beside the label.
+        let symbolName: String
+
+        static let auto = AgentChoice(
+            kind: .auto, modelID: nil,
+            displayName: "Auto", symbolName: "sparkles")
 
         var configuredProvider: String {
-            switch self {
+            switch kind {
             case .auto: return "auto"
             case .claude: return "claude"
             case .codex: return "codex"
@@ -653,14 +728,31 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             }
         }
 
-        func menuTitle(config: AppConfig) -> String {
-            switch self {
-            case .auto: return "Auto · Best available"
-            case .claude: return "Claude · \(config.claudeModel ?? "Haiku 4.5")"
-            case .codex: return "Codex · \(config.codexModel ?? "GPT-5.4")"
-            case .apple: return "Apple · On-device"
+        func menuTitle(config: AppConfig) -> String { displayName }
+
+        /// Brand-ish tint for the provider glyph.
+        var tint: NSColor {
+            switch kind {
+            case .auto: return NSColor(calibratedRed: 0.48, green: 0.52, blue: 1, alpha: 1)
+            case .claude: return NSColor(calibratedRed: 0.85, green: 0.52, blue: 0.32, alpha: 1)
+            case .codex: return NSColor(white: 0.92, alpha: 1)
+            case .apple: return NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.64, alpha: 1)
             }
         }
+    }
+
+    /// Latest models per provider (models.dev, July 2026). Display name is
+    /// cosmetic; `id` is the real CLI/API identifier that gets routed.
+    enum ModelCatalog {
+        static let claude: [(id: String, name: String)] = [
+            ("claude-sonnet-5", "Claude Sonnet 5"),
+            ("claude-opus-4-8", "Claude Opus 4.8"),
+            ("claude-fable-5", "Claude Fable 5"),
+        ]
+        static let codex: [(id: String, name: String)] = [
+            ("gpt-5.6", "GPT-5.6"),
+            ("gpt-5.6-terra", "GPT-5.6 Terra"),
+        ]
     }
 
     enum Backend: Equatable {
@@ -692,9 +784,24 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         config: AppConfig,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Backend {
-        resolveBackend(
-            configuredProvider: choice == .auto ? config.aiProvider : choice.configuredProvider,
-            config: config, environment: environment)
+        // An explicit model pick forces that provider + exact model, so the
+        // UI's selected model is what actually runs (not a config default).
+        switch choice.kind {
+        case .claude:
+            return .claude(model: choice.modelID ?? config.claudeModel)
+        case .codex:
+            return .codex(model: choice.modelID ?? config.codexModel)
+        case .apple:
+            #if canImport(FoundationModels)
+            if #available(macOS 26.0, *), FoundationModelHinter.isAvailable {
+                return .foundation
+            }
+            #endif
+            return .none
+        case .auto:
+            return resolveBackend(
+                configuredProvider: config.aiProvider, config: config, environment: environment)
+        }
     }
 
     static func resolveBackend(

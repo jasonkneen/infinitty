@@ -130,7 +130,6 @@ final class SidebarToggleView: NSView {
         updatePresentation()
     }
 
-
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
