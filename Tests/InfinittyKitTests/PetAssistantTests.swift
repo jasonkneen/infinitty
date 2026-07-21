@@ -104,13 +104,18 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "None", "Low", "Medium", "High"])
         XCTAssertEqual(panel.effortValueForTesting, "Auto")
         XCTAssertTrue(panel.effortUsesBrainButtonForTesting)
-        XCTAssertEqual(panel.modelPickerHeightForTesting, 24, accuracy: 0.5)
+        XCTAssertTrue(panel.effortUsesPrimaryActionMenuForTesting)
+        XCTAssertEqual(panel.modelPickerHeightForTesting, 26, accuracy: 0.5)
+        XCTAssertTrue(panel.selectEffort(named: "High"))
+        XCTAssertEqual(panel.effortValueForTesting, "High")
 
         // (c) user turns render as bubbles; assistant turns do not.
         panel.setMessages([(role: "You", text: "hi"), (role: "Assistant", text: "hello")])
         panel.layoutSubtreeIfNeeded()
         XCTAssertEqual(panel.userBubbleCountForTesting, 1)
         XCTAssertEqual(panel.transcriptForTesting, "YOU\nhi\n\nASSISTANT\nhello")
+        XCTAssertTrue(panel.assistantRowsUseFullWidthForTesting)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(panel.assistantMetadataGapForTesting), 3.5)
 
         // Typing indicator appears while thinking and clears afterwards.
         XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
@@ -118,6 +123,80 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertTrue(panel.isShowingTypingIndicatorForTesting)
         panel.setThinking(false)
         XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testComposerControlsSitBelowInputAndQueuedTurnsSitAboveIt() {
+        let panel = PetAssistant(config: AppConfig()).makeSidebarPanelView()
+        panel.frame = NSRect(x: 0, y: 0, width: 360, height: 600)
+        panel.setQueuedMessages(["second question", "third question"])
+        panel.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(panel.composerControlsAreBelowInputForTesting)
+        XCTAssertTrue(panel.queueIsAboveInputForTesting)
+        XCTAssertEqual(panel.queuedMessagesForTesting, ["second question", "third question"])
+    }
+
+    func testMessagesSubmittedDuringGenerationQueueAndRunInOrder() {
+        var started: [String] = []
+        var completions: [PetAssistant.AskCompletion] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { request, _, _, completion in
+                started.append(request)
+                completions.append(completion)
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("first")
+        panel.submitForTesting("second")
+        panel.submitForTesting("third")
+
+        XCTAssertEqual(started, ["first"])
+        XCTAssertEqual(panel.queuedMessagesForTesting, ["second", "third"])
+        XCTAssertEqual(panel.transcriptForTesting, "YOU\nfirst")
+        XCTAssertTrue(panel.isShowingTypingIndicatorForTesting)
+
+        completions[0]("first answer", [], nil)
+
+        XCTAssertEqual(started, ["first", "second"])
+        XCTAssertEqual(panel.queuedMessagesForTesting, ["third"])
+        XCTAssertEqual(
+            panel.transcriptForTesting,
+            "YOU\nfirst\n\nASSISTANT\nfirst answer\n\nYOU\nsecond")
+
+        completions[1]("second answer", [], nil)
+        completions[2]("third answer", [], nil)
+
+        XCTAssertEqual(started, ["first", "second", "third"])
+        XCTAssertEqual(panel.queuedMessagesForTesting, [])
+        XCTAssertTrue(panel.transcriptForTesting.hasSuffix("ASSISTANT\nthird answer"))
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testNewChatDropsQueuedTurnsAndIgnoresStaleCompletion() {
+        var started: [String] = []
+        var completions: [PetAssistant.AskCompletion] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { request, _, _, completion in
+                started.append(request)
+                completions.append(completion)
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("old in flight")
+        panel.submitForTesting("old queued")
+        panel.newChatForTesting()
+        panel.submitForTesting("new chat")
+
+        XCTAssertEqual(panel.queuedMessagesForTesting, ["new chat"])
+        completions[0]("stale answer", ["Old.swift"], "old")
+
+        XCTAssertEqual(started, ["old in flight", "new chat"])
+        XCTAssertFalse(panel.transcriptForTesting.contains("stale answer"))
+        XCTAssertFalse(panel.transcriptForTesting.contains("old queued"))
+        XCTAssertEqual(panel.transcriptForTesting, "YOU\nnew chat")
+        XCTAssertFalse(panel.showsFilesButtonForTesting)
     }
 
     func testComposerListsInjectedProviderChoices() {

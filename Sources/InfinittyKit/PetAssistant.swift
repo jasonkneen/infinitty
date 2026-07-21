@@ -31,6 +31,24 @@ final class FlippedClipDocument: NSView {
     override var isFlipped: Bool { true }
 }
 
+struct AssistantChatMessage {
+    let role: String
+    let text: String
+    let createdAt: Date
+    let tokenCount: Int?
+
+    init(role: String, text: String, createdAt: Date = Date(), tokenCount: Int? = nil) {
+        self.role = role
+        self.text = text
+        self.createdAt = createdAt
+        self.tokenCount = tokenCount
+    }
+
+    static func approximateTokenCount(for text: String) -> Int {
+        max(1, Int(ceil(Double(text.utf8.count) / 4.0)))
+    }
+}
+
 /// One chat message row spanning the full transcript width. User turns show a
 /// right-aligned rounded accent bubble (≤78% width); assistant turns render as
 /// full-width flowing text on the transparent surface — the ChatGPT/Stream
@@ -38,14 +56,21 @@ final class FlippedClipDocument: NSView {
 final class ChatMessageView: NSView {
     static var accent: NSColor { CodePalette.selectionAccent }
     private let messageText: String
+    private let timestamp: Date
+    private weak var timeLabel: NSTextField?
+    private weak var contentLabel: NSTextField?
+    private weak var metadataView: NSView?
+    private var timeRefreshTimer: Timer?
 
     init(role: String, text: String, timestamp: Date = Date(), tokenCount: Int? = nil) {
         messageText = text
+        self.timestamp = timestamp
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         let isUser = role.caseInsensitiveCompare("You") == .orderedSame
 
         let label = NSTextField(wrappingLabelWithString: text)
+        contentLabel = label
         label.isSelectable = true
         label.isEditable = false
         label.drawsBackground = false
@@ -78,7 +103,8 @@ final class ChatMessageView: NSView {
             let timeLabel = NSTextField(labelWithString: Self.relativeTime(since: timestamp))
             timeLabel.font = .systemFont(ofSize: 10)
             timeLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.55)
-            let estimatedTokens = tokenCount ?? max(1, Int(ceil(Double(text.utf8.count) / 4.0)))
+            let estimatedTokens = tokenCount
+                ?? AssistantChatMessage.approximateTokenCount(for: text)
             let tokenLabel = NSTextField(labelWithString: "~\(estimatedTokens) tokens")
             tokenLabel.font = .systemFont(ofSize: 10)
             tokenLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.55)
@@ -98,11 +124,18 @@ final class ChatMessageView: NSView {
             metadata.translatesAutoresizingMaskIntoConstraints = false
             addSubview(label)
             addSubview(metadata)
+            self.timeLabel = timeLabel
+            metadataView = metadata
+            let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+                self?.refreshRelativeTime()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            timeRefreshTimer = timer
             NSLayoutConstraint.activate([
                 label.topAnchor.constraint(equalTo: topAnchor),
                 label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
                 label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
-                metadata.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 5),
+                metadata.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 3),
                 metadata.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
                 metadata.bottomAnchor.constraint(equalTo: bottomAnchor),
                 copyButton.widthAnchor.constraint(equalToConstant: 18),
@@ -112,6 +145,8 @@ final class ChatMessageView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit { timeRefreshTimer?.invalidate() }
 
     private static func relativeTime(since date: Date, now: Date = Date()) -> String {
         let seconds = max(Int(now.timeIntervalSince(date)), 0)
@@ -124,6 +159,68 @@ final class ChatMessageView: NSView {
     @objc private func copyReply() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([messageText as NSString])
+    }
+
+    private func refreshRelativeTime() {
+        timeLabel?.stringValue = Self.relativeTime(since: timestamp)
+    }
+
+    var metadataGapForTesting: CGFloat? {
+        guard let contentLabel, let metadataView else { return nil }
+        return max(
+            contentLabel.frame.minY - metadataView.frame.maxY,
+            metadataView.frame.minY - contentLabel.frame.maxY,
+            0)
+    }
+}
+
+/// A compact pending user turn. Pending turns stay immediately above the
+/// composer until the active request finishes, then move into the transcript
+/// as the next real conversation turn.
+final class QueuedChatMessageView: NSView {
+    init(text: String) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let bubble = NSView()
+        bubble.wantsLayer = true
+        bubble.layer?.backgroundColor = CodePalette.selectionAccent.withAlphaComponent(0.48).cgColor
+        bubble.layer?.cornerRadius = 10
+        bubble.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = NSColor.white.withAlphaComponent(0.82)
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        bubble.addSubview(label)
+        addSubview(bubble)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 5),
+            label.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -5),
+            label.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -10),
+            bubble.topAnchor.constraint(equalTo: topAnchor, constant: 1),
+            bubble.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
+            bubble.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bubble.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 44),
+            bubble.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.78),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+final class PrimaryMenuButton: NSButton {
+    override func mouseDown(with event: NSEvent) { showMenu() }
+    override func performClick(_ sender: Any?) { showMenu() }
+
+    private func showMenu() {
+        menu?.popUp(
+            positioning: menu?.items.first(where: { $0.state == .on }),
+            at: NSPoint(x: 0, y: bounds.maxY + 2), in: self)
     }
 }
 
@@ -197,11 +294,14 @@ final class PetAssistantPanelView: NSView {
     private let separator = NSView()
     private let transcriptStack = NSStackView()
     private let transcriptScroll = NSScrollView()
+    private let queueStack = NSStackView()
+    private let queueScroll = NSScrollView()
+    private var queueHeightConstraint: NSLayoutConstraint!
     private let emptyStateLabel = NSTextField(
         labelWithString: "Choose an agent, ask a question, and keep chatting here.")
     private let modelPicker = NSPopUpButton()
     private let effortPicker = NSPopUpButton()
-    private let effortButton = NSButton()
+    private let effortButton = PrimaryMenuButton()
     private let inputContainer = NSView()
     private let inputScroll = NSScrollView()
     private let input = TabRenameTextView()
@@ -209,6 +309,7 @@ final class PetAssistantPanelView: NSView {
     private let sendButton = NSButton()
     private let sendWrap = NSView()
     private let showFilesButton = NSButton(title: "Show Files", target: nil, action: nil)
+    private var queuedMessages: [String] = []
 
     init(presentation: Presentation, config: AppConfig,
          choices: [PetAssistant.AgentChoice] = [.auto]) {
@@ -278,6 +379,7 @@ final class PetAssistantPanelView: NSView {
         // surface; user messages get a rounded bubble panel.
         transcriptStack.orientation = .vertical
         transcriptStack.alignment = .width
+        transcriptStack.distribution = .fill
         transcriptStack.spacing = 14
         transcriptStack.edgeInsets = NSEdgeInsets(top: 2, left: 0, bottom: 10, right: 0)
         transcriptStack.translatesAutoresizingMaskIntoConstraints = false
@@ -300,6 +402,31 @@ final class PetAssistantPanelView: NSView {
             transcriptStack.bottomAnchor.constraint(equalTo: flipped.bottomAnchor),
         ])
 
+        queueStack.orientation = .vertical
+        queueStack.alignment = .width
+        queueStack.distribution = .fill
+        queueStack.spacing = 4
+        queueStack.edgeInsets = NSEdgeInsets(top: 1, left: 0, bottom: 1, right: 0)
+        queueStack.translatesAutoresizingMaskIntoConstraints = false
+        let queueDocument = FlippedClipDocument()
+        queueDocument.translatesAutoresizingMaskIntoConstraints = false
+        queueDocument.addSubview(queueStack)
+        queueScroll.borderType = .noBorder
+        queueScroll.drawsBackground = false
+        queueScroll.hasVerticalScroller = true
+        queueScroll.autohidesScrollers = true
+        queueScroll.documentView = queueDocument
+        queueScroll.isHidden = true
+        NSLayoutConstraint.activate([
+            queueDocument.leadingAnchor.constraint(equalTo: queueScroll.contentView.leadingAnchor),
+            queueDocument.trailingAnchor.constraint(equalTo: queueScroll.contentView.trailingAnchor),
+            queueDocument.topAnchor.constraint(equalTo: queueScroll.contentView.topAnchor),
+            queueStack.topAnchor.constraint(equalTo: queueDocument.topAnchor),
+            queueStack.leadingAnchor.constraint(equalTo: queueDocument.leadingAnchor),
+            queueStack.trailingAnchor.constraint(equalTo: queueDocument.trailingAnchor),
+            queueStack.bottomAnchor.constraint(equalTo: queueDocument.bottomAnchor),
+        ])
+
         emptyStateLabel.font = .systemFont(ofSize: 12, weight: .regular)
         emptyStateLabel.textColor = NSColor(white: 0.56, alpha: 1)
         emptyStateLabel.alignment = .left
@@ -316,7 +443,7 @@ final class PetAssistantPanelView: NSView {
 
     private func configureComposer() {
         modelPicker.controlSize = .small
-        modelPicker.font = .systemFont(ofSize: 11, weight: .medium)
+        modelPicker.font = .systemFont(ofSize: 13, weight: .medium)
         modelPicker.menu?.removeAllItems()
         for choice in choices {
             let item = NSMenuItem(title: choice.displayName, action: nil, keyEquivalent: "")
@@ -339,10 +466,12 @@ final class PetAssistantPanelView: NSView {
             systemSymbolName: "brain.head.profile", accessibilityDescription: "Thinking effort")
         effortButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
         effortButton.imagePosition = .imageOnly
+        effortButton.title = "▾"
+        effortButton.imagePosition = .imageLeading
+        effortButton.font = .systemFont(ofSize: 10, weight: .medium)
         effortButton.isBordered = false
         effortButton.contentTintColor = .secondaryLabelColor
-        effortButton.target = self
-        effortButton.action = #selector(showEffortMenu)
+        effortButton.menu = makeEffortMenu()
         effortButton.toolTip = "Thinking: Auto"
 
         inputContainer.wantsLayer = true
@@ -437,6 +566,7 @@ final class PetAssistantPanelView: NSView {
         if let item = items.first(where: { $0.title.lowercased() == q }) {
             effortPicker.select(item)
             effortButton.toolTip = "Thinking: \(item.title)"
+            effortButton.menu = makeEffortMenu()
             return true
         }
         return false
@@ -509,14 +639,14 @@ final class PetAssistantPanelView: NSView {
         inputContainer.addSubview(sendWrap)
         let views = [
             newChatButton, closeButton,
-            separator, transcriptScroll, emptyStateLabel, showFilesButton,
+            separator, transcriptScroll, emptyStateLabel, showFilesButton, queueScroll,
             modelPicker, effortButton, inputContainer, attachmentButton,
             inputScroll, sendButton, sendWrap,
         ]
         for view in views { view.translatesAutoresizingMaskIntoConstraints = false }
         for view in [
             newChatButton, closeButton, separator,
-            transcriptScroll, emptyStateLabel, showFilesButton,
+            transcriptScroll, emptyStateLabel, showFilesButton, queueScroll,
             modelPicker, effortButton, inputContainer,
         ] { addSubview(view) }
 
@@ -547,18 +677,23 @@ final class PetAssistantPanelView: NSView {
             ? transcriptScroll.topAnchor.constraint(equalTo: topAnchor)
             : transcriptScroll.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 4)
         let emptyTop = presentation == .sidebar
-            ? emptyStateLabel.topAnchor.constraint(equalTo: topAnchor, constant: 12)
+            ? emptyStateLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2)
             : emptyStateLabel.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 18)
+        queueHeightConstraint = queueScroll.heightAnchor.constraint(equalToConstant: 0)
         return [
             transcriptTop,
-            transcriptScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            transcriptScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            transcriptScroll.bottomAnchor.constraint(equalTo: modelPicker.topAnchor, constant: -12),
+            transcriptScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            transcriptScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            transcriptScroll.bottomAnchor.constraint(equalTo: queueScroll.topAnchor, constant: -6),
             emptyTop,
             emptyStateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
             emptyStateLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -18),
             showFilesButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            showFilesButton.bottomAnchor.constraint(equalTo: modelPicker.topAnchor, constant: -8),
+            showFilesButton.bottomAnchor.constraint(equalTo: queueScroll.topAnchor, constant: -6),
+            queueScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            queueScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            queueScroll.bottomAnchor.constraint(equalTo: inputContainer.topAnchor, constant: -6),
+            queueHeightConstraint,
         ]
     }
 
@@ -566,16 +701,16 @@ final class PetAssistantPanelView: NSView {
         [
             inputContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             inputContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            inputContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            inputContainer.bottomAnchor.constraint(equalTo: modelPicker.topAnchor, constant: -7),
             inputContainer.heightAnchor.constraint(equalToConstant: 44),
             modelPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            modelPicker.bottomAnchor.constraint(equalTo: inputContainer.topAnchor, constant: -7),
-            modelPicker.heightAnchor.constraint(equalToConstant: 24),
+            modelPicker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            modelPicker.heightAnchor.constraint(equalToConstant: 26),
             modelPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
             effortButton.leadingAnchor.constraint(equalTo: modelPicker.trailingAnchor, constant: 5),
             effortButton.centerYAnchor.constraint(equalTo: modelPicker.centerYAnchor),
-            effortButton.widthAnchor.constraint(equalToConstant: 26),
-            effortButton.heightAnchor.constraint(equalToConstant: 24),
+            effortButton.widthAnchor.constraint(equalToConstant: 44),
+            effortButton.heightAnchor.constraint(equalToConstant: 26),
             effortButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             attachmentButton.leadingAnchor.constraint(equalTo: inputContainer.leadingAnchor, constant: 8),
             attachmentButton.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
@@ -595,17 +730,36 @@ final class PetAssistantPanelView: NSView {
         ]
     }
 
-    private var lastMessages: [(role: String, text: String)] = []
-    private var messageTimestamps: [Date] = []
+    private var lastMessages: [AssistantChatMessage] = []
     private var typingIndicator: ChatTypingIndicator?
 
-    func setMessages(_ messages: [(role: String, text: String)]) {
-        if messages.count < messageTimestamps.count {
-            messageTimestamps.removeLast(messageTimestamps.count - messages.count)
-        }
-        while messageTimestamps.count < messages.count { messageTimestamps.append(Date()) }
+    func setMessages(_ messages: [AssistantChatMessage]) {
         lastMessages = messages
         rebuildTranscript()
+    }
+
+    func setMessages(_ messages: [(role: String, text: String)]) {
+        setMessages(messages.map { AssistantChatMessage(role: $0.role, text: $0.text) })
+    }
+
+    func setQueuedMessages(_ messages: [String]) {
+        queuedMessages = messages
+        queueStack.arrangedSubviews.forEach {
+            queueStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        for message in messages {
+            queueStack.addArrangedSubview(QueuedChatMessageView(text: message))
+        }
+        queueScroll.isHidden = messages.isEmpty
+        queueHeightConstraint?.constant = messages.isEmpty
+            ? 0
+            : min(CGFloat(messages.count) * 32 + CGFloat(max(messages.count - 1, 0)) * 4, 92)
+        layoutSubtreeIfNeeded()
+        if let document = queueScroll.documentView {
+            queueScroll.contentView.scrollToVisible(
+                NSRect(x: 0, y: document.bounds.maxY - 1, width: 1, height: 1))
+        }
     }
 
     private func rebuildTranscript() {
@@ -613,14 +767,16 @@ final class PetAssistantPanelView: NSView {
             transcriptStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
-        for (index, message) in lastMessages.enumerated() {
-            transcriptStack.addArrangedSubview(
-                ChatMessageView(
-                    role: message.role, text: message.text,
-                    timestamp: messageTimestamps[index]))
+        for message in lastMessages {
+            let row = ChatMessageView(
+                role: message.role, text: message.text,
+                timestamp: message.createdAt, tokenCount: message.tokenCount)
+            transcriptStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: transcriptStack.widthAnchor).isActive = true
         }
         if let typingIndicator {
             transcriptStack.addArrangedSubview(typingIndicator)
+            typingIndicator.widthAnchor.constraint(equalTo: transcriptStack.widthAnchor).isActive = true
             typingIndicator.startAnimating()
         }
         let showTranscript = !lastMessages.isEmpty || typingIndicator != nil
@@ -634,8 +790,8 @@ final class PetAssistantPanelView: NSView {
     }
 
     func setThinking(_ thinking: Bool) {
-        input.isEditable = !thinking
-        sendWrap.alphaValue = thinking ? 0.45 : 1
+        input.isEditable = true
+        sendWrap.alphaValue = 1
         if thinking, typingIndicator == nil {
             typingIndicator = ChatTypingIndicator()
             rebuildTranscript()
@@ -661,7 +817,7 @@ final class PetAssistantPanelView: NSView {
     @objc private func newChatTapped(_ sender: Any?) { onNewChat?() }
     @objc private func closeTapped(_ sender: Any?) { onClose?() }
 
-    @objc private func showEffortMenu(_ sender: NSButton) {
+    private func makeEffortMenu() -> NSMenu {
         let menu = NSMenu(title: "Thinking")
         for level in effortPicker.itemTitles {
             let item = NSMenuItem(
@@ -670,12 +826,13 @@ final class PetAssistantPanelView: NSView {
             item.state = level == selectedEffort ? .on : .off
             menu.addItem(item)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 2), in: sender)
+        return menu
     }
 
     @objc private func effortSelected(_ sender: NSMenuItem) {
         effortPicker.selectItem(withTitle: sender.title)
         effortButton.toolTip = "Thinking: \(sender.title)"
+        effortButton.menu = makeEffortMenu()
     }
 
     @objc private func attachmentTapped(_ sender: Any?) {
@@ -701,6 +858,9 @@ final class PetAssistantPanelView: NSView {
     var effortTitlesForTesting: [String] { effortPicker.itemTitles }
     var effortValueForTesting: String { effortPicker.titleOfSelectedItem ?? "" }
     var effortUsesBrainButtonForTesting: Bool { effortButton.image != nil }
+    var effortUsesPrimaryActionMenuForTesting: Bool {
+        effortButton.menu?.items.count == 5
+    }
     var modelPickerHeightForTesting: CGFloat { modelPicker.frame.height }
     /// The sidebar chat surface is transparent (sits on the black host); the
     /// popover keeps its glass. nil layer color reads as clear.
@@ -738,6 +898,23 @@ final class PetAssistantPanelView: NSView {
     }
     /// The picker's leading edge, to confirm it moved into the old MODEL slot.
     var modelPickerLeadingForTesting: CGFloat { modelPicker.frame.minX }
+    var composerControlsAreBelowInputForTesting: Bool {
+        modelPicker.frame.maxY <= inputContainer.frame.minY + 0.5
+            && effortButton.frame.maxY <= inputContainer.frame.minY + 0.5
+    }
+    var queueIsAboveInputForTesting: Bool {
+        queueScroll.isHidden || queueScroll.frame.minY >= inputContainer.frame.maxY - 0.5
+    }
+    var queuedMessagesForTesting: [String] { queuedMessages }
+    var assistantRowsUseFullWidthForTesting: Bool {
+        transcriptStack.arrangedSubviews.compactMap { $0 as? ChatMessageView }
+            .filter { $0.subviews.allSatisfy { $0.layer?.cornerRadius != 13 } }
+            .allSatisfy { abs($0.frame.width - transcriptStack.bounds.width) < 0.5 }
+    }
+    var assistantMetadataGapForTesting: CGFloat? {
+        transcriptStack.arrangedSubviews.compactMap { $0 as? ChatMessageView }
+            .compactMap(\.metadataGapForTesting).first
+    }
     /// Each non-Auto picker row carries a provider logo image.
     var pickerRowsHaveImagesForTesting: Bool {
         guard let items = modelPicker.menu?.items, items.count > 1 else { return false }
@@ -750,6 +927,7 @@ final class PetAssistantPanelView: NSView {
         lastMessages.map { "\($0.role.uppercased())\n\($0.text)" }.joined(separator: "\n\n")
     }
     var showsEmptyStateForTesting: Bool { !emptyStateLabel.isHidden }
+    var showsFilesButtonForTesting: Bool { !showFilesButton.isHidden }
     func submitForTesting(_ request: String) {
         input.string = request
         submit()
@@ -761,13 +939,30 @@ final class PetAssistantPanelView: NSView {
 /// by the sidebar CHAT page in an independently owned popover view. Both
 /// presentations share conversation and request state.
 final class PetAssistant: NSObject, NSPopoverDelegate {
+    typealias AskCompletion = (String, [String], String?) -> Void
+    typealias RequestRunner = (
+        _ request: String, _ model: String, _ effort: String,
+        _ completion: @escaping AskCompletion
+    ) -> Void
+
+    private struct PendingRequest {
+        let text: String
+        let model: String
+        let effort: String
+        let generation: Int
+    }
+
     private weak var session: TerminalSession?
     private let config: AppConfig
+    private let requestRunner: RequestRunner?
     private var popover: NSPopover?
     private weak var popoverPanel: PetAssistantPanelView?
     private var lastFiles: [String] = []
     private var lastQuery: String?
-    private var sidebarMessages: [(role: String, text: String)] = []
+    private var sidebarMessages: [AssistantChatMessage] = []
+    private var pendingRequests: [PendingRequest] = []
+    private var requestInFlight = false
+    private var conversationGeneration = 0
     private weak var sidebarPanel: PetAssistantPanelView?
     /// AI provider choices available in the composer's MODEL picker,
     /// gated by which CLIs/models this Mac actually has.
@@ -776,8 +971,13 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Hand-off: file results the user wants to see in the code-view sidebar.
     var onShowInSidePanel: ((_ paths: [String], _ query: String?) -> Void)?
 
-    init(config: AppConfig, availableChoices: [AgentChoice]? = nil) {
+    init(
+        config: AppConfig,
+        availableChoices: [AgentChoice]? = nil,
+        requestRunner: RequestRunner? = nil
+    ) {
         self.config = config
+        self.requestRunner = requestRunner
         self.availableChoices = availableChoices ?? PetAssistant.resolveChoices(config: config)
         super.init()
     }
@@ -831,6 +1031,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             presentation: presentation, config: config,
             choices: availableChoices)
         panel.setMessages(sidebarMessages)
+        panel.setQueuedMessages(pendingRequests.map(\.text))
         panel.setHasFiles(!lastFiles.isEmpty)
         panel.onSubmit = { [weak self] request, model, effort in
             self?.submitFromPanel(request, model: model, effort: effort)
@@ -844,9 +1045,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func resetConversation() {
+        conversationGeneration += 1
+        pendingRequests.removeAll()
         sidebarMessages.removeAll()
         lastFiles.removeAll()
         lastQuery = nil
+        setPanelsThinking(false)
         updatePanels()
     }
 
@@ -855,6 +1059,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private func updatePanels() {
         for panel in [sidebarPanel, popoverPanel].compactMap({ $0 }) {
             panel.setMessages(sidebarMessages)
+            panel.setQueuedMessages(pendingRequests.map(\.text))
             panel.setHasFiles(!lastFiles.isEmpty)
         }
     }
@@ -866,15 +1071,63 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func submitFromPanel(_ request: String, model: String, effort: String = "Auto") {
-        sidebarMessages.append((role: "You", text: request))
+        pendingRequests.append(PendingRequest(
+            text: request, model: model, effort: effort,
+            generation: conversationGeneration))
+        updatePanels()
+        processNextRequest()
+    }
+
+    private func processNextRequest() {
+        guard !requestInFlight else { return }
+        while let next = pendingRequests.first,
+              next.generation != conversationGeneration {
+            pendingRequests.removeFirst()
+        }
+        guard !pendingRequests.isEmpty else {
+            setPanelsThinking(false)
+            updatePanels()
+            return
+        }
+
+        let request = pendingRequests.removeFirst()
+        requestInFlight = true
+        sidebarMessages.append(AssistantChatMessage(role: "You", text: request.text))
         updatePanels()
         setPanelsThinking(true)
-        ask(request, model: model, effort: effort) { [weak self] answer, _, _ in
+
+        let completion: AskCompletion = { [weak self] answer, files, query in
             guard let self else { return }
-            self.sidebarMessages.append((role: "Assistant", text: answer))
-            self.updatePanels()
-            self.setPanelsThinking(false)
+            let finish = {
+                self.completeRequest(
+                    request, answer: answer, files: files, query: query)
+            }
+            if Thread.isMainThread { finish() }
+            else { DispatchQueue.main.async(execute: finish) }
         }
+        if let requestRunner {
+            requestRunner(request.text, request.model, request.effort, completion)
+        } else {
+            ask(
+                request.text, model: request.model, effort: request.effort,
+                completion: completion)
+        }
+    }
+
+    private func completeRequest(
+        _ request: PendingRequest, answer: String,
+        files: [String], query: String?
+    ) {
+        requestInFlight = false
+        if request.generation == conversationGeneration {
+            lastFiles = files
+            lastQuery = query
+            sidebarMessages.append(AssistantChatMessage(
+                role: "Assistant", text: answer,
+                tokenCount: AssistantChatMessage.approximateTokenCount(for: answer)))
+            updatePanels()
+        }
+        processNextRequest()
     }
 
     func detach() {
@@ -964,8 +1217,6 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     keywords>" and nothing else; you will receive the matching files to compose \
     the final answer.
     """
-
-    private typealias AskCompletion = (String, [String], String?) -> Void
 
     private func ask(
         _ request: String, model: String = "Auto · Best available",
@@ -1235,8 +1486,6 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     ) {
         DispatchQueue.main.async {
             self.session?.petAnimator?.stopThinking()
-            self.lastFiles = files
-            self.lastQuery = query
             completion?(answer, files, query)
         }
     }

@@ -160,22 +160,25 @@ final class UtilityPaneView: NSView {
 
     override func layout() {
         super.layout()
-        let horizontal = PaneMetrics.horizontalInset
-        let top = PaneMetrics.topInset
-        let bottom = PaneMetrics.bottomInset
+        let horizontalInsets = paneHorizontalInsets()
+        let leading = horizontalInsets.leading
+        let trailing = horizontalInsets.trailing
+        let verticalInsets = paneVerticalInsets()
+        let top = verticalInsets.top
+        let bottom = verticalInsets.bottom
         let obstruction = paneTopObstructionPoints()
         paneOutline.frame = NSRect(
-            x: horizontal, y: bottom,
-            width: max(bounds.width - horizontal * 2, 0),
+            x: leading, y: bottom,
+            width: max(bounds.width - leading - trailing, 0),
             height: max(bounds.height - top - bottom, 0))
         let headerY = max(
             bounds.height - obstruction - PaneHeaderView.height - top, bottom)
         paneHeader.frame = NSRect(
-            x: horizontal, y: headerY,
-            width: max(bounds.width - horizontal * 2, 0), height: PaneHeaderView.height)
+            x: leading, y: headerY,
+            width: max(bounds.width - leading - trailing, 0), height: PaneHeaderView.height)
         contentView.frame = NSRect(
-            x: horizontal, y: bottom,
-            width: max(bounds.width - horizontal * 2, 0),
+            x: leading, y: bottom,
+            width: max(bounds.width - leading - trailing, 0),
             height: max(headerY - top - bottom, 0))
         closeButton.frame.origin = NSPoint(x: max(paneHeader.bounds.width - 98, 0), y: 2)
         newChatButton.frame = NSRect(

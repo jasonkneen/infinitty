@@ -109,6 +109,9 @@ enum MarkdownRender {
             out.append(NSAttributedString(string: "\n"))
         }
         if inFence { flushFence() }
+        if out.string.hasSuffix("\n") {
+            out.deleteCharacters(in: NSRange(location: out.length - 1, length: 1))
+        }
         return out
     }
 

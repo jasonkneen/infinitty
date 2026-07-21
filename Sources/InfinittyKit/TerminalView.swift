@@ -171,17 +171,20 @@ final class TerminalView: NSView {
     override func layout() {
         super.layout()
         let obstruction = paneTopObstructionPoints()
-        let horizontal = PaneMetrics.horizontalInset
-        let top = PaneMetrics.topInset
-        let bottom = PaneMetrics.bottomInset
+        let horizontalInsets = paneHorizontalInsets()
+        let leading = horizontalInsets.leading
+        let trailing = horizontalInsets.trailing
+        let verticalInsets = paneVerticalInsets()
+        let top = verticalInsets.top
+        let bottom = verticalInsets.bottom
         paneOutline.frame = NSRect(
-            x: horizontal, y: bottom,
-            width: max(bounds.width - horizontal * 2, 0),
+            x: leading, y: bottom,
+            width: max(bounds.width - leading - trailing, 0),
             height: max(bounds.height - top - bottom, 0))
         paneHeader.frame = NSRect(
-            x: horizontal,
+            x: leading,
             y: max(bounds.height - obstruction - PaneHeaderView.height - top, bottom),
-            width: max(bounds.width - horizontal * 2, 0),
+            width: max(bounds.width - leading - trailing, 0),
             height: min(PaneHeaderView.height, bounds.height))
         positionPaneShortcutHint()
         updateGeometry()
@@ -192,6 +195,8 @@ final class TerminalView: NSView {
             renderer.renderNow()
         }
     }
+
+    var outlineFrameForTesting: NSRect { paneOutline.frame }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()

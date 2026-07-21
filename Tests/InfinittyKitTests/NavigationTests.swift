@@ -371,7 +371,7 @@ final class NavigationTests: XCTestCase {
         XCTAssertLessThan(strip.searchButtonFrameForTesting.maxX, frames[0].minX)
         XCTAssertGreaterThanOrEqual(strip.searchButtonFrameForTesting.minX, 86)
         XCTAssertEqual(
-            strip.tabButtonCornerRadiiForTesting[1], frames[1].height / 2,
+            strip.tabButtonCornerRadiiForTesting[1], 10,
             accuracy: 0.5)
         XCTAssertEqual(strip.selectionPillFrameForTesting, frames[1])
         XCTAssertGreaterThanOrEqual(strip.selectionPillAlphaForTesting, 0.16)
@@ -453,15 +453,17 @@ final class NavigationTests: XCTestCase {
         XCTAssertNotNil(strip.tabButtonImagesForTesting[0])
     }
 
-    func testMainTabUsesShortContentSizedCapsule() throws {
+    func testMainTabUsesWiderShorterRoundedRectWhenSpaceAllows() throws {
         let strip = TerminalTabStripView(frame: NSRect(x: 0, y: 0, width: 900, height: 48))
         strip.update(titles: ["infinitty"], selectedIndex: 0)
         strip.layoutSubtreeIfNeeded()
 
         let frame = try XCTUnwrap(strip.tabButtonFramesForTesting.first)
-        XCTAssertEqual(frame.height, 34, accuracy: 0.5)
-        XCTAssertEqual(frame.minY, 5, accuracy: 0.5)
-        XCTAssertLessThanOrEqual(frame.width, 230)
+        XCTAssertEqual(frame.height, 30, accuracy: 0.5)
+        XCTAssertEqual(frame.minY, 7, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(frame.width, 190)
+        XCTAssertLessThanOrEqual(frame.width, 260)
+        XCTAssertEqual(strip.tabButtonCornerRadiiForTesting.first, 10)
     }
 
     /// Side-tabs mode lays the strip out as a left column and the body fills
@@ -500,21 +502,26 @@ final class NavigationTests: XCTestCase {
     }
 
     func testReferencePaneMetricsKeepTerminalTextInsideCard() {
-        XCTAssertEqual(PaneMetrics.horizontalInset, 2)
+        XCTAssertEqual(PaneMetrics.leadingInset, 8)
+        XCTAssertEqual(PaneMetrics.trailingInset, 8)
+        XCTAssertEqual(PaneMetrics.internalHorizontalInset, 2)
         XCTAssertEqual(PaneMetrics.topInset, 5)
         XCTAssertEqual(PaneMetrics.bottomInset, 8)
+        XCTAssertEqual(PaneMetrics.internalVerticalInset, 2)
         XCTAssertEqual(PaneMetrics.horizontalCanvasInset, 0)
         XCTAssertEqual(PaneMetrics.cornerRadius, 10)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 0), 15)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 24), 24)
     }
 
-    func testFocusedPaneOutlineUsesBlueStateOnlyWhenSelected() throws {
+    func testEveryPaneUsesSubtleBlueAndFocusBrightensIt() throws {
         let outline = PaneOutlineView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
-        XCTAssertEqual(outline.backgroundAlphaForTesting, 0, accuracy: 0.01)
+        let idleFillAlpha = outline.backgroundAlphaForTesting
+        XCTAssertEqual(idleFillAlpha, 0.045, accuracy: 0.01)
         let idle = try XCTUnwrap(outline.layer?.borderColor)
-        let idleColor = try XCTUnwrap(NSColor(cgColor: idle))
-        XCTAssertEqual(idleColor.alphaComponent, 0.12, accuracy: 0.01)
+        let idleColor = try XCTUnwrap(NSColor(cgColor: idle)?.usingColorSpace(.sRGB))
+        XCTAssertEqual(idleColor.alphaComponent, 0.30, accuracy: 0.01)
+        XCTAssertGreaterThan(idleColor.blueComponent, idleColor.redComponent)
         XCTAssertEqual(outline.layer?.borderWidth, 1)
 
         outline.isSelected = true
@@ -523,7 +530,7 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(focusedColor.alphaComponent, 0.68, accuracy: 0.01)
         XCTAssertGreaterThan(focusedColor.blueComponent, focusedColor.redComponent)
         XCTAssertEqual(outline.layer?.borderWidth, 1.5)
-        XCTAssertGreaterThan(outline.backgroundAlphaForTesting, 0)
+        XCTAssertGreaterThan(outline.backgroundAlphaForTesting, idleFillAlpha)
     }
 
     func testPaneHeaderExposesSplitZoomAndDragAccessibility() {
@@ -551,8 +558,8 @@ final class NavigationTests: XCTestCase {
             kind: .files, contentView: content, background: NSColor.black)
         pane.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
         pane.layoutSubtreeIfNeeded()
-        XCTAssertEqual(pane.paneHeader.frame.minX, 2, accuracy: 0.5)
-        XCTAssertEqual(content.frame.minX, 2, accuracy: 0.5)
+        XCTAssertEqual(pane.paneHeader.frame.minX, 8, accuracy: 0.5)
+        XCTAssertEqual(content.frame.minX, 8, accuracy: 0.5)
         XCTAssertEqual(content.frame.minY, 8, accuracy: 0.5)
         XCTAssertGreaterThan(content.frame.height, 400)
         XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
@@ -575,8 +582,64 @@ final class NavigationTests: XCTestCase {
     func testTerminalViewReservesTopPaneHeader() {
         let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
         view.layoutSubtreeIfNeeded()
-        XCTAssertEqual(view.paneHeader.frame.minY, 300 - PaneHeaderView.height, accuracy: 0.5)
+        XCTAssertEqual(
+            view.paneHeader.frame.minY,
+            300 - PaneHeaderView.height - PaneMetrics.topInset,
+            accuracy: 0.5)
         XCTAssertEqual(view.paneHeader.frame.height, PaneHeaderView.height, accuracy: 0.5)
+    }
+
+    func testVerticallySplitPanesUseCompactSharedGap() {
+        let split = PaneSplitView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
+        split.isVertical = false
+        split.dividerStyle = .thin
+        let first = TerminalView(frame: .zero)
+        let second = TerminalView(frame: .zero)
+        split.addArrangedSubview(first)
+        split.addArrangedSubview(second)
+        let divider = split.dividerThickness
+        first.frame = NSRect(x: 0, y: 0, width: 500, height: 150)
+        second.frame = NSRect(
+            x: 0, y: 150 + divider, width: 500,
+            height: 150 - divider)
+        first.layoutSubtreeIfNeeded()
+        second.layoutSubtreeIfNeeded()
+
+        let firstInsets = first.paneVerticalInsets()
+        let secondInsets = second.paneVerticalInsets()
+        XCTAssertEqual(firstInsets.top, PaneMetrics.topInset)
+        XCTAssertEqual(firstInsets.bottom, PaneMetrics.internalVerticalInset)
+        XCTAssertEqual(secondInsets.top, PaneMetrics.internalVerticalInset)
+        XCTAssertEqual(secondInsets.bottom, PaneMetrics.bottomInset)
+    }
+
+    func testHorizontallySplitPanesUseCompactSharedGapAndEightPointOuterEdges() {
+        let split = PaneSplitView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
+        split.isVertical = true
+        split.dividerStyle = .thin
+        let first = TerminalView(frame: .zero)
+        let second = TerminalView(frame: .zero)
+        split.addArrangedSubview(first)
+        split.addArrangedSubview(second)
+        let divider = split.dividerThickness
+        first.frame = NSRect(x: 0, y: 0, width: 250, height: 300)
+        second.frame = NSRect(
+            x: 250 + divider, y: 0,
+            width: 250 - divider, height: 300)
+        first.layoutSubtreeIfNeeded()
+        second.layoutSubtreeIfNeeded()
+
+        let outlines = ([first, second] as [TerminalView]).map {
+            $0.outlineFrameForTesting.offsetBy(dx: $0.frame.minX, dy: $0.frame.minY)
+        }.sorted { $0.minX < $1.minX }
+        XCTAssertEqual(outlines[0].minX, PaneMetrics.leadingInset, accuracy: 0.5)
+        XCTAssertEqual(
+            split.bounds.maxX - outlines[1].maxX,
+            PaneMetrics.trailingInset, accuracy: 0.5)
+        XCTAssertEqual(
+            outlines[1].minX - outlines[0].maxX,
+            PaneMetrics.internalHorizontalInset * 2 + split.dividerThickness,
+            accuracy: 0.5)
     }
 
     func testPaneLayoutSnapshotCapturesNestedSplitTopology() throws {
@@ -620,6 +683,44 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(replacement.superview === host)
         XCTAssertTrue(replacement.arrangedSubviews[0] === source)
         XCTAssertTrue(replacement.arrangedSubviews[1] === target)
+    }
+
+    func testRepeatedNestedPaneMovesPreserveEveryLeafIdentity() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+        let root = PaneSplitView(frame: host.bounds)
+        root.isVertical = true
+        let left = TerminalView(frame: .zero)
+        let right = PaneSplitView(frame: .zero)
+        right.isVertical = false
+        let top = TerminalView(frame: .zero)
+        let bottom = TerminalView(frame: .zero)
+        host.addSubview(root)
+        root.addArrangedSubview(left)
+        root.addArrangedSubview(right)
+        right.addArrangedSubview(top)
+        right.addArrangedSubview(bottom)
+        let expected = Set([left, top, bottom].map(ObjectIdentifier.init))
+
+        func leafIDs(_ node: PaneLayoutNode?) -> Set<ObjectIdentifier> {
+            guard let node else { return [] }
+            switch node {
+            case .leaf(let id): return [id]
+            case .split(_, let children):
+                return children.reduce(into: []) { $0.formUnion(leafIDs($1)) }
+            }
+        }
+
+        XCTAssertTrue(PaneLayoutController.move(
+            source: left, target: top, zone: .bottom).changed)
+        XCTAssertEqual(leafIDs(PaneLayoutController.snapshot(of: host)), expected)
+
+        XCTAssertTrue(PaneLayoutController.move(
+            source: bottom, target: left, zone: .center).changed)
+        XCTAssertEqual(leafIDs(PaneLayoutController.snapshot(of: host)), expected)
+
+        XCTAssertTrue(PaneLayoutController.move(
+            source: top, target: bottom, zone: .right).changed)
+        XCTAssertEqual(leafIDs(PaneLayoutController.snapshot(of: host)), expected)
     }
 
     func testPaneLayoutCenterDropSwapsLeavesWithoutNewSplit() {

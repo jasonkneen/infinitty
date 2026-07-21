@@ -190,6 +190,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var lastSelectedTabIndex: [ObjectIdentifier: Int] = [:]
     private var paneDragState: PaneDragState?
     private var paneZoomStates: [ObjectIdentifier: PaneZoomState] = [:]
+    private var paneZoomRestoreStates: [ObjectIdentifier: PaneZoomState] = [:]
     private var paneDividerAnimations: [ObjectIdentifier: PaneDividerAnimation] = [:]
     private var pendingSplitContext: (sourceView: NSView, vertical: Bool)?
     private var quickTerminalHotKey: GlobalHotKey?
@@ -1335,7 +1336,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         _ newView: NSView, relativeTo oldView: NSView,
         vertical: Bool, newFirst: Bool = false
     ) -> Bool {
-        let split = NSSplitView(frame: oldView.frame)
+        let split = PaneSplitView(frame: oldView.frame)
         split.isVertical = vertical
         split.dividerStyle = .thin
         split.autoresizingMask = oldView.autoresizingMask
@@ -1374,6 +1375,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let key = ObjectIdentifier(root)
         if paneZoomStates[key] != nil {
             restorePaneZoom(key: key, refocus: true, animated: true)
+            return
+        }
+        if paneZoomRestoreStates[key] != nil {
+            finishPaneZoomRestore(key: key, refocus: true)
             return
         }
 
@@ -1459,17 +1464,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func restorePaneZoom(
         containing pane: NSView, refocus: Bool, animated: Bool = false
     ) {
-        guard let win = pane.window, let root = terminalRoot(of: win),
-              let entry = paneZoomStates.first(where: { $0.value.root === root })
-        else { return }
-        restorePaneZoom(key: entry.key, refocus: refocus, animated: animated)
+        guard let win = pane.window, let root = terminalRoot(of: win) else { return }
+        if let entry = paneZoomStates.first(where: { $0.value.root === root }) {
+            restorePaneZoom(key: entry.key, refocus: refocus, animated: animated)
+        } else if let entry = paneZoomRestoreStates.first(where: { $0.value.root === root }) {
+            finishPaneZoomRestore(key: entry.key, refocus: refocus)
+        }
     }
 
     private func restorePaneZoom(revealing pane: NSView) {
-        guard let win = pane.window, let root = terminalRoot(of: win),
-              let entry = paneZoomStates.first(where: {
-                  $0.value.root === root && $0.value.pane !== pane
-              }) else { return }
+        guard let win = pane.window, let root = terminalRoot(of: win) else { return }
+        guard let entry = paneZoomStates.first(where: {
+            $0.value.root === root && $0.value.pane !== pane
+        }) else {
+            if let restoring = paneZoomRestoreStates.first(where: { $0.value.root === root }) {
+                finishPaneZoomRestore(key: restoring.key, refocus: false)
+            }
+            return
+        }
         restorePaneZoom(key: entry.key, refocus: false, animated: false)
     }
 
@@ -1479,6 +1491,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let state = paneZoomStates.removeValue(forKey: key) else { return }
         paneDividerAnimations.removeValue(forKey: key)?.cancel()
         if animated {
+            paneZoomRestoreStates[key] = state
             let wasFullyMaximized = state.collapsedViews.contains(where: \.isHidden)
             state.collapsedViews.forEach { $0.isHidden = false }
             if wasFullyMaximized {
@@ -1494,11 +1507,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     start: currentDividerPositions(in: snapshot.split),
                     end: snapshot.positions)
             }
-            animatePaneDividers(key: key, keyframes: keyframes, duration: 0.18)
+            animatePaneDividers(key: key, keyframes: keyframes, duration: 0.18) { [weak self] in
+                self?.paneZoomRestoreStates.removeValue(forKey: key)
+            }
         } else {
             state.collapsedViews.forEach { $0.isHidden = false }
             PaneLayoutController.restoreDividerPositions(state.dividerPositions)
         }
+        if refocus, let win = state.pane.window { win.makeFirstResponder(state.pane) }
+    }
+
+    private func finishPaneZoomRestore(key: ObjectIdentifier, refocus: Bool) {
+        guard let state = paneZoomRestoreStates.removeValue(forKey: key) else { return }
+        paneDividerAnimations.removeValue(forKey: key)?.cancel()
+        state.collapsedViews.forEach { $0.isHidden = false }
+        PaneLayoutController.restoreDividerPositions(state.dividerPositions)
+        state.root.layoutSubtreeIfNeeded()
         if refocus, let win = state.pane.window { win.makeFirstResponder(state.pane) }
     }
 
@@ -1534,6 +1558,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               sourceView.superview is NSSplitView,
               let content = win.contentView else { return }
         endPaneDrag(at: point, cancelled: true)
+        PaneLog.log("drag begin title=\(title) source=\(ObjectIdentifier(sourceView)) "
+            + "point=\(NSStringFromPoint(point))")
         let badge = PaneDragBadgeView(title: title)
         content.addSubview(badge, positioned: .above, relativeTo: nil)
         paneDragState = PaneDragState(sourceView: sourceView, title: title, badge: badge)
@@ -1559,6 +1585,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             PaneDropZone.resolve(point: $0.convert(point, from: nil), in: $0.bounds)
         }
         if state.targetView !== target || state.zone != zone {
+            PaneLog.log("drag target source=\(ObjectIdentifier(state.sourceView)) "
+                + "target=\(target.map { String(describing: ObjectIdentifier($0)) } ?? "nil") "
+                + "zone=\(zone.map(String.init(describing:)) ?? "nil")")
             let targetFrame = target.flatMap { target in
                 zone.map { $0.previewFrame(in: target.bounds).insetBy(dx: 3, dy: 3) }
             }
@@ -1604,6 +1633,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func endPaneDrag(at point: NSPoint, cancelled: Bool) {
         guard let state = paneDragState else { return }
         paneDragState = nil
+        PaneLog.log("drag end source=\(ObjectIdentifier(state.sourceView)) cancelled=\(cancelled) "
+            + "target=\(state.targetView.map { String(describing: ObjectIdentifier($0)) } ?? "nil") "
+            + "zone=\(state.zone.map(String.init(describing:)) ?? "nil")")
         if cancelled, let preview = state.preview {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.10
@@ -1627,19 +1659,47 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func movePaneView(_ source: NSView, relativeTo target: NSView, zone: PaneDropZone) {
         guard source !== target, let win = source.window, target.window === win else { return }
-        let oldGeometry = paneLeafViews(in: win).map {
+        let beforePanes = paneLeafViews(in: win)
+        let beforeIDs = Set(beforePanes.map(ObjectIdentifier.init))
+        let root = terminalRoot(of: win)
+        PaneLog.log("move begin zone=\(zone) count=\(beforePanes.count) "
+            + "source=\(ObjectIdentifier(source)) target=\(ObjectIdentifier(target)) "
+            + "tree=\(root.map(PaneLog.describe) ?? "nil")")
+        let oldGeometry = beforePanes.map {
             (view: $0, frameInWindow: $0.convert($0.bounds, to: nil))
         }
         let result = PaneLayoutController.move(
             source: source, target: target, zone: zone)
-        guard result.changed else { return }
+        guard result.changed else {
+            PaneLog.log("ERROR move returned unchanged zone=\(zone) "
+                + "source=\(ObjectIdentifier(source)) target=\(ObjectIdentifier(target))")
+            return
+        }
         if let split = result.insertedSplit {
             win.contentView?.layoutSubtreeIfNeeded()
             let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
             split.setPosition(mid, ofDividerAt: 0)
         }
         win.contentView?.layoutSubtreeIfNeeded()
+        let afterPanes = paneLeafViews(in: win)
+        let afterIDs = Set(afterPanes.map(ObjectIdentifier.init))
+        let missing = beforeIDs.subtracting(afterIDs)
+        let added = afterIDs.subtracting(beforeIDs)
+        let summary = "move end count=\(afterPanes.count) missing=\(missing) added=\(added) "
+            + "tree=\(root.map(PaneLog.describe) ?? "nil")"
+        PaneLog.log(beforeIDs == afterIDs ? summary : "ERROR \(summary)")
         animatePaneReflow(from: oldGeometry)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self, weak win] in
+            guard let self, let win else { return }
+            let settled = self.paneLeafViews(in: win)
+            let settledIDs = Set(settled.map(ObjectIdentifier.init))
+            let settledRoot = self.terminalRoot(of: win)
+            let settledSummary = "move settled count=\(settled.count) "
+                + "missing=\(beforeIDs.subtracting(settledIDs)) "
+                + "added=\(settledIDs.subtracting(beforeIDs)) "
+                + "tree=\(settledRoot.map(PaneLog.describe) ?? "nil")"
+            PaneLog.log(beforeIDs == settledIDs ? settledSummary : "ERROR \(settledSummary)")
+        }
         win.makeFirstResponder(source)
         refreshPets()
         updateTitle(for: win)
@@ -1717,7 +1777,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let container = old.superview
         let frame = old.frame
 
-        let splitView = NSSplitView(frame: frame)
+        let splitView = PaneSplitView(frame: frame)
         splitView.isVertical = vertical
         splitView.dividerStyle = .thin
         splitView.autoresizingMask = [.width, .height]
@@ -2567,6 +2627,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             value.pane.window === win || value.root.window === win ? key : nil
         }
         zoomKeys.forEach { restorePaneZoom(key: $0, refocus: false, animated: false) }
+        let restoringKeys = paneZoomRestoreStates.compactMap { key, value in
+            value.pane.window === win || value.root.window === win ? key : nil
+        }
+        restoringKeys.forEach { finishPaneZoomRestore(key: $0, refocus: false) }
         // Cancel any in-flight tab rename in this window's strip.
         terminalChromes[ObjectIdentifier(win)]?.strip.cancelRename()
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))

@@ -1,9 +1,51 @@
 import AppKit
 
+enum PaneLog {
+    private static let url = URL(fileURLWithPath: "/tmp/infinitty-pane.log")
+    private static let queue = DispatchQueue(label: "infinitty.pane-log")
+
+    static func log(_ message: String) {
+        let line = "[\(ProcessInfo.processInfo.systemUptime)] \(message)\n"
+        queue.async {
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    static func describe(_ view: NSView) -> String {
+        if let split = view as? NSSplitView {
+            let axis = split.isVertical ? "V" : "H"
+            return "\(axis)[\(split.arrangedSubviews.map(describe).joined(separator: ","))]"
+        }
+        if let terminal = view as? TerminalView {
+            return "terminal(\(ObjectIdentifier(terminal)),\(NSStringFromRect(terminal.frame)),"
+                + "hidden=\(terminal.isHiddenOrHasHiddenAncestor),alpha=\(terminal.alphaValue))"
+        }
+        if let utility = view as? UtilityPaneView {
+            return "\(utility.kind.title.lowercased())(\(ObjectIdentifier(utility)),"
+                + "\(NSStringFromRect(utility.frame)),hidden=\(utility.isHiddenOrHasHiddenAncestor),"
+                + "alpha=\(utility.alphaValue))"
+        }
+        let children = view.subviews.map(describe).joined(separator: ",")
+        return children.isEmpty
+            ? "view(\(ObjectIdentifier(view)))"
+            : "view(\(ObjectIdentifier(view))){\(children)}"
+    }
+}
+
 enum PaneMetrics {
-    static let horizontalInset: CGFloat = 2
+    static let leadingInset: CGFloat = 8
+    static let trailingInset: CGFloat = 8
+    static let internalHorizontalInset: CGFloat = 2
     static let topInset: CGFloat = 5
     static let bottomInset: CGFloat = 8
+    static let internalVerticalInset: CGFloat = 2
     static let horizontalCanvasInset: CGFloat = 0
     static let cornerRadius: CGFloat = 10
     static let minimumTerminalContentInset: CGFloat = 15
@@ -13,7 +55,67 @@ enum PaneMetrics {
     }
 }
 
+/// Pane dividers are geometry handles only. Painting their native black rule
+/// breaks the window's one continuous tinted surface.
+final class PaneSplitView: NSSplitView {
+    override var dividerColor: NSColor { .clear }
+}
+
 extension NSView {
+    func paneHorizontalInsets() -> (leading: CGFloat, trailing: CGFloat) {
+        (
+            paneHasHorizontalNeighbor(onRight: false)
+                ? PaneMetrics.internalHorizontalInset : PaneMetrics.leadingInset,
+            paneHasHorizontalNeighbor(onRight: true)
+                ? PaneMetrics.internalHorizontalInset : PaneMetrics.trailingInset
+        )
+    }
+
+    private func paneHasHorizontalNeighbor(onRight: Bool) -> Bool {
+        var branch: NSView = self
+        var ancestor = superview
+        while let parent = ancestor {
+            if let split = parent as? NSSplitView, split.isVertical,
+               let index = split.arrangedSubviews.firstIndex(of: branch) {
+                if onRight ? index < split.arrangedSubviews.count - 1 : index > 0 {
+                    return true
+                }
+            }
+            branch = parent
+            ancestor = parent.superview
+        }
+        return false
+    }
+
+    /// Outer window edges keep their larger top/bottom breathing room, while
+    /// vertically adjacent tiles contribute only 2pt each to their shared gap.
+    func paneVerticalInsets() -> (top: CGFloat, bottom: CGFloat) {
+        (
+            paneHasVerticalNeighbor(above: true)
+                ? PaneMetrics.internalVerticalInset : PaneMetrics.topInset,
+            paneHasVerticalNeighbor(above: false)
+                ? PaneMetrics.internalVerticalInset : PaneMetrics.bottomInset
+        )
+    }
+
+    private func paneHasVerticalNeighbor(above: Bool) -> Bool {
+        var branch: NSView = self
+        var ancestor = superview
+        while let parent = ancestor {
+            if let split = parent as? NSSplitView, !split.isVertical,
+               let index = split.arrangedSubviews.firstIndex(of: branch) {
+                // Horizontal NSSplitView order is visual top-to-bottom, even
+                // though the split view itself is flipped.
+                if above ? index > 0 : index < split.arrangedSubviews.count - 1 {
+                    return true
+                }
+            }
+            branch = parent
+            ancestor = parent.superview
+        }
+        return false
+    }
+
     /// Portion covered by a transparent full-size titlebar. Normally zero
     /// below horizontal tabs; nonzero when side tabs extend panes to the top.
     func paneTopObstructionPoints() -> CGFloat {
@@ -98,17 +200,29 @@ enum PaneLayoutController {
         let oldFrame = old.frame
         let oldAutoresizingMask = old.autoresizingMask
         if let split = parent as? NSSplitView {
-            guard let index = split.arrangedSubviews.firstIndex(of: old) else { return false }
+            guard let index = split.arrangedSubviews.firstIndex(of: old) else {
+                PaneLog.log("ERROR replace missing old=\(ObjectIdentifier(old)) "
+                    + "parent=\(ObjectIdentifier(parent))")
+                return false
+            }
             old.removeFromSuperview()
             new.frame = oldFrame
             new.autoresizingMask = oldAutoresizingMask
             split.insertArrangedSubview(new, at: index)
+            PaneLog.log("replace split=\(ObjectIdentifier(split)) index=\(index) "
+                + "old=\(ObjectIdentifier(old)) new=\(ObjectIdentifier(new))")
             return true
         }
-        guard old.superview === parent else { return false }
+        guard old.superview === parent else {
+            PaneLog.log("ERROR replace parent mismatch old=\(ObjectIdentifier(old)) "
+                + "expected=\(ObjectIdentifier(parent))")
+            return false
+        }
         new.frame = oldFrame
         new.autoresizingMask = oldAutoresizingMask
         parent.replaceSubview(old, with: new)
+        PaneLog.log("replace view parent=\(ObjectIdentifier(parent)) "
+            + "old=\(ObjectIdentifier(old)) new=\(ObjectIdentifier(new))")
         return true
     }
 
@@ -118,7 +232,13 @@ enum PaneLayoutController {
         source: NSView, target: NSView, zone: PaneDropZone
     ) -> (changed: Bool, insertedSplit: NSSplitView?) {
         guard source !== target, let sourceParent = source.superview,
-              let targetParent = target.superview else { return (false, nil) }
+              let targetParent = target.superview else {
+            PaneLog.log("ERROR move invalid endpoints source=\(ObjectIdentifier(source)) "
+                + "target=\(ObjectIdentifier(target)) zone=\(zone)")
+            return (false, nil)
+        }
+        PaneLog.log("layout move zone=\(zone) source=\(ObjectIdentifier(source)) "
+            + "target=\(ObjectIdentifier(target))")
         if zone == .center {
             let sourcePlaceholder = NSView(frame: source.frame)
             let targetPlaceholder = NSView(frame: target.frame)
@@ -128,12 +248,20 @@ enum PaneLayoutController {
                   let targetSlot = targetPlaceholder.superview,
                   replace(sourcePlaceholder, with: target, in: sourceSlot),
                   replace(targetPlaceholder, with: source, in: targetSlot)
-            else { return (false, nil) }
+            else {
+                PaneLog.log("ERROR center swap failed source=\(ObjectIdentifier(source)) "
+                    + "target=\(ObjectIdentifier(target))")
+                return (false, nil)
+            }
             return (true, nil)
         }
 
-        guard let sourceSplit = sourceParent as? NSSplitView else { return (false, nil) }
-        let split = NSSplitView(frame: target.frame)
+        guard let sourceSplit = sourceParent as? NSSplitView else {
+            PaneLog.log("ERROR edge move source parent is not split "
+                + "source=\(ObjectIdentifier(source)) parent=\(ObjectIdentifier(sourceParent))")
+            return (false, nil)
+        }
+        let split = PaneSplitView(frame: target.frame)
         split.isVertical = zone == .left || zone == .right
         split.dividerStyle = .thin
         split.autoresizingMask = target.autoresizingMask
@@ -156,8 +284,12 @@ enum PaneLayoutController {
         guard split.arrangedSubviews.count == 1,
               let parent = split.superview else { return }
         let survivor = split.arrangedSubviews[0]
+        PaneLog.log("collapse split=\(ObjectIdentifier(split)) "
+            + "survivor=\(ObjectIdentifier(survivor)) parent=\(ObjectIdentifier(parent))")
         survivor.removeFromSuperview()
-        _ = replace(split, with: survivor, in: parent)
+        if !replace(split, with: survivor, in: parent) {
+            PaneLog.log("ERROR collapse replace failed split=\(ObjectIdentifier(split))")
+        }
     }
 
     static func captureDividerPositions(in root: NSView) -> DividerPositions {
@@ -421,12 +553,11 @@ final class PaneOutlineView: NSView {
     private func updateAppearance(animated: Bool) {
         let oldBackground = layer?.presentation()?.backgroundColor ?? layer?.backgroundColor
         let oldBorder = layer?.presentation()?.borderColor ?? layer?.borderColor
-        let background = (isSelected
-            ? CodePalette.paneFocusAccent.withAlphaComponent(0.09)
-            : NSColor.clear).cgColor
+        let background = CodePalette.paneFocusAccent.withAlphaComponent(
+            isSelected ? 0.09 : 0.045).cgColor
         let border = (isSelected
             ? CodePalette.paneFocusAccent.withAlphaComponent(0.68)
-            : NSColor.white.withAlphaComponent(0.12)).cgColor
+            : CodePalette.paneFocusAccent.withAlphaComponent(0.30)).cgColor
         layer?.backgroundColor = background
         layer?.borderColor = border
         layer?.borderWidth = isSelected ? 1.5 : 1

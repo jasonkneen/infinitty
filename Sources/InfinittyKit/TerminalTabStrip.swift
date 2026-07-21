@@ -525,19 +525,21 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         let spacingTotal = pad * CGFloat(max(tabButtons.count - 1, 0))
         let remaining = max(
             available - CGFloat(pinnedCount) * pinWidth - spacingTotal, 1)
+        // Roomy tabs use this wider 190...260pt range. Multiple tabs may
+        // compress proportionally below it so they never overlap the + button.
         let preferredWidths: [CGFloat] = titles.enumerated().map { index, title in
             guard pins[index] == nil else { return pinWidth }
             let textWidth = ceil(title.size(withAttributes: [
                 .font: NSFont.systemFont(ofSize: 15, weight: .regular),
             ]).width)
-            return min(230, max(160, textWidth + 92))
+            return min(260, max(190, textWidth + 112))
         }
         let preferredUnpinnedTotal = preferredWidths.enumerated().reduce(CGFloat(0)) {
             $0 + (pins[$1.offset] == nil ? $1.element : 0)
         }
         let unpinnedScale = unpinnedCount > 0 && preferredUnpinnedTotal > remaining
             ? remaining / preferredUnpinnedTotal : 1
-        let tabHeight = min(34, max(bounds.height - 6, 1))
+        let tabHeight = min(30, max(bounds.height - 8, 1))
         let tabY = max((bounds.height - tabHeight) / 2 - 2, 0)
         var xPos = leadingInset
         for (index, button) in tabButtons.enumerated() {
@@ -546,7 +548,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
             button.alignment = isPinned ? .center : .center
             let frame = NSRect(x: xPos, y: tabY, width: width, height: tabHeight)
             button.frame = frame
-            button.layer?.cornerRadius = tabHeight / 2
+            button.layer?.cornerRadius = min(10, tabHeight / 2)
             if isPinned {
                 tabIconViews[index].frame = NSRect(
                     x: frame.midX - 9, y: frame.midY - 9, width: 18, height: 18)
@@ -579,7 +581,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
            tabButtons.indices.contains(origin), origin != selectedIndex {
             selectionPill.frame = tabButtons[origin].frame
             selectionPill.isHidden = false
-            selectionPill.layer?.cornerRadius = target.height / 2
+            selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(10, target.height / 2)
             selectionAnimationOrigin = nil
             animateSelectionOnNextLayout = false
             guard window != nil else {
@@ -606,7 +608,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         }
         selectionAnimationOrigin = nil
         if pendingSelectionAnimationTarget != nil { return }
-        selectionPill.layer?.cornerRadius = target.height / 2
+        selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(10, target.height / 2)
         let shouldAnimate = animateSelectionOnNextLayout
             && !selectionPill.isHidden && window != nil
         selectionPill.isHidden = false
