@@ -289,7 +289,39 @@ final class Terminal {
 
     // MARK: - feed (PTY read thread)
 
+    /// Max bytes parsed under the terminal lock before yielding. Lets main-
+    /// thread keystrokes/resize interleave during multi‑MB floods.
+    private static let feedChunkBytes = 16_384
+
+    /// Image decode jobs collected under the lock and run off-lock so ImageIO
+    /// / base64 / file I/O never stall the parser or AppKit main.
+    private enum PendingImageWork {
+        case iterm2(
+            params: [String: String], base64: [UInt8],
+            absLine: Int, col: Int,
+            cellPxW: CGFloat, cellPxH: CGFloat, cols: Int
+        )
+        case kitty(
+            controls: [String: String], payload: [UInt8],
+            absLine: Int, col: Int,
+            cellPxW: CGFloat, cellPxH: CGFloat, cols: Int
+        )
+    }
+
+    private var pendingImageWork: [PendingImageWork] = []
+    private let imageQueue = DispatchQueue(label: "infinitty.image", qos: .userInitiated)
+
     func feed(_ buf: UnsafePointer<UInt8>, _ count: Int) {
+        guard count > 0 else { return }
+        var offset = 0
+        while offset < count {
+            let n = min(Self.feedChunkBytes, count - offset)
+            feedChunk(buf + offset, n, isLast: offset + n >= count)
+            offset += n
+        }
+    }
+
+    private func feedChunk(_ buf: UnsafePointer<UInt8>, _ count: Int, isLast: Bool) {
         lock.lock()
         var i = 0
         while i < count {
@@ -310,7 +342,8 @@ final class Terminal {
                 i += 1
             }
         }
-        updateHint()
+        // Hints only need the final input state after the full batch.
+        if isLast { updateHint() }
         generation &+= 1
         let out = pendingOutput
         pendingOutput.removeAll(keepingCapacity: true)
@@ -320,6 +353,8 @@ final class Terminal {
         pendingBell = false
         let markerEvents = pendingMarkers
         pendingMarkers.removeAll(keepingCapacity: true)
+        let imageJobs = pendingImageWork
+        pendingImageWork.removeAll(keepingCapacity: true)
         let wantMarkdown = pendingMarkdownRender && !markdownRenderInFlight
         if wantMarkdown { pendingMarkdownRender = false; markdownRenderInFlight = true }
         lock.unlock()
@@ -330,6 +365,9 @@ final class Terminal {
         for (kind, exit) in markerEvents { onMarker?(kind, exit) }
         onChange?()
 
+        for job in imageJobs {
+            imageQueue.async { [weak self] in self?.performImageDecode(job) }
+        }
         if wantMarkdown {
             markdownQueue.async { [weak self] in self?.performMarkdownRender() }
         }
@@ -1284,6 +1322,8 @@ final class Terminal {
 
     // MARK: - OSC 1337 inline images
 
+    /// Under the terminal lock: parse cheap metadata and queue the heavy
+    /// base64 + ImageIO work for `imageQueue`. Never decode here.
     private func handleITerm2Payload(_ payload: [UInt8]) {
         let filePrefix = Array("File=".utf8)
         guard payload.count > filePrefix.count,
@@ -1298,19 +1338,47 @@ final class Terminal {
         }
         guard params["inline"] == "1" else { return }
 
-        let base64 = Data(payload[(colon + 1)...])
-        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
-              let decoded = Terminal.decodeImage(data) else { return }
+        pendingImageWork.append(.iterm2(
+            params: params,
+            base64: Array(payload[(colon + 1)...]),
+            absLine: sbAppended + cy,
+            col: cx,
+            cellPxW: cellPxW,
+            cellPxH: cellPxH,
+            cols: cols
+        ))
+    }
 
+    /// Place a decoded iTerm2 image. Called under the terminal lock after
+    /// off-lock decode. Uses the capture-time row/col so later output does
+    /// not relocate the sprite; only advances the cursor if it is still
+    /// parked where the image was requested.
+    private func placeITerm2ImageLocked(
+        decoded: (width: Int, height: Int, rgba: [UInt8]),
+        params: [String: String],
+        absLine: Int, col: Int,
+        cellPxW: CGFloat, cellPxH: CGFloat, cols: Int
+    ) {
+        // Temporarily use capture-time metrics for sizing.
+        let savedW = self.cellPxW, savedH = self.cellPxH, savedCols = self.cols
+        self.cellPxW = cellPxW
+        self.cellPxH = cellPxH
+        // imageCellSize reads `cols`; keep current cols if grid grew/shrunk
+        // but clamp against capture cols for width caps.
         let (wCells, hCells) = imageCellSize(
             pxW: decoded.width, pxH: decoded.height,
             widthParam: params["width"], heightParam: params["height"]
         )
+        let clampedW = min(wCells, max(cols, 1))
+        self.cellPxW = savedW
+        self.cellPxH = savedH
+        _ = savedCols
+
         images.append(ImagePlacement(
             id: nextImageID,
-            absLine: sbAppended + cy,
-            col: cx,
-            cellCols: wCells,
+            absLine: absLine,
+            col: col,
+            cellCols: clampedW,
             cellRows: hCells,
             pxWidth: decoded.width,
             pxHeight: decoded.height,
@@ -1319,10 +1387,12 @@ final class Terminal {
         nextImageID += 1
         if images.count > 12 { images.removeFirst(images.count - 12) }
 
-        // Cursor lands on the line after the image, column 0.
-        for _ in 0..<hCells { lineFeed() }
-        cx = 0
-        wrapPending = false
+        // Advance cursor only if still at the capture site (no intervening output).
+        if sbAppended + cy == absLine && cx == col {
+            for _ in 0..<hCells { lineFeed() }
+            cx = 0
+            wrapPending = false
+        }
     }
 
     private func imageCellSize(
@@ -1443,32 +1513,26 @@ final class Terminal {
     private func handleKitty(controls: [String: String], payload: [UInt8]) {
         let action = controls["a"] ?? "t"
         switch action {
-        case "q":
-            // capability probe (kitten icat does this before sending)
-            kittyRespond(controls, decodeKittyPixels(controls, payload) != nil ? "OK" : "EINVAL")
-        case "t", "T":
-            guard let decoded = decodeKittyPixels(controls, payload) else {
-                kittyRespond(controls, "EINVAL:could not decode image")
-                return
-            }
-            let id = UInt32(controls["i"] ?? "") ?? 0
-            if id != 0 {
-                if kittyStore[id] == nil { kittyStoreOrder.append(id) }
-                kittyStore[id] = decoded
-                while kittyStoreOrder.count > 8 {
-                    kittyStore.removeValue(forKey: kittyStoreOrder.removeFirst())
-                }
-            }
-            if action == "T" {
-                placeKittyImage(decoded, controls: controls, kittyID: id)
-            }
-            if controls["i"] != nil { kittyRespond(controls, "OK") }
+        case "q", "t", "T":
+            // Heavy path (base64 / file / zlib / ImageIO) off the terminal lock.
+            pendingImageWork.append(.kitty(
+                controls: controls,
+                payload: payload,
+                absLine: sbAppended + cy,
+                col: cx,
+                cellPxW: cellPxW,
+                cellPxH: cellPxH,
+                cols: cols
+            ))
         case "p":
             guard let id = UInt32(controls["i"] ?? ""), let stored = kittyStore[id] else {
                 kittyRespond(controls, "ENOENT:no such image")
                 return
             }
-            placeKittyImage(stored, controls: controls, kittyID: id)
+            placeKittyImage(
+                stored, controls: controls, kittyID: id,
+                absLine: sbAppended + cy, col: cx
+            )
             kittyRespond(controls, "OK")
         case "d":
             let what = controls["d"] ?? "a"
@@ -1488,7 +1552,8 @@ final class Terminal {
     }
 
     private func placeKittyImage(
-        _ decoded: (w: Int, h: Int, rgba: [UInt8]), controls: [String: String], kittyID: UInt32
+        _ decoded: (w: Int, h: Int, rgba: [UInt8]), controls: [String: String], kittyID: UInt32,
+        absLine: Int, col: Int
     ) {
         var wCells = Int(controls["c"] ?? "") ?? 0
         var hCells = Int(controls["r"] ?? "") ?? 0
@@ -1506,7 +1571,7 @@ final class Terminal {
         hCells = min(max(hCells, 1), 200)
 
         images.append(ImagePlacement(
-            id: nextImageID, absLine: sbAppended + cy, col: cx,
+            id: nextImageID, absLine: absLine, col: col,
             cellCols: wCells, cellRows: hCells,
             pxWidth: decoded.w, pxHeight: decoded.h, rgba: decoded.rgba,
             kittyID: kittyID == 0 ? UInt32.max : kittyID
@@ -1515,15 +1580,85 @@ final class Terminal {
         if images.count > 24 { images.removeFirst(images.count - 24) }
 
         // C=1: app manages the cursor itself (yazi, chafa placements).
-        if controls["C"] != "1" {
+        // Only advance when the cursor is still at the capture site.
+        if controls["C"] != "1", sbAppended + cy == absLine, cx == col {
             for _ in 0..<hCells { lineFeed() }
             cx = 0
             wrapPending = false
         }
     }
 
-    /// Decode a kitty payload into premultiplied RGBA8.
-    private func decodeKittyPixels(
+    // MARK: - async image decode (off terminal lock)
+
+    private func performImageDecode(_ job: PendingImageWork) {
+        switch job {
+        case let .iterm2(params, base64, absLine, col, cellPxW, cellPxH, cols):
+            guard let data = Data(base64Encoded: Data(base64), options: .ignoreUnknownCharacters),
+                  let decoded = Terminal.decodeImage(data) else { return }
+            applyImageResult {
+                placeITerm2ImageLocked(
+                    decoded: decoded, params: params,
+                    absLine: absLine, col: col,
+                    cellPxW: cellPxW, cellPxH: cellPxH, cols: cols
+                )
+            }
+        case let .kitty(controls, payload, absLine, col, cellPxW, cellPxH, cols):
+            let action = controls["a"] ?? "t"
+            let decoded = Terminal.decodeKittyPixels(controls, payload)
+            applyImageResult {
+                // Restore capture-time metrics for sizing while placing.
+                let savedW = self.cellPxW, savedH = self.cellPxH
+                self.cellPxW = cellPxW
+                self.cellPxH = cellPxH
+                defer { self.cellPxW = savedW; self.cellPxH = savedH }
+                _ = cols
+
+                switch action {
+                case "q":
+                    kittyRespond(controls, decoded != nil ? "OK" : "EINVAL")
+                case "t", "T":
+                    guard let decoded else {
+                        kittyRespond(controls, "EINVAL:could not decode image")
+                        return
+                    }
+                    let id = UInt32(controls["i"] ?? "") ?? 0
+                    if id != 0 {
+                        if kittyStore[id] == nil { kittyStoreOrder.append(id) }
+                        kittyStore[id] = decoded
+                        while kittyStoreOrder.count > 8 {
+                            kittyStore.removeValue(forKey: kittyStoreOrder.removeFirst())
+                        }
+                    }
+                    if action == "T" {
+                        placeKittyImage(
+                            decoded, controls: controls, kittyID: id,
+                            absLine: absLine, col: col
+                        )
+                    }
+                    if controls["i"] != nil { kittyRespond(controls, "OK") }
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    /// Re-enter the terminal lock after off-lock image work; flush DSR-style
+    /// replies and poke the renderer.
+    private func applyImageResult(_ body: () -> Void) {
+        lock.lock()
+        body()
+        generation &+= 1
+        let out = pendingOutput
+        pendingOutput.removeAll(keepingCapacity: true)
+        lock.unlock()
+        if !out.isEmpty { onOutput?(out) }
+        onChange?()
+    }
+
+    /// Decode a kitty payload into premultiplied RGBA8. Pure / file I/O only —
+    /// must not touch terminal state or hold the terminal lock.
+    private static func decodeKittyPixels(
         _ controls: [String: String], _ payload: [UInt8]
     ) -> (w: Int, h: Int, rgba: [UInt8])? {
         // Transmission medium

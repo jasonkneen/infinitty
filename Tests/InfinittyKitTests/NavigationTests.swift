@@ -112,6 +112,10 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(rename.keyEquivalent, "t")
         XCTAssertEqual(rename.keyEquivalentModifierMask, [.command, .shift])
 
+        let zoom = try XCTUnwrap(file.item(withTitle: "Toggle Pane Zoom"))
+        XCTAssertEqual(zoom.keyEquivalent, "\r")
+        XCTAssertEqual(zoom.keyEquivalentModifierMask, [.command, .shift])
+
         let previous = try XCTUnwrap(window.item(withTitle: "Previous Tab"))
         XCTAssertEqual(previous.keyEquivalent, "\u{F702}")
         XCTAssertEqual(previous.keyEquivalentModifierMask, [.command, .shift])
@@ -372,8 +376,8 @@ final class NavigationTests: XCTestCase {
         let chrome = TerminalChromeView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         chrome.showsStrip = false
         chrome.layoutSubtreeIfNeeded()
-        XCTAssertTrue(chrome.strip.isHidden)
-        XCTAssertEqual(chrome.body.frame.height, 400, accuracy: 0.5)
+        XCTAssertFalse(chrome.strip.isHidden)
+        XCTAssertEqual(chrome.body.frame.height, 400 - TerminalTabStripView.height, accuracy: 0.5)
         chrome.showsStrip = true
         chrome.layoutSubtreeIfNeeded()
         XCTAssertFalse(chrome.strip.isHidden)
@@ -409,6 +413,65 @@ final class NavigationTests: XCTestCase {
         // Body sits to the right of the strip.
         XCTAssertEqual(chrome.body.frame.minX, TerminalChromeView.sideWidth, accuracy: 0.5)
         XCTAssertEqual(chrome.body.frame.width, 800 - TerminalChromeView.sideWidth, accuracy: 0.5)
+    }
+
+    func testPaneDropZoneUsesDirectionalEdgesAndCenterSwap() {
+        let bounds = NSRect(x: 0, y: 0, width: 400, height: 300)
+        XCTAssertEqual(PaneDropZone.resolve(point: NSPoint(x: 20, y: 150), in: bounds), .left)
+        XCTAssertEqual(PaneDropZone.resolve(point: NSPoint(x: 380, y: 150), in: bounds), .right)
+        XCTAssertEqual(PaneDropZone.resolve(point: NSPoint(x: 200, y: 285), in: bounds), .top)
+        XCTAssertEqual(PaneDropZone.resolve(point: NSPoint(x: 200, y: 15), in: bounds), .bottom)
+        XCTAssertEqual(PaneDropZone.resolve(point: NSPoint(x: 200, y: 150), in: bounds), .center)
+    }
+
+    func testPaneDropZonePreviewFramesMatchReferenceRegions() {
+        let bounds = NSRect(x: 0, y: 0, width: 400, height: 300)
+        XCTAssertEqual(PaneDropZone.left.previewFrame(in: bounds), NSRect(x: 0, y: 0, width: 200, height: 300))
+        XCTAssertEqual(PaneDropZone.right.previewFrame(in: bounds), NSRect(x: 200, y: 0, width: 200, height: 300))
+        XCTAssertEqual(PaneDropZone.top.previewFrame(in: bounds), NSRect(x: 0, y: 150, width: 400, height: 150))
+        XCTAssertEqual(PaneDropZone.bottom.previewFrame(in: bounds), NSRect(x: 0, y: 0, width: 400, height: 150))
+        XCTAssertEqual(PaneDropZone.center.previewFrame(in: bounds), bounds)
+    }
+
+    func testPaneHeaderExposesSplitZoomAndDragAccessibility() {
+        let header = PaneHeaderView(frame: NSRect(x: 0, y: 0, width: 500, height: PaneHeaderView.height))
+        header.title = "fish"
+        header.layoutSubtreeIfNeeded()
+        XCTAssertEqual(header.title, "fish")
+        XCTAssertEqual(header.accessibilityLabel(), "Terminal pane: fish")
+        XCTAssertEqual(header.splitRightAccessibilityLabelForTesting, "Split pane right")
+        XCTAssertEqual(header.splitDownAccessibilityLabelForTesting, "Split pane down")
+    }
+
+    func testTerminalViewReservesTopPaneHeader() {
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.paneHeader.frame.minY, 300 - PaneHeaderView.height, accuracy: 0.5)
+        XCTAssertEqual(view.paneHeader.frame.height, PaneHeaderView.height, accuracy: 0.5)
+    }
+
+    func testPaneLayoutSnapshotCapturesNestedSplitTopology() throws {
+        let root = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        root.isVertical = true
+        let left = TerminalView(frame: .zero)
+        let right = NSSplitView(frame: .zero)
+        right.isVertical = false
+        let top = TerminalView(frame: .zero)
+        let bottom = TerminalView(frame: .zero)
+        root.addArrangedSubview(left)
+        root.addArrangedSubview(right)
+        right.addArrangedSubview(top)
+        right.addArrangedSubview(bottom)
+
+        let snapshot = try XCTUnwrap(PaneLayoutController.snapshot(of: root))
+        let expected = PaneLayoutNode.split(vertical: true, children: [
+            .leaf(ObjectIdentifier(left)),
+            .split(vertical: false, children: [
+                .leaf(ObjectIdentifier(top)),
+                .leaf(ObjectIdentifier(bottom)),
+            ]),
+        ])
+        XCTAssertEqual(snapshot, expected)
     }
 
 }

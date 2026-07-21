@@ -11,6 +11,26 @@ final class TerminalView: NSView {
     var onFocus: (() -> Void)?
     /// Click landed on the pet sprite (pet assistant entry point).
     var onPetClick: (() -> Void)?
+    var onSplitRight: (() -> Void)? { didSet { paneHeader.onSplitRight = onSplitRight } }
+    var onSplitDown: (() -> Void)? { didSet { paneHeader.onSplitDown = onSplitDown } }
+    var onTogglePaneZoom: (() -> Void)? { didSet { paneHeader.onToggleZoom = onTogglePaneZoom } }
+    var onPaneDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onPaneDragBegan } }
+    var onPaneDragMoved: ((NSPoint) -> Void)? { didSet { paneHeader.onDragMoved = onPaneDragMoved } }
+    var onPaneDragEnded: ((NSPoint, Bool) -> Void)? { didSet { paneHeader.onDragEnded = onPaneDragEnded } }
+
+    private(set) lazy var paneHeader: PaneHeaderView = {
+        let header = PaneHeaderView(frame: .zero)
+        header.onFocus = { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self)
+        }
+        return header
+    }()
+
+    var paneTitle: String {
+        get { paneHeader.title }
+        set { paneHeader.title = newValue }
+    }
 
     private var scrollAccumulator: CGFloat = 0
     private var mouseScrollAccumulator: CGFloat = 0
@@ -109,6 +129,7 @@ final class TerminalView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .never
         registerForDraggedTypes([.fileURL, .string])
+        addSubview(paneHeader)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -135,6 +156,9 @@ final class TerminalView: NSView {
 
     override func layout() {
         super.layout()
+        paneHeader.frame = NSRect(
+            x: 0, y: max(bounds.height - PaneHeaderView.height, 0),
+            width: bounds.width, height: min(PaneHeaderView.height, bounds.height))
         positionPaneShortcutHint()
         updateGeometry()
         if inLiveResize {
@@ -182,9 +206,10 @@ final class TerminalView: NSView {
         // tracks tab-bar appearance automatically.
         if window.styleMask.contains(.fullSizeContentView) {
             let layoutRect = convert(window.contentLayoutRect, from: nil)
-            renderer.topInsetPoints = max(bounds.height - layoutRect.maxY, 0) + 2
+            renderer.topInsetPoints = max(bounds.height - layoutRect.maxY, 0)
+                + PaneHeaderView.height + 2
         } else {
-            renderer.topInsetPoints = 0
+            renderer.topInsetPoints = PaneHeaderView.height
         }
 
         terminal.setCellPixelSize(
@@ -607,6 +632,9 @@ final class TerminalView: NSView {
         menu.addItem(withTitle: "Split Left", action: Selector(("splitLeft:")), keyEquivalent: "")
         menu.addItem(withTitle: "Split Down", action: Selector(("splitDown:")), keyEquivalent: "")
         menu.addItem(withTitle: "Split Up", action: Selector(("splitUp:")), keyEquivalent: "")
+        menu.addItem(
+            withTitle: "Toggle Pane Zoom",
+            action: Selector(("togglePaneZoom:")), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Rename Tab…", action: Selector(("renameTab:")), keyEquivalent: "")
         menu.addItem(.separator())

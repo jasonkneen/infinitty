@@ -220,7 +220,11 @@ Font to use one everywhere.
 - **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
   the focused pane (tab closes when its last pane exits); ⇧⌥←/→/↑/↓ focuses
   and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
-  pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly
+  pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly.
+  Every pane has compact split controls in its header. Drag a pane header onto
+  another pane's edge to move it, or onto the center to swap them; the blue
+  preview shows the landing region before anything moves. Double-click a pane
+  header or press ⇧⌘Return to zoom it, then repeat to restore the exact split tree
 - **Quick terminal**: set `quick-terminal-key = cmd+shift+space` for a persistent,
   global Quake-style terminal that slides down from the top. Its shell,
   scrollback, splits, and internal tabs stay alive while hidden. Its always-visible

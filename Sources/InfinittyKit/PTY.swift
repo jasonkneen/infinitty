@@ -15,7 +15,10 @@ final class PTY {
     private let writeQueue = DispatchQueue(label: "infinitty.pty.write", qos: .userInitiated)
     private var readThread: Thread?
 
-    func spawn(cols: Int, rows: Int, socketPath: String? = nil, cwd: String? = nil) {
+    /// Spawn the login shell. Returns false on forkpty failure (process limit,
+    /// etc.) instead of crashing the whole app.
+    @discardableResult
+    func spawn(cols: Int, rows: Int, socketPath: String? = nil, cwd: String? = nil) -> Bool {
         var ws = winsize(
             ws_row: UInt16(rows), ws_col: UInt16(cols),
             ws_xpixel: 0, ws_ypixel: 0
@@ -23,7 +26,9 @@ final class PTY {
         var master: Int32 = -1
         let child = cpty_spawn_shell(&master, &ws, socketPath, cwd)
         guard child > 0, master >= 0 else {
-            fatalError("infinitty: failed to spawn shell (forkpty)")
+            FileHandle.standardError.write(
+                Data("infinitty: failed to spawn shell (forkpty)\n".utf8))
+            return false
         }
         // CLOEXEC: shells spawned later for other panes must not inherit
         // this master fd (forkpty leaves it inheritable).
@@ -36,6 +41,7 @@ final class PTY {
         thread.qualityOfService = .userInitiated
         readThread = thread
         thread.start()
+        return true
     }
 
     private func readLoop() {

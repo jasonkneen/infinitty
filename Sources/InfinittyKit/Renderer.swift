@@ -78,8 +78,10 @@ final class Renderer: NSObject {
 
     private let renderLock = NSLock()
     private var lastGen: UInt64 = 0
-    private var idleTicks = 0
-    private static let idleTicksBeforePause = 120
+    /// Wall-clock idle gate (display-Hz independent). Pause the display link
+    /// after this much quiet so idle CPU is truly zero on 30/60/120 Hz panels.
+    private var lastActivityTime: CFTimeInterval = 0
+    private static let idleSecondsBeforePause: CFTimeInterval = 1.0
 
     private var displayLink: CADisplayLink?
     private var renderThread: Thread?
@@ -222,6 +224,10 @@ final class Renderer: NSObject {
         prepare(layer: layer)
         layer.maximumDrawableCount = 3
         layer.displaySyncEnabled = true
+        // Bounded wait: under GPU starvation nextDrawable returns nil instead
+        // of parking the render thread forever (drops a frame; input stays live).
+        layer.allowsNextDrawableTimeout = true
+        lastActivityTime = CACurrentMediaTime()
 
         let link = view.displayLink(target: self, selector: #selector(tick(_:)))
         displayLink = link
@@ -250,7 +256,7 @@ final class Renderer: NSObject {
         guard wasPaused, let rl = renderRunLoop else { return }
         CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) { [weak self] in
             self?.displayLink?.isPaused = false
-            self?.idleTicks = 0
+            self?.lastActivityTime = CACurrentMediaTime()
         }
         CFRunLoopWakeUp(rl)
     }
@@ -262,14 +268,12 @@ final class Renderer: NSObject {
         let lastGen = self.lastGen // written under renderLock in render()
         renderLock.unlock()
         if petNeedsFrame {
-            idleTicks = 0
+            lastActivityTime = CACurrentMediaTime()
             render()
             return
         }
         if gen == lastGen {
-            idleTicks += 1
-            if idleTicks >= Renderer.idleTicksBeforePause {
-                idleTicks = 0
+            if CACurrentMediaTime() - lastActivityTime >= Renderer.idleSecondsBeforePause {
                 linkPaused.withLock { $0 = true }
                 // Anything poked after the flag was set will unpause us; only
                 // sleep if nothing changed in the meantime.
@@ -277,11 +281,12 @@ final class Renderer: NSObject {
                     link.isPaused = true
                 } else {
                     linkPaused.withLock { $0 = false }
+                    lastActivityTime = CACurrentMediaTime()
                 }
             }
             return
         }
-        idleTicks = 0
+        lastActivityTime = CACurrentMediaTime()
         render()
     }
 
@@ -326,19 +331,17 @@ final class Renderer: NSObject {
     // MARK: - frame
 
     private func render() {
-        // Only CPU-side state under renderLock: a consistent snapshot for the
-        // encode below. The lock is NEVER held across a GPU wait —
-        // nextDrawable()/inflight can block arbitrarily long on a saturated
-        // GPU, and every main-thread caller (applyConfig, updateScale,
-        // petHitRect) takes renderLock.
+        // Hold renderLock only long enough to grab a consistent set of CPU
+        // pointers. Snapshot + glyph rasterization (CoreText) happen OUTSIDE
+        // it so main-thread applyConfig / updateScale / petHitRect never wait
+        // on ImageIO-scale work or a full grid walk. The lock is also NEVER
+        // held across a GPU wait (nextDrawable / inflight).
         renderLock.lock()
         let drawableSize = layer.drawableSize
         guard drawableSize.width >= 1, drawableSize.height >= 1 else {
             renderLock.unlock()
             return
         }
-        let gen = terminal.copySnapshot(into: &snap)
-        buildInstances()
         let atlas = self.atlas
         let theme = self.theme
         let insetPoints = self.insetPoints
@@ -350,10 +353,16 @@ final class Renderer: NSObject {
         petDirty = false
         renderLock.unlock()
 
+        // Terminal unfair lock only — brief cell copy. Glyph cold-path may
+        // rasterize into the shared atlas (which has its own NSLock).
+        let gen = terminal.copySnapshot(into: &snap)
+        buildInstances(atlas: atlas, theme: theme, insetPoints: insetPoints, topInsetPoints: topInsetPoints)
+
         // GPU section (render thread only). Bound the wait for a free
         // in-flight slot: a saturated GPU must make us drop frames, never
         // stall a thread. On early exit, restore petDirty so tick() retries
         // a pet frame we captured but never presented.
+        // allowsNextDrawableTimeout (set in attach) further bounds nextDrawable.
         guard inflight.wait(timeout: .now() + .milliseconds(100)) == .success else {
             if drewPet {
                 renderLock.lock()
@@ -490,7 +499,9 @@ final class Renderer: NSObject {
     // MARK: - instance building
 
     @inline(__always)
-    private func resolve(_ code: UInt32, isFG: Bool, flags: UInt16) -> SIMD4<Float> {
+    private func resolve(
+        _ code: UInt32, isFG: Bool, flags: UInt16, theme: Theme
+    ) -> SIMD4<Float> {
         var color: SIMD4<Float>
         if code & 0x4000_0000 != 0 {
             color = code == ColorCode.defaultFG ? theme.foreground : theme.background
@@ -513,7 +524,12 @@ final class Renderer: NSObject {
         return color
     }
 
-    private func buildInstances() {
+    /// Build instance lists from `snap`. Uses the captured `atlas`/`theme`
+    /// references (not `self.atlas`) so a concurrent config reload can't
+    /// race mid-frame, and so this can run outside `renderLock`.
+    private func buildInstances(
+        atlas: GlyphAtlas, theme: Theme, insetPoints: CGFloat, topInsetPoints: CGFloat
+    ) {
         bgInst.removeAll(keepingCapacity: true)
         glyphInst.removeAll(keepingCapacity: true)
         decoInst.removeAll(keepingCapacity: true)
@@ -548,11 +564,12 @@ final class Renderer: NSObject {
                     && r == snap.cursorY && c == snap.cursorX
 
                 let inverse = cell.flags & CellFlags.inverse != 0
-                var fg = resolve(inverse ? cell.bg : cell.fg, isFG: true, flags: cell.flags)
+                var fg = resolve(
+                    inverse ? cell.bg : cell.fg, isFG: true, flags: cell.flags, theme: theme)
                 var bgColor: SIMD4<Float>? = nil
                 let bgCode = inverse ? cell.fg : cell.bg
                 if inverse || bgCode != ColorCode.defaultBG {
-                    bgColor = resolve(bgCode, isFG: false, flags: cell.flags)
+                    bgColor = resolve(bgCode, isFG: false, flags: cell.flags, theme: theme)
                 }
                 if cell.flags & CellFlags.selected != 0 {
                     bgColor = theme.selection

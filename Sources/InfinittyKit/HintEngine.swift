@@ -5,9 +5,9 @@ import Foundation
 ///  - an optional `hint-command` (AI/custom): a program that reads the current
 ///    input line on stdin and prints a full suggested command on stdout.
 ///
-/// History matching runs synchronously on the PTY thread (fast, cached). The
-/// AI command, when configured, runs async and updates the suggestion when it
-/// returns — so typing never blocks on the network.
+/// History matching is O(n) over a preloaded cache (never File I/O under the
+/// terminal lock). The AI command, when configured, runs async and updates
+/// the suggestion when it returns — so typing never blocks on the network.
 final class HintEngine {
     /// Async "smart" suggestion source, in priority order at resolution time.
     enum SmartSource {
@@ -42,6 +42,14 @@ final class HintEngine {
             _fmHinter = FoundationModelHinter()
         }
         #endif
+        // Preload histfile off the PTY path so the first keystroke never
+        // stalls the terminal lock on FileManager + 5k-line parse.
+        preloadHistory()
+    }
+
+    /// Kick (or re-kick) async history load. Safe to call repeatedly.
+    func preloadHistory() {
+        aiQueue.async { [weak self] in self?.loadHistory() }
     }
 
     /// Resolve the configured smart source (Foundation Models when available).
@@ -62,41 +70,49 @@ final class HintEngine {
 
     // MARK: history
 
+    /// Runs only on `aiQueue`. Never called under the terminal lock.
     private func loadHistory() {
-        historyLoaded = true
+        lock.lock()
+        let already = historyLoaded
+        lock.unlock()
+        if already { return }
+
         let env = ProcessInfo.processInfo.environment
         let path = env["HISTFILE"]
             ?? NSString(string: "~/.zsh_history").expandingTildeInPath
-        guard let data = FileManager.default.contents(atPath: path),
-              let text = String(data: data, encoding: .utf8)
-                ?? String(data: data, encoding: .isoLatin1) else { return }
-
-        var seen = Set<String>()
         var result: [String] = []
-        // Walk newest→oldest so the first match is the most recent.
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
-            var cmd = String(line)
-            // zsh extended history: ": <ts>:<elapsed>;<command>"
-            if cmd.hasPrefix(":"), let semi = cmd.firstIndex(of: ";") {
-                cmd = String(cmd[cmd.index(after: semi)...])
+        if let data = FileManager.default.contents(atPath: path),
+           let text = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) {
+            var seen = Set<String>()
+            // Walk newest→oldest so the first match is the most recent.
+            for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+                var cmd = String(line)
+                // zsh extended history: ": <ts>:<elapsed>;<command>"
+                if cmd.hasPrefix(":"), let semi = cmd.firstIndex(of: ";") {
+                    cmd = String(cmd[cmd.index(after: semi)...])
+                }
+                cmd = cmd.trimmingCharacters(in: .whitespaces)
+                guard !cmd.isEmpty, !seen.contains(cmd) else { continue }
+                seen.insert(cmd)
+                result.append(cmd)
+                if result.count > 5000 { break }
             }
-            cmd = cmd.trimmingCharacters(in: .whitespaces)
-            guard !cmd.isEmpty, !seen.contains(cmd) else { continue }
-            seen.insert(cmd)
-            result.append(cmd)
-            if result.count > 5000 { break }
         }
         lock.lock()
         history = result
+        historyLoaded = true
         lock.unlock()
     }
 
     /// Synchronous suggestion for `input`: the full command it likely becomes.
     /// Layered: configured AI command (if cached) → shell history → built-in
     /// CLI specs. Returns nil if nothing matches.
+    ///
+    /// Must stay fast: called under the terminal lock from `feed`. Never does
+    /// File I/O — history is preloaded on `aiQueue`; until it lands, only the
+    /// AI cache + built-in CLI specs apply.
     func suggest(_ input: String) -> String? {
-        if !historyLoaded { loadHistory() }
-
         // Kick off an async smart query; prefer its cached answer when it
         // matches the current input.
         if case .none = smart {} else { requestSmart(input) }

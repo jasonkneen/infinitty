@@ -63,8 +63,11 @@ final class TerminalSession: NSObject {
             }
         }
         terminal.onBell = { [weak self] in
-            NSSound.beep()
-            DispatchQueue.main.async { self?.petAnimator?.bell() }
+            // AppKit audio + pet animator must run on main — never the PTY thread.
+            DispatchQueue.main.async {
+                NSSound.beep()
+                self?.petAnimator?.bell()
+            }
         }
 
         control.activityHandler = { [weak view] in
@@ -106,9 +109,29 @@ final class TerminalSession: NSObject {
         launched = true
         renderer.attach(view: view, layer: view.metalLayer, terminal: terminal)
         view.window?.layoutIfNeeded()
-        pty.spawn(
+        let ok = pty.spawn(
             cols: terminal.cols, rows: terminal.rows,
             socketPath: control.path, cwd: workingDirectory)
+        guard ok else {
+            // Don't crash the whole app on process-table exhaustion; surface
+            // a modal and tear the pane down cleanly.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let alert = NSAlert()
+                alert.messageText = "Could not open a terminal"
+                alert.informativeText =
+                    "Failed to spawn a shell (forkpty). Close other terminals or "
+                    + "raise the process limit, then try again."
+                alert.alertStyle = .warning
+                if let win = self.view.window {
+                    alert.beginSheetModal(for: win) { _ in }
+                } else {
+                    alert.runModal()
+                }
+                self.onExited?(self)
+            }
+            return
+        }
         // Foreground process tracking starts once the shell PID is alive.
         if pty.pid > 0 {
             let tracker = ForegroundProcessTracker(shellPid: pty.pid)
