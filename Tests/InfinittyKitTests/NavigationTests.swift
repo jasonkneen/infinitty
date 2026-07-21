@@ -453,6 +453,17 @@ final class NavigationTests: XCTestCase {
         XCTAssertNotNil(strip.tabButtonImagesForTesting[0])
     }
 
+    func testMainTabUsesShortContentSizedCapsule() throws {
+        let strip = TerminalTabStripView(frame: NSRect(x: 0, y: 0, width: 900, height: 48))
+        strip.update(titles: ["infinitty"], selectedIndex: 0)
+        strip.layoutSubtreeIfNeeded()
+
+        let frame = try XCTUnwrap(strip.tabButtonFramesForTesting.first)
+        XCTAssertEqual(frame.height, 34, accuracy: 0.5)
+        XCTAssertEqual(frame.minY, 5, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(frame.width, 230)
+    }
+
     /// Side-tabs mode lays the strip out as a left column and the body fills
     /// the remaining width.
     func testChromeSideTabsLeftColumn() {
@@ -489,8 +500,10 @@ final class NavigationTests: XCTestCase {
     }
 
     func testReferencePaneMetricsKeepTerminalTextInsideCard() {
-        XCTAssertEqual(PaneMetrics.inset, 5)
-        XCTAssertEqual(PaneMetrics.horizontalCanvasInset, 6)
+        XCTAssertEqual(PaneMetrics.horizontalInset, 2)
+        XCTAssertEqual(PaneMetrics.topInset, 5)
+        XCTAssertEqual(PaneMetrics.bottomInset, 8)
+        XCTAssertEqual(PaneMetrics.horizontalCanvasInset, 0)
         XCTAssertEqual(PaneMetrics.cornerRadius, 10)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 0), 15)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 24), 24)
@@ -507,7 +520,7 @@ final class NavigationTests: XCTestCase {
         outline.isSelected = true
         let focused = try XCTUnwrap(outline.layer?.borderColor)
         let focusedColor = try XCTUnwrap(NSColor(cgColor: focused)?.usingColorSpace(.sRGB))
-        XCTAssertEqual(focusedColor.alphaComponent, 0.50, accuracy: 0.01)
+        XCTAssertEqual(focusedColor.alphaComponent, 0.88, accuracy: 0.01)
         XCTAssertGreaterThan(focusedColor.blueComponent, focusedColor.redComponent)
         XCTAssertEqual(outline.layer?.borderWidth, 1.5)
         XCTAssertGreaterThan(outline.backgroundAlphaForTesting, 0)
@@ -521,8 +534,8 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(header.accessibilityLabel(), "Terminal pane: fish")
         XCTAssertEqual(header.splitRightAccessibilityLabelForTesting, "Split pane right")
         XCTAssertEqual(header.splitDownAccessibilityLabelForTesting, "Split pane down")
-        XCTAssertEqual(header.iconFrameForTesting.minY, 4, accuracy: 0.5)
-        XCTAssertEqual(header.titleFrameForTesting.minY, 2, accuracy: 0.5)
+        XCTAssertEqual(header.iconFrameForTesting.minY, 3, accuracy: 0.5)
+        XCTAssertEqual(header.titleFrameForTesting.minY, 0, accuracy: 0.5)
     }
 
     func testSplitChooserOffersExactlyTerminalFilesAndChat() {
@@ -538,8 +551,9 @@ final class NavigationTests: XCTestCase {
             kind: .files, contentView: content, background: NSColor.black)
         pane.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
         pane.layoutSubtreeIfNeeded()
-        XCTAssertEqual(pane.paneHeader.frame.minX, 5, accuracy: 0.5)
-        XCTAssertEqual(content.frame.minX, 5, accuracy: 0.5)
+        XCTAssertEqual(pane.paneHeader.frame.minX, 2, accuracy: 0.5)
+        XCTAssertEqual(content.frame.minX, 2, accuracy: 0.5)
+        XCTAssertEqual(content.frame.minY, 8, accuracy: 0.5)
         XCTAssertGreaterThan(content.frame.height, 400)
         XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
         XCTAssertTrue(pane.outlineIsAboveContentForTesting)
@@ -649,6 +663,19 @@ final class NavigationTests: XCTestCase {
         PaneLayoutController.restoreDividerPositions(snapshot)
 
         XCTAssertEqual(first.frame.maxX, saved, accuracy: 0.5)
+    }
+
+    func testMaximizedPaneDividerPositionsLeaveSiblingEdgeStrips() {
+        XCTAssertEqual(
+            PaneLayoutController.maximizedDividerPositions(
+                length: 600, childCount: 2, selectedIndex: 0,
+                collapsedExtent: 72, dividerThickness: 1),
+            [527])
+        XCTAssertEqual(
+            PaneLayoutController.maximizedDividerPositions(
+                length: 600, childCount: 2, selectedIndex: 1,
+                collapsedExtent: 72, dividerThickness: 1),
+            [72])
     }
 
 }

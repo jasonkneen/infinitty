@@ -59,6 +59,12 @@ final class UtilityPaneView: NSView {
 
     var onSplitRight: (() -> Void)? { didSet { paneHeader.onSplitRight = onSplitRight } }
     var onSplitDown: (() -> Void)? { didSet { paneHeader.onSplitDown = onSplitDown } }
+    var onChooseSplitRight: (() -> Void)? {
+        didSet { paneHeader.onChooseSplitRight = onChooseSplitRight }
+    }
+    var onChooseSplitDown: (() -> Void)? {
+        didSet { paneHeader.onChooseSplitDown = onChooseSplitDown }
+    }
     var onClose: (() -> Void)?
     var onFocus: (() -> Void)?
     var onDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onDragBegan } }
@@ -138,17 +144,23 @@ final class UtilityPaneView: NSView {
 
     override func layout() {
         super.layout()
-        let inset = PaneMetrics.inset
+        let horizontal = PaneMetrics.horizontalInset
+        let top = PaneMetrics.topInset
+        let bottom = PaneMetrics.bottomInset
         let obstruction = paneTopObstructionPoints()
-        paneOutline.frame = bounds.insetBy(dx: inset, dy: inset)
+        paneOutline.frame = NSRect(
+            x: horizontal, y: bottom,
+            width: max(bounds.width - horizontal * 2, 0),
+            height: max(bounds.height - top - bottom, 0))
+        let headerY = max(
+            bounds.height - obstruction - PaneHeaderView.height - top, bottom)
         paneHeader.frame = NSRect(
-            x: inset,
-            y: max(bounds.height - obstruction - PaneHeaderView.height - inset, inset),
-            width: max(bounds.width - inset * 2, 0), height: PaneHeaderView.height)
+            x: horizontal, y: headerY,
+            width: max(bounds.width - horizontal * 2, 0), height: PaneHeaderView.height)
         contentView.frame = NSRect(
-            x: inset, y: inset,
-            width: max(bounds.width - inset * 2, 0),
-            height: max(bounds.height - obstruction - PaneHeaderView.height - inset * 3, 0))
+            x: horizontal, y: bottom,
+            width: max(bounds.width - horizontal * 2, 0),
+            height: max(headerY - top - bottom, 0))
         closeButton.frame.origin = NSPoint(x: max(paneHeader.bounds.width - 98, 0), y: 2)
     }
 

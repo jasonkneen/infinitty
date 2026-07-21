@@ -257,6 +257,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
     private var searchPopover: NSPopover?
     private var animateSelectionOnNextLayout = false
     private var selectionAnimationOrigin: Int?
+    private var pendingSelectionAnimationTarget: Int?
 
     private var renamingIndex: Int?
     private weak var renameEditor: TabRenameTextView?
@@ -283,7 +284,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
 
         searchButton.image = NSImage(
             systemSymbolName: "magnifyingglass", accessibilityDescription: "Search Tabs")
-        searchButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .medium)
+        searchButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .medium)
         searchButton.imagePosition = .imageOnly
         searchButton.isBordered = false
         searchButton.contentTintColor = .secondaryLabelColor
@@ -359,6 +360,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
             searchPopover?.close()
         }
         selectionAnimationOrigin = animateFromIndex
+        pendingSelectionAnimationTarget = nil
         animateSelectionOnNextLayout = (selectionChanged || animateFromIndex != nil)
             && !tabButtons.isEmpty
         self.selectedIndex = selectedIndex
@@ -520,18 +522,29 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         let pinWidth: CGFloat = 34
         let pinnedCount = pins.count
         let unpinnedCount = max(tabButtons.count - pinnedCount, 0)
-        let usedByPins = CGFloat(pinnedCount) * (pinWidth + pad)
-        let remaining = max(available - usedByPins, 1)
-        let tabWidth = unpinnedCount > 0
-            ? min(260, max(remaining / CGFloat(unpinnedCount) - pad, 1))
-            : 1
-        let tabHeight = bounds.height - 8
+        let spacingTotal = pad * CGFloat(max(tabButtons.count - 1, 0))
+        let remaining = max(
+            available - CGFloat(pinnedCount) * pinWidth - spacingTotal, 1)
+        let preferredWidths: [CGFloat] = titles.enumerated().map { index, title in
+            guard pins[index] == nil else { return pinWidth }
+            let textWidth = ceil(title.size(withAttributes: [
+                .font: NSFont.systemFont(ofSize: 15, weight: .regular),
+            ]).width)
+            return min(230, max(160, textWidth + 92))
+        }
+        let preferredUnpinnedTotal = preferredWidths.enumerated().reduce(CGFloat(0)) {
+            $0 + (pins[$1.offset] == nil ? $1.element : 0)
+        }
+        let unpinnedScale = unpinnedCount > 0 && preferredUnpinnedTotal > remaining
+            ? remaining / preferredUnpinnedTotal : 1
+        let tabHeight = min(34, max(bounds.height - 6, 1))
+        let tabY = max((bounds.height - tabHeight) / 2 - 2, 0)
         var xPos = leadingInset
         for (index, button) in tabButtons.enumerated() {
             let isPinned = pins[index] != nil
-            let width = isPinned ? pinWidth : tabWidth
+            let width = isPinned ? pinWidth : max(preferredWidths[index] * unpinnedScale, 1)
             button.alignment = isPinned ? .center : .center
-            let frame = NSRect(x: xPos, y: 4, width: width, height: tabHeight)
+            let frame = NSRect(x: xPos, y: tabY, width: width, height: tabHeight)
             button.frame = frame
             button.layer?.cornerRadius = tabHeight / 2
             if isPinned {
@@ -566,8 +579,33 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
            tabButtons.indices.contains(origin), origin != selectedIndex {
             selectionPill.frame = tabButtons[origin].frame
             selectionPill.isHidden = false
+            selectionPill.layer?.cornerRadius = target.height / 2
+            selectionAnimationOrigin = nil
+            animateSelectionOnNextLayout = false
+            guard window != nil else {
+                selectionPill.frame = target
+                return
+            }
+            let targetIndex = selectedIndex
+            pendingSelectionAnimationTarget = targetIndex
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.pendingSelectionAnimationTarget == targetIndex,
+                      self.selectedIndex == targetIndex,
+                      self.tabButtons.indices.contains(targetIndex)
+                else { return }
+                self.pendingSelectionAnimationTarget = nil
+                let committedTarget = self.tabButtons[targetIndex].frame
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.20
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    self.selectionPill.animator().frame = committedTarget
+                }
+            }
+            return
         }
         selectionAnimationOrigin = nil
+        if pendingSelectionAnimationTarget != nil { return }
         selectionPill.layer?.cornerRadius = target.height / 2
         let shouldAnimate = animateSelectionOnNextLayout
             && !selectionPill.isHidden && window != nil
@@ -720,11 +758,11 @@ private extension TerminalTabStripView {
         let image = NSImage(size: NSSize(width: 30, height: 22))
         image.lockFocus()
         let size = NSSize(width: 22, height: 17)
-        tinted(NSColor(white: 0.42, alpha: 1)).draw(
+        tinted(NSColor(white: 0.36, alpha: 1)).draw(
             in: NSRect(x: 8, y: 5, width: size.width, height: size.height))
-        tinted(NSColor(white: 0.30, alpha: 1)).draw(
+        tinted(NSColor(white: 0.26, alpha: 1)).draw(
             in: NSRect(x: 4, y: 2.5, width: size.width, height: size.height))
-        tinted(NSColor(white: 0.18, alpha: 1)).draw(
+        tinted(NSColor(white: 0.16, alpha: 1)).draw(
             in: NSRect(x: 0, y: 0, width: size.width, height: size.height))
         NSColor.systemGreen.setStroke()
         let prompt = NSBezierPath()

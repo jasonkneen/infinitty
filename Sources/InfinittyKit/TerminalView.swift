@@ -13,6 +13,12 @@ final class TerminalView: NSView {
     var onPetClick: (() -> Void)?
     var onSplitRight: (() -> Void)? { didSet { paneHeader.onSplitRight = onSplitRight } }
     var onSplitDown: (() -> Void)? { didSet { paneHeader.onSplitDown = onSplitDown } }
+    var onChooseSplitRight: (() -> Void)? {
+        didSet { paneHeader.onChooseSplitRight = onChooseSplitRight }
+    }
+    var onChooseSplitDown: (() -> Void)? {
+        didSet { paneHeader.onChooseSplitDown = onChooseSplitDown }
+    }
     var onTogglePaneZoom: (() -> Void)? { didSet { paneHeader.onToggleZoom = onTogglePaneZoom } }
     var onPaneDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onPaneDragBegan } }
     var onPaneDragMoved: ((NSPoint) -> Void)? { didSet { paneHeader.onDragMoved = onPaneDragMoved } }
@@ -165,12 +171,17 @@ final class TerminalView: NSView {
     override func layout() {
         super.layout()
         let obstruction = paneTopObstructionPoints()
-        let paneInset = PaneMetrics.inset
-        paneOutline.frame = bounds.insetBy(dx: paneInset, dy: paneInset)
+        let horizontal = PaneMetrics.horizontalInset
+        let top = PaneMetrics.topInset
+        let bottom = PaneMetrics.bottomInset
+        paneOutline.frame = NSRect(
+            x: horizontal, y: bottom,
+            width: max(bounds.width - horizontal * 2, 0),
+            height: max(bounds.height - top - bottom, 0))
         paneHeader.frame = NSRect(
-            x: paneInset,
-            y: max(bounds.height - obstruction - PaneHeaderView.height - paneInset, paneInset),
-            width: max(bounds.width - paneInset * 2, 0),
+            x: horizontal,
+            y: max(bounds.height - obstruction - PaneHeaderView.height - top, bottom),
+            width: max(bounds.width - horizontal * 2, 0),
             height: min(PaneHeaderView.height, bounds.height))
         positionPaneShortcutHint()
         updateGeometry()

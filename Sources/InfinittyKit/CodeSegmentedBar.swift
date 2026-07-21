@@ -3,12 +3,16 @@ import AppKit
 /// Shared chrome colors for the code view.
 enum CodePalette {
     static let selectionFill = NSColor(calibratedWhite: 0.23, alpha: 1)
-    /// Accent used for the active selection across the sidebar — file-tree row
-    /// highlight, FILES/CHANGES/CHAT segment, chat bubbles, send button, and
-    /// the active tab. Config-driven (accent-color); defaults to indigo.
+    /// Accent used for emphasized content and focused pane state. Config-driven
+    /// (accent-color); defaults to indigo. Utility chrome itself stays neutral.
     static let defaultAccent = NSColor(
         calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1)
     static var selectionAccent = defaultAccent
+    /// Saturated blue used only for the active pane card. The configurable
+    /// accent can be intentionally muted for text controls, but pane focus must
+    /// retain the crisp blue contrast shown in the window layout.
+    static let paneFocusAccent = NSColor(
+        srgbRed: 0.04, green: 0.48, blue: 0.70, alpha: 1)
 
     /// Apply the app config's accent-color (call before building chrome).
     static func apply(_ config: AppConfig) {
@@ -26,7 +30,9 @@ enum CodePalette {
     /// Neutral "raised" fill for the active tab in the icon-style page control
     /// (macOS-segment look), used instead of the accent so the tab bar reads
     /// as clean chrome rather than a colored control.
-    static let tabSelectionNeutral = NSColor(calibratedWhite: 0.30, alpha: 1)
+    static let tabSelectionNeutral = NSColor(white: 1, alpha: 0.16)
+    static let glassFill = NSColor(white: 1, alpha: 0.055)
+    static let glassBorder = NSColor(white: 1, alpha: 0.16)
 
     static func isNeutral(_ color: NSColor) -> Bool {
         guard let rgb = color.usingColorSpace(.deviceRGB) else { return false }
@@ -38,7 +44,7 @@ enum CodePalette {
 /// Minimal capsule segmented control for the code view. AppKit's
 /// NSSegmentedControl renders in the system accent color, which clashes with
 /// the terminal's dark chrome; this one stays on-palette — hairline-dark
-/// container, indigo pill for the active segment.
+/// container, translucent glass pill for the active segment.
 /// Compact outlined segmented control for code-view page and preview modes.
 final class CodeSegmentedBar: NSView {
     var onChange: ((Int) -> Void)?
@@ -57,7 +63,7 @@ final class CodeSegmentedBar: NSView {
     var selectionFillColor: NSColor {
         neutralSelection ? CodePalette.tabSelectionNeutral : CodePalette.selectionAccent
     }
-    let outlineColor = CodePalette.outline
+    let outlineColor = CodePalette.glassBorder
 
     init(
         labels: [String], icons: [String?]? = nil,
@@ -132,7 +138,7 @@ final class CodeSegmentedBar: NSView {
         if hasIcons {
             let track = NSBezierPath(
                 roundedRect: bounds, xRadius: outerRadius, yRadius: outerRadius)
-            NSColor(white: 1, alpha: 0.04).setFill()
+            CodePalette.glassFill.setFill()
             track.fill()
         }
 
@@ -159,7 +165,7 @@ final class CodeSegmentedBar: NSView {
                 roundedRect: selectedRect.insetBy(dx: 0.375, dy: 0.375),
                 xRadius: selectedRadius, yRadius: selectedRadius)
             border.lineWidth = 0.75
-            NSColor(white: 1, alpha: 0.14).setStroke()
+            NSColor(white: 1, alpha: 0.22).setStroke()
             border.stroke()
         } else {
             selectionFillColor.setFill()

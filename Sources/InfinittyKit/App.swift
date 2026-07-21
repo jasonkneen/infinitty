@@ -16,9 +16,7 @@ private struct PaneDragState {
 
 private struct PaneZoomState {
     let pane: NSView
-    let placeholder: NSView
-    let overlay: NSView
-    let hiddenViews: [NSView]
+    let root: NSView
     let dividerPositions: PaneLayoutController.DividerPositions
 }
 
@@ -368,9 +366,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         s.view.onSplitRight = { [weak self, weak s] in
             guard let self, let s else { return }
-            self.showSplitChooser(sourceView: s.view, vertical: true)
+            self.splitTerminal(relativeTo: s.view, vertical: true)
         }
         s.view.onSplitDown = { [weak self, weak s] in
+            guard let self, let s else { return }
+            self.splitTerminal(relativeTo: s.view, vertical: false)
+        }
+        s.view.onChooseSplitRight = { [weak self, weak s] in
+            guard let self, let s else { return }
+            self.showSplitChooser(sourceView: s.view, vertical: true)
+        }
+        s.view.onChooseSplitDown = { [weak self, weak s] in
             guard let self, let s else { return }
             self.showSplitChooser(sourceView: s.view, vertical: false)
         }
@@ -560,26 +566,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// be skipped on the frequent tab/pane churn that happens with no
     /// modifiers held.
     private var shortcutHintsApplied = false
-    private var nativeTrafficLightBaselines: [ObjectIdentifier: NSPoint] = [:]
-
     private func positionNativeTrafficLights(in window: NSWindow) {
-        guard config.trafficLights == "circle" else { return }
+        guard config.trafficLights == "circle",
+              let chrome = terminalChromes[ObjectIdentifier(window)]
+        else { return }
+        chrome.layoutSubtreeIfNeeded()
+        let stripCenterInWindow = chrome.strip.convert(
+            NSPoint(x: chrome.strip.bounds.midX, y: chrome.strip.bounds.midY), to: nil)
         for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            guard let button = window.standardWindowButton(type) else { continue }
-            let id = ObjectIdentifier(button)
-            let offset = NSPoint(x: 0, y: -8)
-            let current = button.frame.origin
-            let stored = nativeTrafficLightBaselines[id]
-            let expected = stored.map {
-                NSPoint(x: $0.x + offset.x, y: $0.y + offset.y)
-            }
-            let wasRelaidOut = expected.map {
-                abs(current.x - $0.x) > 1 || abs(current.y - $0.y) > 1
-            } ?? false
-            let baseline = stored == nil || wasRelaidOut ? current : stored!
-            nativeTrafficLightBaselines[id] = baseline
+            guard let button = window.standardWindowButton(type),
+                  let parent = button.superview else { continue }
+            let stripCenter = parent.convert(stripCenterInWindow, from: nil)
             var frame = button.frame
-            frame.origin = NSPoint(x: baseline.x + offset.x, y: baseline.y + offset.y)
+            frame.origin.y = stripCenter.y - frame.height / 2
             button.frame = frame
         }
     }
@@ -1228,22 +1227,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               let win = context.sourceView.window else { return }
         switch PaneType(rawValue: sender.tag) {
         case .terminal:
-            let session = createSession(
-                scale: win.backingScaleFactor,
-                usesSharedWindowSurface: terminalChromes[ObjectIdentifier(win)] != nil)
-            session.workingDirectory = focusedSession(in: win)?.currentDirectory()
-                ?? activeSessions(in: win).first?.currentDirectory()
-            guard insertPaneView(
-                session.view, relativeTo: context.sourceView, vertical: context.vertical)
-            else {
-                session.shutdown()
-                sessions.removeAll { $0 === session }
-                return
-            }
-            session.launch()
-            win.makeFirstResponder(session.view)
-            refreshPets()
-            updateTitle(for: win)
+            splitTerminal(relativeTo: context.sourceView, vertical: context.vertical)
         case .files:
             _ = openUtilityPanel(
                 .files, in: win, relativeTo: context.sourceView, vertical: context.vertical)
@@ -1253,6 +1237,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case nil:
             break
         }
+    }
+
+    private func splitTerminal(relativeTo sourceView: NSView, vertical: Bool) {
+        restorePaneZoom(containing: sourceView, refocus: false)
+        guard let win = sourceView.window else { return }
+        let session = createSession(
+            scale: win.backingScaleFactor,
+            usesSharedWindowSurface: terminalChromes[ObjectIdentifier(win)] != nil)
+        session.workingDirectory = focusedSession(in: win)?.currentDirectory()
+            ?? activeSessions(in: win).first?.currentDirectory()
+        guard insertPaneView(session.view, relativeTo: sourceView, vertical: vertical) else {
+            session.shutdown()
+            sessions.removeAll { $0 === session }
+            return
+        }
+        session.launch()
+        win.makeFirstResponder(session.view)
+        refreshPets()
+        updateTitle(for: win)
+        refreshShortcutHints()
     }
 
     @discardableResult
@@ -1298,137 +1302,126 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let win = pane.window, let root = terminalRoot(of: win) else { return }
         let key = ObjectIdentifier(root)
         if paneZoomStates[key] != nil {
-            restorePaneZoom(key: key, refocus: true)
+            restorePaneZoom(key: key, refocus: true, animated: true)
             return
         }
 
         let panes = paneLeafViews(in: win)
-        guard panes.count > 1, pane !== root,
-              let parent = pane.superview else { return }
+        guard panes.count > 1, pane !== root else { return }
         root.layoutSubtreeIfNeeded()
-        let paneFrameInWindow = pane.convert(pane.bounds, to: nil)
-        let startFrame = root.convert(paneFrameInWindow, from: nil)
-
-        let placeholder = NSView(frame: pane.frame)
-        placeholder.autoresizingMask = pane.autoresizingMask
-        placeholder.wantsLayer = true
-        placeholder.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.08).cgColor
         let dividerPositions = PaneLayoutController.captureDividerPositions(in: root)
-        guard replaceNode(pane, with: placeholder, in: parent) else { return }
+        let splitPath = paneSplitPath(from: pane, to: root)
+        guard !splitPath.isEmpty else { return }
 
-        let overlay = NSView(frame: startFrame)
-        overlay.autoresizingMask = []
-        overlay.wantsLayer = true
-        overlay.layer?.backgroundColor = NSColor.clear.cgColor
-        root.addSubview(overlay, positioned: .above, relativeTo: nil)
-        pane.frame = overlay.bounds
-        pane.autoresizingMask = [.width, .height]
-        overlay.addSubview(pane)
+        // Resolve from the outer split inward so every descendant target uses
+        // the size it will actually have after its ancestors expand. Applying
+        // these positions synchronously is not displayed; it lets us capture
+        // one coherent final geometry before restoring the starting layout.
+        for (split, selectedIndex) in splitPath.reversed() {
+            let length = split.isVertical ? split.bounds.width : split.bounds.height
+            let collapsed: CGFloat = split.isVertical ? 72 : 48
+            let positions = PaneLayoutController.maximizedDividerPositions(
+                length: length,
+                childCount: split.arrangedSubviews.count,
+                selectedIndex: selectedIndex,
+                collapsedExtent: collapsed,
+                dividerThickness: split.dividerThickness)
+            for (index, position) in positions.enumerated() {
+                split.setPosition(position, ofDividerAt: index)
+            }
+            root.layoutSubtreeIfNeeded()
+        }
+        let targets = splitPath.map { split, _ in
+            (
+                split,
+                split.arrangedSubviews.dropLast().map {
+                    split.isVertical ? $0.frame.maxX : $0.frame.maxY
+                }
+            )
+        }
+        PaneLayoutController.restoreDividerPositions(dividerPositions)
+        root.layoutSubtreeIfNeeded()
 
-        let hidden = panes.filter { $0 !== pane }
-        hidden.forEach { $0.isHidden = true }
         paneZoomStates[key] = PaneZoomState(
-            pane: pane, placeholder: placeholder, overlay: overlay,
-            hiddenViews: hidden, dividerPositions: dividerPositions)
+            pane: pane, root: root, dividerPositions: dividerPositions)
         win.makeFirstResponder(pane)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.24
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            overlay.animator().frame = root.bounds
+            // Apply ancestors first so AppKit lays descendants out at their
+            // expanded model size before validating their divider positions.
+            for (split, positions) in targets.reversed() {
+                for (index, position) in positions.enumerated() {
+                    split.animator().setPosition(position, ofDividerAt: index)
+                }
+            }
         } completionHandler: { [weak self] in
             guard self?.paneZoomStates[key]?.pane === pane else { return }
-            overlay.frame = root.bounds
-            overlay.autoresizingMask = [.width, .height]
+            pane.layoutSubtreeIfNeeded()
         }
+    }
+
+    private func paneSplitPath(
+        from pane: NSView, to root: NSView
+    ) -> [(split: NSSplitView, selectedIndex: Int)] {
+        var result: [(NSSplitView, Int)] = []
+        var branch: NSView = pane
+        while branch !== root, let parent = branch.superview {
+            if let split = parent as? NSSplitView,
+               let index = split.arrangedSubviews.firstIndex(of: branch) {
+                result.append((split, index))
+            }
+            branch = parent
+        }
+        return result
     }
 
     private func restorePaneZoom(containing session: TerminalSession, refocus: Bool) {
-        restorePaneZoom(containing: session.view, refocus: refocus)
+        restorePaneZoom(containing: session.view, refocus: refocus, animated: false)
     }
 
-    private func restorePaneZoom(containing pane: NSView, refocus: Bool) {
-        guard let entry = paneZoomStates.first(where: { $0.value.pane === pane }) else { return }
-        restorePaneZoom(key: entry.key, refocus: refocus)
+    private func restorePaneZoom(
+        containing pane: NSView, refocus: Bool, animated: Bool = false
+    ) {
+        guard let win = pane.window, let root = terminalRoot(of: win),
+              let entry = paneZoomStates.first(where: { $0.value.root === root })
+        else { return }
+        restorePaneZoom(key: entry.key, refocus: refocus, animated: animated)
     }
 
     private func restorePaneZoom(revealing pane: NSView) {
-        guard let entry = paneZoomStates.first(where: { state in
-            state.value.pane !== pane
-                && state.value.hiddenViews.contains(where: { $0 === pane })
-        }) else { return }
-        restorePaneZoom(key: entry.key, refocus: false)
+        guard let win = pane.window, let root = terminalRoot(of: win),
+              let entry = paneZoomStates.first(where: {
+                  $0.value.root === root && $0.value.pane !== pane
+              }) else { return }
+        restorePaneZoom(key: entry.key, refocus: false, animated: false)
     }
 
-    private func restorePaneZoom(key: ObjectIdentifier, refocus: Bool) {
+    private func restorePaneZoom(
+        key: ObjectIdentifier, refocus: Bool, animated: Bool
+    ) {
         guard let state = paneZoomStates.removeValue(forKey: key) else { return }
-        let transitionTitle: String
-        let transitionIcon: String
-        if let terminal = state.pane as? TerminalView {
-            transitionTitle = terminal.paneTitle
-            transitionIcon = "terminal"
-        } else if let utility = state.pane as? UtilityPaneView {
-            transitionTitle = utility.kind.title
-            transitionIcon = utility.kind.symbol
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                for snapshot in state.dividerPositions
+                where snapshot.split.superview != nil
+                    && snapshot.split.arrangedSubviews.count == snapshot.positions.count + 1 {
+                    for (index, position) in snapshot.positions.enumerated() {
+                        snapshot.split.animator().setPosition(position, ofDividerAt: index)
+                    }
+                }
+            }
         } else {
-            transitionTitle = "Pane"
-            transitionIcon = "rectangle"
+            PaneLayoutController.restoreDividerPositions(state.dividerPositions)
         }
-        state.hiddenViews.forEach { $0.isHidden = false }
-        let root = state.overlay.superview
-        let targetFrame = state.placeholder.superview.flatMap { parent in
-            root.map { state.placeholder.convert(state.placeholder.bounds, to: $0) }
-        } ?? state.overlay.frame
-
-        // Restore topology synchronously. Close/split/session-exit callers
-        // continue immediately after this function and must see the real pane
-        // back in its split, never a pane still owned by an animation overlay.
-        state.pane.removeFromSuperview()
-        if let parent = state.placeholder.superview {
-            _ = replaceNode(state.placeholder, with: state.pane, in: parent)
-        } else if let root {
-            state.pane.frame = root.bounds
-            state.pane.autoresizingMask = [.width, .height]
-            root.addSubview(state.pane)
-        }
-        state.pane.window?.layoutIfNeeded()
-        PaneLayoutController.restoreDividerPositions(state.dividerPositions)
         if refocus, let win = state.pane.window { win.makeFirstResponder(state.pane) }
-
-        // Keep only the old full-size overlay as a visual proxy and shrink it
-        // toward the restored pane. Its completion cannot mutate pane topology.
-        state.overlay.autoresizingMask = []
-        let theme = Theme.dark.applying(config).background
-        state.overlay.layer?.backgroundColor = NSColor(
-            srgbRed: CGFloat(theme.x), green: CGFloat(theme.y), blue: CGFloat(theme.z),
-            alpha: CGFloat(theme.w)).cgColor
-        let transition = PaneZoomTransitionView(
-            title: transitionTitle, iconSymbol: transitionIcon)
-        transition.frame = state.overlay.bounds
-        transition.autoresizingMask = [.width, .height]
-        state.overlay.addSubview(transition)
-        state.overlay.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
-        state.overlay.layer?.borderWidth = 1
-        state.overlay.layer?.masksToBounds = true
-        let cornerAnimation = CABasicAnimation(keyPath: "cornerRadius")
-        cornerAnimation.fromValue = 0
-        cornerAnimation.toValue = PaneMetrics.cornerRadius
-        cornerAnimation.duration = 0.22
-        cornerAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        state.overlay.layer?.cornerRadius = PaneMetrics.cornerRadius
-        state.overlay.layer?.add(cornerAnimation, forKey: "pane-zoom-corners")
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            state.overlay.animator().frame = targetFrame
-            state.overlay.animator().alphaValue = 0
-        } completionHandler: {
-            state.overlay.removeFromSuperview()
-        }
     }
 
     private func beginPaneDrag(sourceView: NSView, title: String, at point: NSPoint) {
-        guard paneZoomStates.values.allSatisfy({ $0.pane !== sourceView }),
-              let win = sourceView.window,
+        restorePaneZoom(containing: sourceView, refocus: false)
+        guard let win = sourceView.window,
               sourceView.superview is NSSplitView,
               let content = win.contentView else { return }
         endPaneDrag(at: point, cancelled: true)
@@ -1457,14 +1450,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             PaneDropZone.resolve(point: $0.convert(point, from: nil), in: $0.bounds)
         }
         if state.targetView !== target || state.zone != zone {
-            state.preview?.removeFromSuperview()
-            state.preview = nil
-            if let target, let zone {
-                let preview = PaneDropPreviewView(
-                    frame: zone.previewFrame(in: target.bounds).insetBy(dx: 3, dy: 3))
-                preview.autoresizingMask = []
-                target.addSubview(preview, positioned: .above, relativeTo: nil)
-                state.preview = preview
+            let targetFrame = target.flatMap { target in
+                zone.map { $0.previewFrame(in: target.bounds).insetBy(dx: 3, dy: 3) }
+            }
+            if state.targetView === target, let preview = state.preview, let targetFrame {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.16
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    preview.animator().frame = targetFrame
+                }
+            } else {
+                if let oldPreview = state.preview {
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.10
+                        oldPreview.animator().alphaValue = 0
+                    } completionHandler: {
+                        oldPreview.removeFromSuperview()
+                    }
+                }
+                state.preview = nil
+                if let target, let targetFrame {
+                    let dx = min(8, targetFrame.width / 4)
+                    let dy = min(8, targetFrame.height / 4)
+                    let preview = PaneDropPreviewView(
+                        frame: targetFrame.insetBy(dx: dx, dy: dy))
+                    preview.alphaValue = 0
+                    preview.autoresizingMask = []
+                    target.addSubview(preview, positioned: .above, relativeTo: nil)
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.16
+                        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        preview.animator().frame = targetFrame
+                        preview.animator().alphaValue = 1
+                    }
+                    state.preview = preview
+                }
             }
             state.targetView = target
             state.zone = zone
@@ -1475,31 +1495,73 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func endPaneDrag(at point: NSPoint, cancelled: Bool) {
         guard let state = paneDragState else { return }
         paneDragState = nil
-        state.preview?.removeFromSuperview()
+        if cancelled, let preview = state.preview {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.10
+                preview.animator().alphaValue = 0
+            } completionHandler: {
+                preview.removeFromSuperview()
+            }
+        }
         state.badge.removeFromSuperview()
         guard !cancelled, let target = state.targetView, let zone = state.zone else { return }
         movePaneView(state.sourceView, relativeTo: target, zone: zone)
+        if let preview = state.preview {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                preview.animator().alphaValue = 0
+            } completionHandler: {
+                preview.removeFromSuperview()
+            }
+        }
     }
 
     private func movePaneView(_ source: NSView, relativeTo target: NSView, zone: PaneDropZone) {
         guard source !== target, let win = source.window, target.window === win else { return }
+        let oldGeometry = paneLeafViews(in: win).map {
+            (view: $0, frameInWindow: $0.convert($0.bounds, to: nil))
+        }
         let result = PaneLayoutController.move(
             source: source, target: target, zone: zone)
         guard result.changed else { return }
         if let split = result.insertedSplit {
-            DispatchQueue.main.async {
-                let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
-                split.setPosition(mid, ofDividerAt: 0)
-                win.makeFirstResponder(source)
-                self.refreshPets()
-                self.updateTitle(for: win)
-                self.refreshShortcutHints()
-            }
-        } else {
-            win.makeFirstResponder(source)
-            refreshPets()
-            updateTitle(for: win)
-            refreshShortcutHints()
+            win.contentView?.layoutSubtreeIfNeeded()
+            let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
+            split.setPosition(mid, ofDividerAt: 0)
+        }
+        win.contentView?.layoutSubtreeIfNeeded()
+        animatePaneReflow(from: oldGeometry)
+        win.makeFirstResponder(source)
+        refreshPets()
+        updateTitle(for: win)
+        refreshShortcutHints()
+    }
+
+    private func animatePaneReflow(
+        from oldGeometry: [(view: NSView, frameInWindow: NSRect)]
+    ) {
+        for (view, oldFrameInWindow) in oldGeometry {
+            guard view.window != nil, let parent = view.superview else { continue }
+            view.wantsLayer = true
+            guard let layer = view.layer else { continue }
+            let oldFrame = parent.convert(oldFrameInWindow, from: nil)
+            let newFrame = view.frame
+            guard oldFrame != newFrame else { continue }
+
+            let position = CABasicAnimation(keyPath: "position")
+            position.fromValue = NSValue(point: NSPoint(x: oldFrame.midX, y: oldFrame.midY))
+            position.toValue = NSValue(point: layer.position)
+
+            let oldBounds = NSRect(origin: view.bounds.origin, size: oldFrame.size)
+            let bounds = CABasicAnimation(keyPath: "bounds")
+            bounds.fromValue = NSValue(rect: oldBounds)
+            bounds.toValue = NSValue(rect: layer.bounds)
+
+            let group = CAAnimationGroup()
+            group.animations = [position, bounds]
+            group.duration = 0.24
+            group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(group, forKey: "pane-reflow")
         }
     }
 
@@ -1871,9 +1933,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         pane.onSplitRight = { [weak self, weak pane] in
             guard let self, let pane else { return }
-            self.showSplitChooser(sourceView: pane, vertical: true)
+            self.splitTerminal(relativeTo: pane, vertical: true)
         }
         pane.onSplitDown = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.splitTerminal(relativeTo: pane, vertical: false)
+        }
+        pane.onChooseSplitRight = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.showSplitChooser(sourceView: pane, vertical: true)
+        }
+        pane.onChooseSplitDown = { [weak self, weak pane] in
             guard let self, let pane else { return }
             self.showSplitChooser(sourceView: pane, vertical: false)
         }
@@ -1953,7 +2023,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let activeRoot = terminalRoot(of: win)
         let zoomed = paneZoomStates.values.first {
             guard let activeRoot else { return false }
-            return $0.overlay === activeRoot || $0.overlay.isDescendant(of: activeRoot)
+            return $0.root === activeRoot
         }?.pane as? TerminalView
         if let target = zoomed ?? activeSessions(in: win).first?.view {
             win.makeFirstResponder(target)
@@ -2381,19 +2451,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             endPaneDrag(at: .zero, cancelled: true)
         }
         let zoomKeys = paneZoomStates.compactMap { key, value in
-            value.pane.window === win || value.overlay.window === win ? key : nil
+            value.pane.window === win || value.root.window === win ? key : nil
         }
-        zoomKeys.forEach { restorePaneZoom(key: $0, refocus: false) }
+        zoomKeys.forEach { restorePaneZoom(key: $0, refocus: false, animated: false) }
         // Cancel any in-flight tab rename in this window's strip.
         terminalChromes[ObjectIdentifier(win)]?.strip.cancelRename()
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
         utilityPanels.removeValue(forKey: ObjectIdentifier(win))
         sidebarToggleAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
-        for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            if let button = win.standardWindowButton(type) {
-                nativeTrafficLightBaselines.removeValue(forKey: ObjectIdentifier(button))
-            }
-        }
         terminalChromes.removeValue(forKey: ObjectIdentifier(win))
         win.subtitle = ""
         let closing = sessions.filter { $0.view.window === win }

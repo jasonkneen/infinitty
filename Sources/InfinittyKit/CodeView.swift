@@ -394,11 +394,11 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         searchField.controlSize = .regular
         searchField.isBezeled = false
         searchField.drawsBackground = true
-        searchField.backgroundColor = NSColor(white: 1, alpha: 0.07)
+        searchField.backgroundColor = CodePalette.glassFill
         searchField.wantsLayer = true
         searchField.layer?.cornerRadius = 6
         searchField.layer?.borderWidth = 1
-        searchField.layer?.borderColor = CodePalette.hairline.cgColor
+        searchField.layer?.borderColor = CodePalette.glassBorder.cgColor
         searchField.layer?.masksToBounds = true
         searchField.delegate = self
 

@@ -1,8 +1,10 @@
 import AppKit
 
 enum PaneMetrics {
-    static let inset: CGFloat = 5
-    static let horizontalCanvasInset: CGFloat = 6
+    static let horizontalInset: CGFloat = 2
+    static let topInset: CGFloat = 5
+    static let bottomInset: CGFloat = 8
+    static let horizontalCanvasInset: CGFloat = 0
     static let cornerRadius: CGFloat = 10
     static let minimumTerminalContentInset: CGFloat = 15
 
@@ -184,6 +186,38 @@ enum PaneLayoutController {
             }
         }
     }
+
+    static func maximizedDividerPositions(
+        length: CGFloat, childCount: Int, selectedIndex: Int,
+        collapsedExtent: CGFloat, dividerThickness: CGFloat
+    ) -> [CGFloat] {
+        guard childCount > 1, (0..<childCount).contains(selectedIndex) else { return [] }
+        let dividerTotal = dividerThickness * CGFloat(childCount - 1)
+        let available = max(length - dividerTotal, 0)
+        let sideExtent = min(
+            collapsedExtent,
+            available / CGFloat(childCount))
+        let selectedExtent = max(available - sideExtent * CGFloat(childCount - 1), 0)
+        let extents = (0..<childCount).map {
+            $0 == selectedIndex ? selectedExtent : sideExtent
+        }
+        var positions: [CGFloat] = []
+        var cursor: CGFloat = 0
+        for index in 0..<(childCount - 1) {
+            cursor += extents[index]
+            positions.append(cursor)
+            cursor += dividerThickness
+        }
+        return positions
+    }
+}
+
+private final class PaneSplitButton: NSButton {
+    var onRightClick: (() -> Void)?
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
+    }
 }
 
 final class PaneHeaderView: NSView {
@@ -191,6 +225,8 @@ final class PaneHeaderView: NSView {
 
     var onSplitRight: (() -> Void)?
     var onSplitDown: (() -> Void)?
+    var onChooseSplitRight: (() -> Void)?
+    var onChooseSplitDown: (() -> Void)?
     var onToggleZoom: (() -> Void)?
     var onFocus: (() -> Void)?
     var onDragBegan: ((NSPoint) -> Void)?
@@ -199,8 +235,8 @@ final class PaneHeaderView: NSView {
 
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let splitRightButton = NSButton()
-    private let splitDownButton = NSButton()
+    private let splitRightButton = PaneSplitButton()
+    private let splitDownButton = PaneSplitButton()
     private let bottomHairline = NSView()
 
     var iconSymbol: String = "terminal" {
@@ -244,9 +280,11 @@ final class PaneHeaderView: NSView {
         configure(
             splitRightButton, symbol: "rectangle.split.2x1",
             label: "Split pane right", action: #selector(splitRightPressed))
+        splitRightButton.onRightClick = { [weak self] in self?.onChooseSplitRight?() }
         configure(
             splitDownButton, symbol: "rectangle.split.1x2",
             label: "Split pane down", action: #selector(splitDownPressed))
+        splitDownButton.onRightClick = { [weak self] in self?.onChooseSplitDown?() }
 
         bottomHairline.wantsLayer = true
         bottomHairline.layer?.backgroundColor = NSColor.clear.cgColor
@@ -284,9 +322,9 @@ final class PaneHeaderView: NSView {
         splitRightButton.frame = NSRect(
             x: splitDownButton.frame.minX - buttonSize, y: 2,
             width: buttonSize, height: buttonSize)
-        iconView.frame = NSRect(x: 10, y: 4, width: 18, height: 18)
+        iconView.frame = NSRect(x: 10, y: 3, width: 18, height: 18)
         titleLabel.frame = NSRect(
-            x: 34, y: 2,
+            x: 34, y: 0,
             width: max(splitRightButton.frame.minX - 41, 0), height: 22)
         bottomHairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
     }
@@ -328,8 +366,22 @@ final class PaneHeaderView: NSView {
         if dragging { onDragEnded?(start, true) }
     }
 
-    @objc private func splitRightPressed() { onSplitRight?() }
-    @objc private func splitDownPressed() { onSplitDown?() }
+    @objc private func splitRightPressed() {
+        if NSApp.currentEvent?.modifierFlags.contains(.option) == true {
+            onChooseSplitRight?()
+        } else {
+            onSplitRight?()
+        }
+    }
+
+    @objc private func splitDownPressed() {
+        if NSApp.currentEvent?.modifierFlags.contains(.option) == true {
+            onChooseSplitDown?()
+        } else {
+            onSplitDown?()
+        }
+    }
+
 }
 
 final class PaneDropPreviewView: NSView {
@@ -370,10 +422,10 @@ final class PaneOutlineView: NSView {
         let oldBackground = layer?.presentation()?.backgroundColor ?? layer?.backgroundColor
         let oldBorder = layer?.presentation()?.borderColor ?? layer?.borderColor
         let background = (isSelected
-            ? CodePalette.selectionAccent.withAlphaComponent(0.055)
+            ? CodePalette.paneFocusAccent.withAlphaComponent(0.13)
             : NSColor.clear).cgColor
         let border = (isSelected
-            ? CodePalette.selectionAccent.withAlphaComponent(0.50)
+            ? CodePalette.paneFocusAccent.withAlphaComponent(0.88)
             : NSColor.white.withAlphaComponent(0.12)).cgColor
         layer?.backgroundColor = background
         layer?.borderColor = border
@@ -429,36 +481,4 @@ final class PaneDragBadgeView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
-/// Lightweight visual used while a maximized pane restores. It mirrors the
-/// pane's native header and outline without snapshotting CAMetalLayer content,
-/// which AppKit bitmap caching cannot capture reliably.
-final class PaneZoomTransitionView: NSView {
-    private let outline = PaneOutlineView()
-    private let header = PaneHeaderView()
-
-    init(title: String, iconSymbol: String) {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
-        outline.isSelected = true
-        header.title = title
-        header.iconSymbol = iconSymbol
-        addSubview(outline)
-        addSubview(header, positioned: .above, relativeTo: outline)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func layout() {
-        super.layout()
-        let inset = PaneMetrics.inset
-        outline.frame = bounds.insetBy(dx: inset, dy: inset)
-        header.frame = NSRect(
-            x: inset, y: max(bounds.height - PaneHeaderView.height - inset, inset),
-            width: max(bounds.width - inset * 2, 0),
-            height: min(PaneHeaderView.height, bounds.height))
-    }
 }
