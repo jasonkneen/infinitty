@@ -1,40 +1,46 @@
 # Design QA
 
 - Source visual truth: `/Users/jkneen/Downloads/Bgxy1qTetW9w5fkd.mp4` and `/var/folders/2p/sxcyllnn2ds9dlyqt78jd8nm0000gn/T/TemporaryItems/NSIRD_screencaptureui_mvjlxo/Screenshot 2026-07-21 at 11.55.29.png`
-- Implementation screenshot: `/var/folders/2p/sxcyllnn2ds9dlyqt78jd8nm0000gn/T/TemporaryItems/NSIRD_screencaptureui_1xpFiA/Screenshot 2026-07-21 at 12.07.18.png`
-- Focus comparison: `/tmp/titerm-design-qa-focus.png`
-- Viewport: 2048 x 821 for the matched full-window comparison
+- Implementation crops: `/var/folders/2p/sxcyllnn2ds9dlyqt78jd8nm0000gn/T/TemporaryItems/NSIRD_screencaptureui_TsfP8i/Screenshot 2026-07-21 at 12.51.12.png` and `/var/folders/2p/sxcyllnn2ds9dlyqt78jd8nm0000gn/T/TemporaryItems/NSIRD_screencaptureui_Ly5Mw1/Screenshot 2026-07-21 at 12.51.29.png`
+- Reference screenshot: `/var/folders/2p/sxcyllnn2ds9dlyqt78jd8nm0000gn/T/TemporaryItems/NSIRD_screencaptureui_0t4Vcd/Screenshot 2026-07-21 at 12.50.07.png`
+- Focus comparison: `/tmp/titerm-design-qa-current-vs-reference.png`
+- Viewport: both screenshots normalized to 1024 pixels wide for the matched top-window comparison
 - State: dark macOS window, horizontal tabs, terminal pane selected; reference and implementation were visible together
 
 ## Full-view comparison evidence
 
-The matched screenshot showed the reference behind the implementation at the same display scale. The implementation had a shorter tab runway, higher traffic lights, an extra trailing titlebar control, nearly flush terminal text, and a flatter opaque pane surface. Those differences were corrected after the capture: the tab runway is responsive up to 190 points, traffic lights moved down, the separator and trailing accessories were removed, terminal content now has a 15-point minimum inset, and blur/tint is shared by every pane in the mixed tree.
+The normalized side-by-side showed the implementation pane header pushed too far down, its title and controls oversized, a gray/flat pane surface, a tab that was too wide and too far right, no tab-search affordance, and insufficient horizontal canvas gutter. The latest code removes the false horizontal-tab obstruction, tightens and optically aligns the header, restores search as a functional command palette, uses a stable terminal fallback icon, shifts the tabs behind a safe traffic-light runway, adds a six-point horizontal canvas inset, and uses one blur plus one tint overlay across the entire window.
 
 ## Focused-region comparison evidence
 
-The focused comparison places the reference pane header and the pre-fix implementation header in one image. It confirms the target's inset icon/title row, generous terminal text padding, rounded card edge, subdued idle border, and blue active state. The implementation constants now use a 5-point card inset, 10-point radius, 15-point minimum terminal inset, 16-point leading icon, 18-point split symbols, and blue only for the selected/drop states.
+The focused comparison places the 12:37 implementation on the left and reference on the right. It confirms that terminal text padding was already correct, while the header vertical offset, control scale, tab geometry, outer gutter, and blue tint still differed. The later 12:51 Files/Chat crops exposed the utility outline being covered below the header and an opaque near-black content surface. The post-comparison code keeps the outline above content, makes standalone utility content transparent, uses configured 0.79 opacity over the shared blur, and avoids a second titlebar obstruction inside utility panes.
 
 ## Findings
 
 - [P1] Latest visual state has not been captured.
-  - Location: complete window after the final titlebar, blur, focus, and padding changes.
-  - Evidence: the available implementation screenshots predate the final fixes listed above.
+  - Location: complete window after the outline, single-surface, tab-capsule, and command-palette pass.
+  - Evidence: the available 12:51 Files/Chat crops show the pre-fix border and background problems; no screenshot exists after the latest code changes.
   - Impact: code/build evidence cannot prove the final pixel-level match.
   - Fix: relaunch the newest debug or release binary and capture one terminal-only window plus one mixed Terminal/Files/Chat layout.
 
 ## Required fidelity surfaces
 
-- Fonts and typography: pane titles now use 14-point semibold monospaced text; terminal font remains user-configurable. Final visual confirmation is pending.
+- Fonts and typography: pane titles now use 13-point semibold monospaced text; terminal font remains user-configurable. Final visual confirmation is pending.
 - Spacing and layout rhythm: measured constants are implemented for card inset, radius, titlebar runway, larger controls, and terminal content padding. Final capture is pending.
-- Colors and visual tokens: panel tint uses the configured theme over the shared blur canvas; idle borders are neutral and focused/drop states are blue. Final capture is pending.
+- Colors and visual tokens: all panes apply the configured opacity over the same edge-to-edge blur and tint canvas; idle borders are neutral and focused/drop states alone add blue. Final capture is pending.
+- Motion: the active main-tab capsule slides with a 0.20-second ease-out, pane focus cross-fades over 0.18 seconds, and pane maximize/restore animates over 0.24/0.22 seconds.
 - Image quality and asset fidelity: the UI uses native SF Symbols and live process icons; no replacement raster assets are required.
 - Copy and content: split choices are exactly Terminal, Files, and Chat; Files contains Files/Changes.
 
 ## Comparison history
 
 1. Initial comparison found missing single-tab chrome, undersized icons, flat pane treatment, flush terminal text, and extra titlebar controls.
-2. Implemented always-visible tabs, larger pane/tab symbols, rounded inset cards, shared blur/tint, selected/drop blue states, a 15-point terminal inset, right-shifted tabs, lowered traffic lights, and plus-only trailing chrome.
-3. Post-fix build and focused behavior tests pass, but the managed environment cannot capture the final native window. A new external screenshot is required for post-fix visual evidence.
+2. Implemented always-visible tabs, rounded inset cards, shared blur/tint, selected/drop blue states, terminal padding, reference titlebar placement, and plus-only trailing chrome.
+3. The 12:37 comparison exposed remaining header, tab, gutter, search, and color drift. Applied a second measured pass for each item.
+4. The 12:51 crops exposed clipped Files/Chat outlines and mismatched opaque content. The outline is now above content, utility content is clear, and standalone top inset is fixed at six points.
+5. The active tab is now a lighter, fully rounded sliding capsule and the search icon opens a filterable command palette with tab switching and New Tab.
+6. Subsequent matched crops required a larger search icon, lower traffic lights, dimmer/aligned pane controls, a stable terminal fallback icon, and one uninterrupted edge-to-edge backing. Each is implemented in the latest code.
+7. The isolated debug build and twelve focused behavior tests pass; a new external screenshot is required for post-fix visual evidence.
 
 ## Implementation checklist
 

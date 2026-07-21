@@ -7,6 +7,8 @@ final class CodeViewTests: XCTestCase {
         let controller = CodeViewController(config: AppConfig(), panelKind: .files)
         controller.loadViewIfNeeded()
         XCTAssertEqual(controller.pageControlLabelsForTesting, ["FILES", "CHANGES"])
+        XCTAssertEqual(controller.backgroundAlphaForTesting, 0, accuracy: 0.01)
+        XCTAssertEqual(controller.panelTopInsetForTesting, 6, accuracy: 0.5)
         XCTAssertTrue(controller.selectPage(named: "changes"))
         XCTAssertFalse(controller.selectPage(named: "chat"))
     }

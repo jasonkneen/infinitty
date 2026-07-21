@@ -639,13 +639,15 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         split.setHoldingPriority(.defaultLow + 1, forSubviewAt: 0)
         split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
 
-        // Solid backdrop matching the terminal theme — the window itself can
-        // be translucent, so without this the terminal behind bleeds through.
+        // Standalone Files/Chat panes get their single themed surface from
+        // UtilityPaneView. The legacy sidebar still owns its solid backdrop.
         let themeBG = Theme.dark.applying(config).background
         container.wantsLayer = true
-        container.layer?.backgroundColor = CGColor(
-            red: CGFloat(themeBG.x), green: CGFloat(themeBG.y),
-            blue: CGFloat(themeBG.z), alpha: 1)
+        container.layer?.backgroundColor = panelKind == nil
+            ? CGColor(
+                red: CGFloat(themeBG.x), green: CGFloat(themeBG.y),
+                blue: CGFloat(themeBG.z), alpha: 1)
+            : NSColor.clear.cgColor
 
         // Branch footer: current branch, click to switch. Hidden outside repos.
         let footerHairline = Self.hairline()
@@ -775,6 +777,10 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        if panelKind != nil {
+            if pageControlTop?.constant != 6 { pageControlTop?.constant = 6 }
+            return
+        }
         guard let window = view.window else { return }
         let layoutRect = view.convert(window.contentLayoutRect, from: nil)
         let obscured = max(view.bounds.height - layoutRect.maxY, 0)
@@ -1661,6 +1667,10 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     // MARK: - test seams
 
     var topLevelRowCountForTesting: Int { outlineView.numberOfRows }
+    var backgroundAlphaForTesting: CGFloat {
+        view.layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.alphaComponent ?? 0
+    }
+    var panelTopInsetForTesting: CGFloat { pageControlTop?.constant ?? -1 }
     var previewTextForTesting: String { textView.string }
     var pageControlLabelsForTesting: [String] { pageControl.labelsForTesting }
     var pageControlFontSizeForTesting: CGFloat { pageControl.fontSizeForTesting }

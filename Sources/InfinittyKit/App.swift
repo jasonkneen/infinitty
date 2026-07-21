@@ -119,6 +119,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// window's terminal column lives here; the code-view sidebar is a split
     /// beside it, so the strip never crosses the sidebar.
     private var terminalChromes: [ObjectIdentifier: TerminalChromeView] = [:]
+    private var lastSelectedTabIndex: [ObjectIdentifier: Int] = [:]
     private var paneDragState: PaneDragState?
     private var paneZoomStates: [ObjectIdentifier: PaneZoomState] = [:]
     private var pendingSplitContext: (sourceView: NSView, vertical: Bool)?
@@ -331,8 +332,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     // MARK: - session plumbing
 
-    private func createSession(scale: CGFloat) -> TerminalSession {
+    private func createSession(
+        scale: CGFloat,
+        usesSharedWindowSurface: Bool = false
+    ) -> TerminalSession {
         let s = TerminalSession(config: config, scale: scale)
+        if usesSharedWindowSurface {
+            s.renderer.setUsesSharedWindowSurface(true)
+        }
         s.view.paneTitle = s.title
         s.control.reloadHandler = { [weak self] in
             DispatchQueue.main.async { self?.reloadConfig() }
@@ -553,6 +560,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// be skipped on the frequent tab/pane churn that happens with no
     /// modifiers held.
     private var shortcutHintsApplied = false
+    private var nativeTrafficLightBaselines: [ObjectIdentifier: NSPoint] = [:]
+
+    private func positionNativeTrafficLights(in window: NSWindow) {
+        guard config.trafficLights == "circle" else { return }
+        for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(type) else { continue }
+            let id = ObjectIdentifier(button)
+            let offset = NSPoint(x: -5, y: -8)
+            let current = button.frame.origin
+            let stored = nativeTrafficLightBaselines[id]
+            let expected = stored.map {
+                NSPoint(x: $0.x + offset.x, y: $0.y + offset.y)
+            }
+            let wasRelaidOut = expected.map {
+                abs(current.x - $0.x) > 1 || abs(current.y - $0.y) > 1
+            } ?? false
+            let baseline = stored == nil || wasRelaidOut ? current : stored!
+            nativeTrafficLightBaselines[id] = baseline
+            var frame = button.frame
+            frame.origin = NSPoint(x: baseline.x + offset.x, y: baseline.y + offset.y)
+            button.frame = frame
+        }
+    }
 
     private func refreshShortcutHints() {
         let showingAny = showTabShortcutHints || showPaneShortcutHints
@@ -581,6 +611,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     public func windowDidBecomeKey(_ notification: Notification) {
         if let win = notification.object as? NSWindow,
            win.tabbingIdentifier == "infinitty" {
+            positionNativeTrafficLights(in: win)
             refreshTabStrips(in: win)
         }
         guard showPaneShortcutHints else { return }
@@ -948,7 +979,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         role: TerminalWindowRole = .standard
     ) -> (NSWindow, TerminalSession) {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let session = createSession(scale: scale)
+        let session = createSession(
+            scale: scale,
+            usesSharedWindowSurface: role == .standard)
         session.workingDirectory = cwd
 
         let cell = session.renderer.cellSizePoints
@@ -1022,7 +1055,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let bg = session.renderer.backgroundColor
             chrome.setBacking(
                 color: NSColor(srgbRed: CGFloat(bg.x), green: CGFloat(bg.y),
-                               blue: CGFloat(bg.z), alpha: 1),
+                               blue: CGFloat(bg.z), alpha: CGFloat(bg.w)),
                 blur: config.backgroundBlur)
             terminalChromes[ObjectIdentifier(window)] = chrome
             wireStrip(chrome, for: window)
@@ -1195,7 +1228,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               let win = context.sourceView.window else { return }
         switch PaneType(rawValue: sender.tag) {
         case .terminal:
-            let session = createSession(scale: win.backingScaleFactor)
+            let session = createSession(
+                scale: win.backingScaleFactor,
+                usesSharedWindowSurface: terminalChromes[ObjectIdentifier(win)] != nil)
             session.workingDirectory = focusedSession(in: win)?.currentDirectory()
                 ?? activeSessions(in: win).first?.currentDirectory()
             guard insertPaneView(
@@ -1270,6 +1305,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let panes = paneLeafViews(in: win)
         guard panes.count > 1, pane !== root,
               let parent = pane.superview else { return }
+        root.layoutSubtreeIfNeeded()
+        let paneFrameInWindow = pane.convert(pane.bounds, to: nil)
+        let startFrame = root.convert(paneFrameInWindow, from: nil)
 
         let placeholder = NSView(frame: pane.frame)
         placeholder.autoresizingMask = pane.autoresizingMask
@@ -1278,18 +1316,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let dividerPositions = PaneLayoutController.captureDividerPositions(in: root)
         guard replaceNode(pane, with: placeholder, in: parent) else { return }
 
-        let overlay = NSView(frame: root.bounds)
-        overlay.autoresizingMask = [.width, .height]
+        let overlay = NSView(frame: startFrame)
+        overlay.autoresizingMask = []
         overlay.wantsLayer = true
-        if let session = sessions.first(where: { $0.view === pane }) {
-            let bg = session.renderer.backgroundColor
-            overlay.layer?.backgroundColor = NSColor(
-                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
-                alpha: CGFloat(bg.w)).cgColor
-        } else {
-            overlay.layer?.backgroundColor = pane.layer?.backgroundColor
-                ?? win.backgroundColor.cgColor
-        }
+        overlay.layer?.backgroundColor = NSColor.clear.cgColor
         root.addSubview(overlay, positioned: .above, relativeTo: nil)
         pane.frame = overlay.bounds
         pane.autoresizingMask = [.width, .height]
@@ -1301,6 +1331,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             pane: pane, placeholder: placeholder, overlay: overlay,
             hiddenViews: hidden, dividerPositions: dividerPositions)
         win.makeFirstResponder(pane)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.24
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            overlay.animator().frame = root.bounds
+        } completionHandler: { [weak self] in
+            guard self?.paneZoomStates[key]?.pane === pane else { return }
+            overlay.frame = root.bounds
+            overlay.autoresizingMask = [.width, .height]
+        }
     }
 
     private func restorePaneZoom(containing session: TerminalSession, refocus: Bool) {
@@ -1322,20 +1361,68 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func restorePaneZoom(key: ObjectIdentifier, refocus: Bool) {
         guard let state = paneZoomStates.removeValue(forKey: key) else { return }
+        let transitionTitle: String
+        let transitionIcon: String
+        if let terminal = state.pane as? TerminalView {
+            transitionTitle = terminal.paneTitle
+            transitionIcon = "terminal"
+        } else if let utility = state.pane as? UtilityPaneView {
+            transitionTitle = utility.kind.title
+            transitionIcon = utility.kind.symbol
+        } else {
+            transitionTitle = "Pane"
+            transitionIcon = "rectangle"
+        }
+        state.hiddenViews.forEach { $0.isHidden = false }
+        let root = state.overlay.superview
+        let targetFrame = state.placeholder.superview.flatMap { parent in
+            root.map { state.placeholder.convert(state.placeholder.bounds, to: $0) }
+        } ?? state.overlay.frame
+
+        // Restore topology synchronously. Close/split/session-exit callers
+        // continue immediately after this function and must see the real pane
+        // back in its split, never a pane still owned by an animation overlay.
         state.pane.removeFromSuperview()
         if let parent = state.placeholder.superview {
             _ = replaceNode(state.placeholder, with: state.pane, in: parent)
-        } else if let root = state.overlay.superview {
+        } else if let root {
             state.pane.frame = root.bounds
             state.pane.autoresizingMask = [.width, .height]
             root.addSubview(state.pane)
         }
-        state.hiddenViews.forEach { $0.isHidden = false }
-        state.overlay.removeFromSuperview()
         state.pane.window?.layoutIfNeeded()
         PaneLayoutController.restoreDividerPositions(state.dividerPositions)
-        if refocus, let win = state.pane.window {
-            win.makeFirstResponder(state.pane)
+        if refocus, let win = state.pane.window { win.makeFirstResponder(state.pane) }
+
+        // Keep only the old full-size overlay as a visual proxy and shrink it
+        // toward the restored pane. Its completion cannot mutate pane topology.
+        state.overlay.autoresizingMask = []
+        let theme = Theme.dark.applying(config).background
+        state.overlay.layer?.backgroundColor = NSColor(
+            srgbRed: CGFloat(theme.x), green: CGFloat(theme.y), blue: CGFloat(theme.z),
+            alpha: CGFloat(theme.w)).cgColor
+        let transition = PaneZoomTransitionView(
+            title: transitionTitle, iconSymbol: transitionIcon)
+        transition.frame = state.overlay.bounds
+        transition.autoresizingMask = [.width, .height]
+        state.overlay.addSubview(transition)
+        state.overlay.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        state.overlay.layer?.borderWidth = 1
+        state.overlay.layer?.masksToBounds = true
+        let cornerAnimation = CABasicAnimation(keyPath: "cornerRadius")
+        cornerAnimation.fromValue = 0
+        cornerAnimation.toValue = PaneMetrics.cornerRadius
+        cornerAnimation.duration = 0.22
+        cornerAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        state.overlay.layer?.cornerRadius = PaneMetrics.cornerRadius
+        state.overlay.layer?.add(cornerAnimation, forKey: "pane-zoom-corners")
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            state.overlay.animator().frame = targetFrame
+            state.overlay.animator().alphaValue = 0
+        } completionHandler: {
+            state.overlay.removeFromSuperview()
         }
     }
 
@@ -1449,7 +1536,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func split(session: TerminalSession, vertical: Bool, newFirst: Bool) {
         restorePaneZoom(containing: session, refocus: false)
         guard let win = session.view.window else { return }
-        let newSession = createSession(scale: win.backingScaleFactor)
+        let newSession = createSession(
+            scale: win.backingScaleFactor,
+            usesSharedWindowSurface: terminalChromes[ObjectIdentifier(win)] != nil)
         // Splits land in the source pane's live folder, same as new tabs.
         newSession.workingDirectory = session.currentDirectory()
 
@@ -1557,6 +1646,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let tabs = win.tabbedWindows ?? [win]
         let titles = tabs.map { self.tabTitle(for: $0) }
         let presentation = tabPresentation(for: tabs)
+        let selectedWindow = win.tabGroup?.selectedWindow ?? win
+        let selectedIndex = tabs.firstIndex(where: { $0 === selectedWindow }) ?? 0
+        let groupID = win.tabGroup.map(ObjectIdentifier.init)
+        let previousIndex = groupID.flatMap { lastSelectedTabIndex[$0] }
+        if let groupID { lastSelectedTabIndex[groupID] = selectedIndex }
         for (index, tabWin) in tabs.enumerated() {
             tabWin.hideNativeTabBar()
             guard let chrome = terminalChromes[ObjectIdentifier(tabWin)] else { continue }
@@ -1564,7 +1658,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             chrome.showsStrip = true
             chrome.strip.update(
                 titles: titles, selectedIndex: index,
-                pins: presentation.pins, icons: presentation.icons)
+                pins: presentation.pins, icons: presentation.icons,
+                animateFromIndex: tabWin === selectedWindow ? previousIndex : nil)
         }
     }
 
@@ -1768,7 +1863,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             kind: kind,
             contentView: controller.view,
             background: NSColor(
-                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1),
+                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
+                alpha: CGFloat(bg.w)),
             blurred: config.backgroundBlur)
         let record = UtilityPanelRecord(controller: controller, pane: pane)
         utilityPanels[id, default: [:]][kind] = record
@@ -2220,11 +2316,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 win.contentResizeIncrements = s.renderer.cellSizePoints
                 let bg = s.renderer.backgroundColor
                 let color = NSColor(
-                    srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1)
+                    srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
+                    alpha: CGFloat(bg.w))
                 terminalChromes[ObjectIdentifier(win)]?.setBacking(
                     color: color, blur: config.backgroundBlur)
                 utilityPanels[ObjectIdentifier(win)]?.values.forEach {
-                    $0.pane.updateSurface(background: color, blurred: config.backgroundBlur)
+                    $0.pane.updateSurface(
+                        background: color.withAlphaComponent(config.backgroundOpacity),
+                        blurred: config.backgroundBlur)
                 }
             }
         }
@@ -2290,6 +2389,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
         utilityPanels.removeValue(forKey: ObjectIdentifier(win))
         sidebarToggleAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
+        for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            if let button = win.standardWindowButton(type) {
+                nativeTrafficLightBaselines.removeValue(forKey: ObjectIdentifier(button))
+            }
+        }
         terminalChromes.removeValue(forKey: ObjectIdentifier(win))
         win.subtitle = ""
         let closing = sessions.filter { $0.view.window === win }

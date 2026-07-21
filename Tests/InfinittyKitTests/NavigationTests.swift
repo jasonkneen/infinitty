@@ -368,6 +368,43 @@ final class NavigationTests: XCTestCase {
         XCTAssertLessThanOrEqual(frames[1].maxX, frames[2].minX + 0.5)
         // The + button sits to the right of the last tab.
         XCTAssertGreaterThan(strip.addButtonFrameForTesting.minX, frames[2].minX)
+        XCTAssertLessThan(strip.searchButtonFrameForTesting.maxX, frames[0].minX)
+        XCTAssertGreaterThanOrEqual(strip.searchButtonFrameForTesting.minX, 86)
+        XCTAssertEqual(
+            strip.tabButtonCornerRadiiForTesting[1], frames[1].height / 2,
+            accuracy: 0.5)
+        XCTAssertEqual(strip.selectionPillFrameForTesting, frames[1])
+        XCTAssertGreaterThanOrEqual(strip.selectionPillAlphaForTesting, 0.16)
+
+        strip.update(titles: ["one", "two", "three"], selectedIndex: 2)
+        strip.layoutSubtreeIfNeeded()
+        XCTAssertEqual(strip.selectionPillFrameForTesting, strip.tabButtonFramesForTesting[2])
+    }
+
+    func testTabCommandPaletteFiltersAndSelectsOriginalTabIndex() {
+        let palette = TabCommandPaletteViewController(
+            titles: ["fish", "top", "build logs"], selectedIndex: 0)
+        _ = palette.view
+        palette.setQueryForTesting("build")
+        XCTAssertEqual(palette.filteredTitlesForTesting, ["build logs"])
+
+        var selected: Int?
+        palette.onSelect = { selected = $0 }
+        palette.performFirstResultForTesting()
+        XCTAssertEqual(selected, 2)
+    }
+
+    func testTabCommandPaletteOffersNewTabCommand() {
+        let palette = TabCommandPaletteViewController(
+            titles: ["fish"], selectedIndex: 0)
+        _ = palette.view
+        palette.setQueryForTesting("new")
+        XCTAssertEqual(palette.filteredTitlesForTesting, ["New terminal tab"])
+
+        var created = false
+        palette.onNewTab = { created = true }
+        palette.performFirstResultForTesting()
+        XCTAssertTrue(created)
     }
 
     /// The chrome hides the strip for a single tab (matching macOS) and shows
@@ -383,6 +420,15 @@ final class NavigationTests: XCTestCase {
         XCTAssertFalse(chrome.strip.isHidden)
         XCTAssertEqual(chrome.strip.frame.height, TerminalTabStripView.height, accuracy: 0.5)
         XCTAssertEqual(chrome.body.frame.height, 400 - TerminalTabStripView.height, accuracy: 0.5)
+    }
+
+    func testChromeUsesOneTintStrengthAcrossTitlebarAndBody() {
+        let chrome = TerminalChromeView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        chrome.setBacking(color: NSColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 0.79), blur: true)
+        XCTAssertEqual(chrome.strip.backgroundAlphaForTesting, 0, accuracy: 0.01)
+        XCTAssertEqual(chrome.bodyBackgroundAlphaForTesting, 0, accuracy: 0.01)
+        XCTAssertEqual(chrome.backingBackgroundAlphaForTesting, 0.79, accuracy: 0.01)
+        XCTAssertEqual(chrome.blurSurfaceCountForTesting, 1)
     }
 
     /// Pinned tabs render as compact fixed-width chips; unpinned tabs take the
@@ -421,6 +467,7 @@ final class NavigationTests: XCTestCase {
         // Body sits to the right of the strip.
         XCTAssertEqual(chrome.body.frame.minX, TerminalChromeView.sideWidth, accuracy: 0.5)
         XCTAssertEqual(chrome.body.frame.width, 800 - TerminalChromeView.sideWidth, accuracy: 0.5)
+        XCTAssertFalse(chrome.strip.searchButtonFrameForTesting.isEmpty)
     }
 
     func testPaneDropZoneUsesDirectionalEdgesAndCenterSwap() {
@@ -443,6 +490,7 @@ final class NavigationTests: XCTestCase {
 
     func testReferencePaneMetricsKeepTerminalTextInsideCard() {
         XCTAssertEqual(PaneMetrics.inset, 5)
+        XCTAssertEqual(PaneMetrics.horizontalCanvasInset, 6)
         XCTAssertEqual(PaneMetrics.cornerRadius, 10)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 0), 15)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 24), 24)
@@ -450,6 +498,7 @@ final class NavigationTests: XCTestCase {
 
     func testFocusedPaneOutlineUsesBlueStateOnlyWhenSelected() throws {
         let outline = PaneOutlineView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        XCTAssertEqual(outline.backgroundAlphaForTesting, 0, accuracy: 0.01)
         let idle = try XCTUnwrap(outline.layer?.borderColor)
         let idleColor = try XCTUnwrap(NSColor(cgColor: idle))
         XCTAssertEqual(idleColor.alphaComponent, 0.12, accuracy: 0.01)
@@ -458,9 +507,10 @@ final class NavigationTests: XCTestCase {
         outline.isSelected = true
         let focused = try XCTUnwrap(outline.layer?.borderColor)
         let focusedColor = try XCTUnwrap(NSColor(cgColor: focused)?.usingColorSpace(.sRGB))
-        XCTAssertEqual(focusedColor.alphaComponent, 0.62, accuracy: 0.01)
+        XCTAssertEqual(focusedColor.alphaComponent, 0.50, accuracy: 0.01)
         XCTAssertGreaterThan(focusedColor.blueComponent, focusedColor.redComponent)
         XCTAssertEqual(outline.layer?.borderWidth, 1.5)
+        XCTAssertGreaterThan(outline.backgroundAlphaForTesting, 0)
     }
 
     func testPaneHeaderExposesSplitZoomAndDragAccessibility() {
@@ -490,6 +540,14 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(content.frame.minX, 5, accuracy: 0.5)
         XCTAssertGreaterThan(content.frame.height, 400)
         XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
+        XCTAssertTrue(pane.outlineIsAboveContentForTesting)
+    }
+
+    func testUtilityPaneStaysTransparentOverSharedWindowSurface() {
+        let background = NSColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 0.79)
+        let pane = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: background, blurred: true)
+        XCTAssertEqual(pane.surfaceAlphaForTesting, 0, accuracy: 0.01)
     }
 
     func testTerminalViewReservesTopPaneHeader() {

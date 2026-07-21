@@ -90,6 +90,7 @@ final class Renderer: NSObject {
     private let resizeRenderPending = OSAllocatedUnfairLock(initialState: false)
 
     private(set) var config: AppConfig
+    private(set) var usesSharedWindowSurface = false
     // Pane chrome owns the first few points around the card. Keep terminal
     // glyphs clear of that border even when a user's legacy config sets
     // margin to zero.
@@ -160,6 +161,14 @@ final class Renderer: NSObject {
     var cellSizePoints: CGSize { atlas.cellSizePoints }
     var backgroundColor: SIMD4<Float> { theme.background }
 
+    func setUsesSharedWindowSurface(_ enabled: Bool) {
+        renderLock.lock()
+        usesSharedWindowSurface = enabled
+        if let layer { prepare(layer: layer) }
+        renderLock.unlock()
+        poke()
+    }
+
     /// Give a pane an immediate backing color before its first Metal drawable
     /// is available. This prevents a transparent frame when a new pane is
     /// inserted into a borderless/translucent window such as the quick terminal.
@@ -168,7 +177,8 @@ final class Renderer: NSObject {
     /// there would double the effective background opacity for the lifetime
     /// of the pane.
     func prepare(layer: CAMetalLayer) {
-        let opaque = config.backgroundOpacity >= 1 && !config.backgroundBlur
+        let opaque = !usesSharedWindowSurface
+            && config.backgroundOpacity >= 1 && !config.backgroundBlur
         layer.isOpaque = opaque
         let bg = theme.background
         layer.backgroundColor = opaque
@@ -354,6 +364,7 @@ final class Renderer: NSObject {
         let petTexture = self.petTexture
         let petSizePoints = self.petSizePoints
         let petFrame = self.petFrame
+        let usesSharedWindowSurface = self.usesSharedWindowSurface
         let drewPet = petDirty
         petDirty = false
         renderLock.unlock()
@@ -398,7 +409,7 @@ final class Renderer: NSObject {
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         let bg = theme.background
-        let alpha = Double(bg.w)
+        let alpha = usesSharedWindowSurface ? 0 : Double(bg.w)
         // Premultiplied clear for translucent windows.
         pass.colorAttachments[0].clearColor = MTLClearColor(
             red: Double(bg.x) * alpha, green: Double(bg.y) * alpha,

@@ -121,7 +121,9 @@ final class TerminalView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
     override var isOpaque: Bool {
-        (renderer?.config.backgroundOpacity ?? 1) >= 1 && !(renderer?.config.backgroundBlur ?? false)
+        !(renderer?.usesSharedWindowSurface ?? false)
+            && (renderer?.config.backgroundOpacity ?? 1) >= 1
+            && !(renderer?.config.backgroundBlur ?? false)
     }
 
     // Clicks in the grid select text; they must never drag the window.

@@ -2,6 +2,7 @@ import AppKit
 
 enum PaneMetrics {
     static let inset: CGFloat = 5
+    static let horizontalCanvasInset: CGFloat = 6
     static let cornerRadius: CGFloat = 10
     static let minimumTerminalContentInset: CGFloat = 15
 
@@ -15,6 +16,11 @@ extension NSView {
     /// below horizontal tabs; nonzero when side tabs extend panes to the top.
     func paneTopObstructionPoints() -> CGFloat {
         guard let window, window.styleMask.contains(.fullSizeContentView) else { return 0 }
+        var ancestor = superview
+        while let view = ancestor {
+            if let chrome = view as? TerminalChromeView, !chrome.sideTabs { return 0 }
+            ancestor = view.superview
+        }
         let layoutRect = convert(window.contentLayoutRect, from: nil)
         return max(bounds.height - layoutRect.maxY, 0)
     }
@@ -220,15 +226,15 @@ final class PaneHeaderView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.10).cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
 
         updateIcon()
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
-        iconView.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.9)
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        iconView.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.72)
         iconView.imageScaling = .scaleProportionallyDown
         addSubview(iconView)
 
-        titleLabel.font = .monospacedSystemFont(ofSize: 14, weight: .semibold)
+        titleLabel.font = .monospacedSystemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.92)
         titleLabel.lineBreakMode = .byTruncatingTail
         addSubview(titleLabel)
@@ -241,7 +247,7 @@ final class PaneHeaderView: NSView {
             label: "Split pane down", action: #selector(splitDownPressed))
 
         bottomHairline.wantsLayer = true
-        bottomHairline.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.055).cgColor
+        bottomHairline.layer?.backgroundColor = NSColor.clear.cgColor
         addSubview(bottomHairline)
 
         setAccessibilityRole(.group)
@@ -257,10 +263,10 @@ final class PaneHeaderView: NSView {
 
     private func configure(_ button: NSButton, symbol: String, label: String, action: Selector) {
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
         button.imagePosition = .imageOnly
         button.isBordered = false
-        button.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.8)
+        button.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.62)
         button.target = self
         button.action = action
         button.toolTip = label
@@ -274,12 +280,12 @@ final class PaneHeaderView: NSView {
         splitDownButton.frame = NSRect(
             x: bounds.maxX - buttonSize - 8, y: 2, width: buttonSize, height: buttonSize)
         splitRightButton.frame = NSRect(
-            x: splitDownButton.frame.minX - buttonSize, y: 1,
+            x: splitDownButton.frame.minX - buttonSize, y: 2,
             width: buttonSize, height: buttonSize)
-        iconView.frame = NSRect(x: 14, y: 7, width: 20, height: 20)
+        iconView.frame = NSRect(x: 10, y: 6, width: 18, height: 18)
         titleLabel.frame = NSRect(
-            x: 47, y: 6,
-            width: max(splitRightButton.frame.minX - 54, 0), height: 22)
+            x: 34, y: 4,
+            width: max(splitRightButton.frame.minX - 41, 0), height: 22)
         bottomHairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
     }
 
@@ -341,7 +347,10 @@ final class PaneDropPreviewView: NSView {
 
 final class PaneOutlineView: NSView {
     var isSelected = false {
-        didSet { updateAppearance() }
+        didSet {
+            guard oldValue != isSelected else { return }
+            updateAppearance(animated: window != nil)
+        }
     }
 
     override init(frame frameRect: NSRect) {
@@ -349,18 +358,40 @@ final class PaneOutlineView: NSView {
         wantsLayer = true
         layer?.borderWidth = 1
         layer?.cornerRadius = PaneMetrics.cornerRadius
-        updateAppearance()
+        updateAppearance(animated: false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    private func updateAppearance() {
-        layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.026).cgColor
-        layer?.borderColor = (isSelected
-            ? NSColor.systemBlue.withAlphaComponent(0.62)
+    private func updateAppearance(animated: Bool) {
+        let oldBackground = layer?.presentation()?.backgroundColor ?? layer?.backgroundColor
+        let oldBorder = layer?.presentation()?.borderColor ?? layer?.borderColor
+        let background = (isSelected
+            ? CodePalette.selectionAccent.withAlphaComponent(0.055)
+            : NSColor.clear).cgColor
+        let border = (isSelected
+            ? CodePalette.selectionAccent.withAlphaComponent(0.50)
             : NSColor.white.withAlphaComponent(0.12)).cgColor
+        layer?.backgroundColor = background
+        layer?.borderColor = border
         layer?.borderWidth = isSelected ? 1.5 : 1
+        guard animated else { return }
+        for (keyPath, from, to) in [
+            ("backgroundColor", oldBackground, background),
+            ("borderColor", oldBorder, border),
+        ] {
+            let transition = CABasicAnimation(keyPath: keyPath)
+            transition.fromValue = from
+            transition.toValue = to
+            transition.duration = 0.18
+            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer?.add(transition, forKey: "pane-\(keyPath)")
+        }
+    }
+
+    var backgroundAlphaForTesting: CGFloat {
+        layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.alphaComponent ?? 0
     }
 }
 
@@ -396,4 +427,36 @@ final class PaneDragBadgeView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Lightweight visual used while a maximized pane restores. It mirrors the
+/// pane's native header and outline without snapshotting CAMetalLayer content,
+/// which AppKit bitmap caching cannot capture reliably.
+final class PaneZoomTransitionView: NSView {
+    private let outline = PaneOutlineView()
+    private let header = PaneHeaderView()
+
+    init(title: String, iconSymbol: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        outline.isSelected = true
+        header.title = title
+        header.iconSymbol = iconSymbol
+        addSubview(outline)
+        addSubview(header, positioned: .above, relativeTo: outline)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        let inset = PaneMetrics.inset
+        outline.frame = bounds.insetBy(dx: inset, dy: inset)
+        header.frame = NSRect(
+            x: inset, y: max(bounds.height - PaneHeaderView.height - inset, inset),
+            width: max(bounds.width - inset * 2, 0),
+            height: min(PaneHeaderView.height, bounds.height))
+    }
 }

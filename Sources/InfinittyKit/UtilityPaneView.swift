@@ -82,16 +82,18 @@ final class UtilityPaneView: NSView {
             guard let self else { return }
             self.window?.makeFirstResponder(self)
         }
-        addSubview(paneOutline)
         addSubview(contentView)
-        addSubview(paneHeader, positioned: .above, relativeTo: contentView)
+        // Content may be layer-backed, so the focus border must sit above it
+        // or the visible outline stops at the bottom of the pane header.
+        addSubview(paneOutline, positioned: .above, relativeTo: contentView)
+        addSubview(paneHeader, positioned: .above, relativeTo: paneOutline)
 
         closeButton.image = NSImage(
             systemSymbolName: "xmark", accessibilityDescription: "Close panel")
         closeButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
         closeButton.imagePosition = .imageOnly
         closeButton.isBordered = false
-        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.62)
         closeButton.target = self
         closeButton.action = #selector(closePressed)
         closeButton.toolTip = "Close \(kind.title) panel"
@@ -118,7 +120,20 @@ final class UtilityPaneView: NSView {
     }
 
     func updateSurface(background: NSColor, blurred: Bool) {
-        layer?.backgroundColor = background.withAlphaComponent(blurred ? 0.30 : 1).cgColor
+        // The standard window owns one edge-to-edge themed surface. Utility
+        // content stays clear so pane interiors and gutters cannot
+        // double-composite into visibly different colors.
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    var surfaceAlphaForTesting: CGFloat {
+        layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.alphaComponent ?? 0
+    }
+
+    var outlineIsAboveContentForTesting: Bool {
+        guard let outlineIndex = subviews.firstIndex(of: paneOutline),
+              let contentIndex = subviews.firstIndex(of: contentView) else { return false }
+        return outlineIndex > contentIndex
     }
 
     override func layout() {
