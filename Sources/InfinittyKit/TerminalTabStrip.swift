@@ -539,7 +539,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
                     x: frame.midX - 9, y: frame.midY - 9, width: 18, height: 18)
             } else {
                 tabIconViews[index].frame = NSRect(
-                    x: frame.minX + 14, y: frame.midY - 12, width: 32, height: 24)
+                    x: frame.minX + 8, y: frame.midY - 12, width: 34, height: 24)
             }
             tabTitleLabels[index].alignment = .center
             tabTitleLabels[index].frame = NSRect(

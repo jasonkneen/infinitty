@@ -567,7 +567,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = window.standardWindowButton(type) else { continue }
             let id = ObjectIdentifier(button)
-            let offset = NSPoint(x: -5, y: -8)
+            let offset = NSPoint(x: 0, y: -8)
             let current = button.frame.origin
             let stored = nativeTrafficLightBaselines[id]
             let expected = stored.map {

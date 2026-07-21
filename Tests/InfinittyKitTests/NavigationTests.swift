@@ -521,6 +521,8 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(header.accessibilityLabel(), "Terminal pane: fish")
         XCTAssertEqual(header.splitRightAccessibilityLabelForTesting, "Split pane right")
         XCTAssertEqual(header.splitDownAccessibilityLabelForTesting, "Split pane down")
+        XCTAssertEqual(header.iconFrameForTesting.minY, 4, accuracy: 0.5)
+        XCTAssertEqual(header.titleFrameForTesting.minY, 2, accuracy: 0.5)
     }
 
     func testSplitChooserOffersExactlyTerminalFilesAndChat() {

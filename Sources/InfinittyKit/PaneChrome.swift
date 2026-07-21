@@ -222,6 +222,8 @@ final class PaneHeaderView: NSView {
     var splitDownAccessibilityLabelForTesting: String {
         splitDownButton.accessibilityLabel() ?? ""
     }
+    var iconFrameForTesting: NSRect { iconView.frame }
+    var titleFrameForTesting: NSRect { titleLabel.frame }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -282,9 +284,9 @@ final class PaneHeaderView: NSView {
         splitRightButton.frame = NSRect(
             x: splitDownButton.frame.minX - buttonSize, y: 2,
             width: buttonSize, height: buttonSize)
-        iconView.frame = NSRect(x: 10, y: 6, width: 18, height: 18)
+        iconView.frame = NSRect(x: 10, y: 4, width: 18, height: 18)
         titleLabel.frame = NSRect(
-            x: 34, y: 4,
+            x: 34, y: 2,
             width: max(splitRightButton.frame.minX - 41, 0), height: 22)
         bottomHairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
     }
