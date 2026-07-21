@@ -392,6 +392,8 @@ final class PaneHeaderView: NSView {
     }
     var iconFrameForTesting: NSRect { iconView.frame }
     var titleFrameForTesting: NSRect { titleLabel.frame }
+    var splitRightFrameForTesting: NSRect { splitRightButton.frame }
+    var splitDownFrameForTesting: NSRect { splitDownButton.frame }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -454,9 +456,9 @@ final class PaneHeaderView: NSView {
         splitRightButton.frame = NSRect(
             x: splitDownButton.frame.minX - buttonSize, y: 2,
             width: buttonSize, height: buttonSize)
-        iconView.frame = NSRect(x: 10, y: 3, width: 18, height: 18)
+        iconView.frame = NSRect(x: 10, y: 8, width: 18, height: 18)
         titleLabel.frame = NSRect(
-            x: 34, y: 0,
+            x: 34, y: 5,
             width: max(splitRightButton.frame.minX - 41, 0), height: 22)
         bottomHairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
     }

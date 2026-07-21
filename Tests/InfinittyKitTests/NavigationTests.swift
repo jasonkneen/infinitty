@@ -541,8 +541,20 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(header.accessibilityLabel(), "Terminal pane: fish")
         XCTAssertEqual(header.splitRightAccessibilityLabelForTesting, "Split pane right")
         XCTAssertEqual(header.splitDownAccessibilityLabelForTesting, "Split pane down")
-        XCTAssertEqual(header.iconFrameForTesting.minY, 3, accuracy: 0.5)
-        XCTAssertEqual(header.titleFrameForTesting.minY, 0, accuracy: 0.5)
+        XCTAssertEqual(header.iconFrameForTesting.minY, 8, accuracy: 0.5)
+        XCTAssertEqual(header.titleFrameForTesting.minY, 5, accuracy: 0.5)
+        XCTAssertEqual(
+            header.splitRightFrameForTesting.midY,
+            header.splitDownFrameForTesting.midY,
+            accuracy: 0.5)
+        XCTAssertEqual(
+            header.iconFrameForTesting.midY,
+            header.splitRightFrameForTesting.midY,
+            accuracy: 0.5)
+        XCTAssertEqual(
+            header.titleFrameForTesting.midY,
+            header.splitRightFrameForTesting.midY,
+            accuracy: 1)
     }
 
     func testSplitChooserOffersExactlyTerminalFilesAndChat() {
