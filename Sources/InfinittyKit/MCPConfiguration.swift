@@ -101,6 +101,22 @@ public enum MCPConfiguration {
         "mcp_servers.\(serverName).command=\(tomlQuoted(binaryPath))"
     }
 
+    /// Codex `-c` override values for the ephemeral bridge launch. When an app
+    /// control-socket path is supplied it is injected as the MCP server's
+    /// `INFINITTY_APP_SOCKET` env var, so the spawned `infinitty-mcp` targets
+    /// THIS running instance rather than falling back to the shared
+    /// `/tmp/infinitty-current.sock` symlink (which can be stale/dangling).
+    static func codexConfigOverrides(
+        binaryPath: String, appSocketPath: String? = nil
+    ) -> [String] {
+        var overrides = [codexConfigOverride(binaryPath: binaryPath)]
+        if let appSocketPath {
+            overrides.append(
+                "mcp_servers.\(serverName).env.INFINITTY_APP_SOCKET=\(tomlQuoted(appSocketPath))")
+        }
+        return overrides
+    }
+
     /// Append `[mcp_servers.infinitty]` to Codex's user-level config.toml
     /// unless it's already present. Idempotent.
     @discardableResult
@@ -159,12 +175,14 @@ public enum MCPConfiguration {
         return claudeMCPJSON(binaryPath: binary)
     }
 
-    static func claudeMCPJSON(binaryPath: String) -> Data? {
-        let obj: [String: Any] = [
-            "mcpServers": [
-                serverName: ["command": binaryPath]
-            ]
-        ]
+    static func claudeMCPJSON(binaryPath: String, appSocketPath: String? = nil) -> Data? {
+        var server: [String: Any] = ["command": binaryPath]
+        if let appSocketPath {
+            // Pin the spawned infinitty-mcp to THIS instance's control socket
+            // instead of the shared (possibly stale) current.sock symlink.
+            server["env"] = ["INFINITTY_APP_SOCKET": appSocketPath]
+        }
+        let obj: [String: Any] = ["mcpServers": [serverName: server]]
         return try? JSONSerialization.data(
             withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
     }

@@ -174,9 +174,12 @@ final class CodexAppServer: @unchecked Sendable {
                 ?? MCPConfiguration.mcpExecutablePath().map(URL.init(fileURLWithPath:))
             if let mcpURL {
                 // Inject the app's own terminal-control MCP server for this
-                // bridge without requiring a persistent user config edit.
-                arguments += ["-c", MCPConfiguration.codexConfigOverride(
-                    binaryPath: mcpURL.path)]
+                // bridge without requiring a persistent user config edit, and
+                // pin it to THIS instance's control socket.
+                for override in MCPConfiguration.codexConfigOverrides(
+                    binaryPath: mcpURL.path, appSocketPath: AppControlServer.ownSocketPath) {
+                    arguments += ["-c", override]
+                }
             }
             p.arguments = arguments
             let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
@@ -185,6 +188,9 @@ final class CodexAppServer: @unchecked Sendable {
             p.standardError = stderr
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "")
+            // Belt-and-suspenders alongside the `-c ...env...` override: the
+            // spawned infinitty-mcp inherits this and targets THIS instance.
+            env["INFINITTY_APP_SOCKET"] = AppControlServer.ownSocketPath
             p.environment = env
             p.terminationHandler = { [weak self] proc in
                 self?.queue.async {
@@ -328,10 +334,18 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
+    /// Per-RPC deadline. The initialize / newThread / startTurn handshake RPCs
+    /// used to have NO deadline, so a mute or wedged Codex child would hang the
+    /// continuation forever — and with it the turn gate, bricking the assistant
+    /// until restart. `awaitTurn` gets the long turn timeout; the handshake RPCs
+    /// get this shorter one.
+    private static let rpcTimeoutSeconds: TimeInterval = 30
+
     private func sendRequest(
         method: String,
         params: [String: Any],
-        requiresInitialization: Bool = true
+        requiresInitialization: Bool = true,
+        timeout: TimeInterval = CodexAppServer.rpcTimeoutSeconds
     ) async throws -> [String: Any] {
         if requiresInitialization {
             try await ensureInitialized()
@@ -350,6 +364,12 @@ final class CodexAppServer: @unchecked Sendable {
                 }
                 self.pending[requestID] = continuation
                 self.writeLine(line)
+                self.queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                    guard let self,
+                          let cont = self.pending.removeValue(forKey: requestID) else { return }
+                    cont.resume(throwing: CodexBridgeError.processUnavailable(
+                        "Codex did not respond to \(method) within \(Int(timeout))s."))
+                }
             }
         }
     }
@@ -384,7 +404,9 @@ final class CodexAppServer: @unchecked Sendable {
 
     private func writeLine(_ line: String) {
         guard let data = line.data(using: .utf8), let h = stdinHandle else { return }
-        h.write(data)
+        // Catchable throw on a broken pipe instead of the legacy `write(_:)`'s
+        // uncatchable NSException (which would crash the app if the child died).
+        try? h.write(contentsOf: data)
     }
 
     private static func encode(id: Int?, method: String, params: [String: Any]?) throws -> String {

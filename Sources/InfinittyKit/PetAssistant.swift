@@ -283,7 +283,7 @@ final class PetAssistantPanelView: NSView {
         effortPicker.controlSize = .regular
         effortPicker.font = .systemFont(ofSize: NSFont.systemFontSize)
         effortPicker.menu?.removeAllItems()
-        for level in ["Auto", "Low", "Medium", "High"] {
+        for level in ["Auto", "None", "Low", "Medium", "High"] {
             effortPicker.menu?.addItem(
                 NSMenuItem(title: level, action: nil, keyEquivalent: ""))
         }
@@ -357,6 +357,33 @@ final class PetAssistantPanelView: NSView {
 
     /// The composer's selected reasoning effort (Auto/Low/Medium/High).
     var selectedEffort: String { effortPicker.titleOfSelectedItem ?? "Auto" }
+
+    /// Agent/self-control: select a model by name — exact title first (e.g.
+    /// "Claude Sonnet 5"), then a case-insensitive substring ("claude",
+    /// "gpt", "auto"). Returns false if nothing matched.
+    @discardableResult
+    func selectModel(named name: String) -> Bool {
+        let q = name.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty, let items = modelPicker.menu?.items else { return false }
+        if let item = items.first(where: { $0.title.lowercased() == q })
+            ?? items.first(where: { $0.title.lowercased().contains(q) }) {
+            modelPicker.select(item)
+            return true
+        }
+        return false
+    }
+
+    /// Agent/self-control: select reasoning effort by name (auto/low/medium/high).
+    @discardableResult
+    func selectEffort(named name: String) -> Bool {
+        let q = name.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty, let items = effortPicker.menu?.items else { return false }
+        if let item = items.first(where: { $0.title.lowercased() == q }) {
+            effortPicker.select(item)
+            return true
+        }
+        return false
+    }
 
     /// Provider glyph for a picker row: the real models.dev brand logo
     /// (bundled SVG, tinted as a template) for Claude/Codex/Apple, or the
@@ -824,6 +851,20 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     with submit:true. "Type X" without running = submit:false. To run a command \
     and capture its result, prefer infinitty_run.
 
+    To OPEN or LAUNCH a program, TYPE ITS COMMAND INTO A VISIBLE PANE so the \
+    user sees it. Never launch a macOS desktop app (never `open -a`, never \
+    `open`); the user wants the command-line program in their terminal, not a \
+    GUI app. Examples: "open claude code" / "open claude" → send `claude`; \
+    "open vim" → send `vim`; "start a python repl" → send `python3`. \
+    CHOOSE THE RIGHT TOOL: use infinitty_send (submit:true) to launch anything \
+    interactive or long-running (claude, vim, a REPL, a server) — it types the \
+    command and returns immediately. Use infinitty_run ONLY for a one-shot \
+    command that finishes on its own and whose output you need, because \
+    infinitty_run WAITS for the command to complete and will hang on an \
+    interactive program. Prefer the focused pane; open a new tab \
+    (infinitty_new_tab) only if asked. Act in ONE or two tool calls — don't \
+    retry with variations.
+
     For plain questions that need no terminal action, answer concisely in a few \
     sentences of plain text (no markdown). If answering requires finding files \
     in the project, reply with EXACTLY one line "SEARCH: <filename or path \
@@ -844,7 +885,13 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
         session.petAnimator?.startThinking()
         let backend = resolveBackend(forSelectedTitle: model)
-        let system = Self.systemPrompt + Self.effortDirective(effort)
+        // Keep the system prompt CONSTANT: the CLI bridges pin --system-prompt
+        // at process launch, so folding effort in here forced a full cold
+        // respawn on every effort change (and invalidated the prewarm). The
+        // effort directive rides in the per-turn user message instead, so the
+        // warm process is reused across Auto/Low/Medium/High.
+        let system = Self.systemPrompt
+        let effortNote = Self.effortDirective(effort)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -856,10 +903,11 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             \(session.terminal.historyText(lines: 60))
             """
             let user = context + "\n--- user request ---\n" + request
+                + (effortNote.isEmpty ? "" : "\n" + effortNote)
             let runCwd = cwd ?? NSHomeDirectory()
 
-            Self.askAI(backend: backend, system: system, user: user, cwd: runCwd) { reply in
-                if let query = Self.parseSearchDirective(reply), let cwd {
+            Self.askAI(backend: backend, system: system, user: user, cwd: runCwd) { outcome in
+                if let query = Self.parseSearchDirective(Self.replyText(for: outcome)), let cwd {
                     let all = CodeSearch.listFilesSync(root: cwd)
                     let matches = CodeSearch.filter(all, query: query, limit: 50)
                     let fileBlock = matches.isEmpty
@@ -869,14 +917,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                         + "\n--- user request ---\n" + request
                     Self.askAI(backend: backend, system: system, user: followUp, cwd: runCwd) { final in
                         self.finish(
-                            answer: final ?? "…", files: matches, query: query,
+                            answer: Self.displayText(for: final), files: matches, query: query,
                             completion: completion)
                     }
                 } else {
                     self.finish(
-                        answer: reply
-                            ?? "I can't reach an AI right now. Configure a codex/claude CLI, "
-                            + "ai-base-url/ai-key, or enable Apple Intelligence.",
+                        answer: Self.displayText(for: outcome),
                         files: [], query: nil, completion: completion)
                 }
             }
@@ -887,6 +933,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// nothing (let the model/backend decide); the rest steer depth.
     private static func effortDirective(_ effort: String) -> String {
         switch effort.lowercased() {
+        case "none":
+            return "\n\nReasoning effort: NONE. Answer immediately; do not deliberate or "
+                + "plan — respond with the shortest correct output."
         case "low":
             return "\n\nReasoning effort: LOW. Be fast and direct; minimal deliberation."
         case "medium":
@@ -946,6 +995,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// cosmetic; `id` is the real CLI/API identifier that gets routed.
     enum ModelCatalog {
         static let claude: [(id: String, name: String)] = [
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
             ("claude-sonnet-5", "Claude Sonnet 5"),
             ("claude-opus-4-8", "Claude Opus 4.8"),
             ("claude-fable-5", "Claude Fable 5"),
@@ -964,6 +1014,21 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         case claude(model: String?)
         case foundation
     }
+
+    /// Outcome of an AI backend call. Distinguishes a genuinely unconfigured
+    /// backend from a configured one that errored — the two used to collapse
+    /// to `nil`, so a live bridge that timed out or crashed surfaced the same
+    /// misleading "can't reach an AI" message as having no backend at all.
+    enum AIOutcome {
+        case text(String)
+        case unconfigured
+        case failure(String)   // complete, human-readable failure message
+    }
+
+    /// Warm the resolved CLI bridge ahead of the first sidebar-chat turn, so
+    /// its cold start (Node init + MCP boot + session hooks) overlaps the user
+    /// reading/typing instead of blocking the first "open claude" ask.
+    func prewarm() { PetAssistant.prewarm(config: config) }
 
     /// Warm whichever CLI bridge the config resolves to, so its cold start
     /// overlaps the user typing. No-op for HTTP/Apple/none.
@@ -1050,6 +1115,27 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         return query.isEmpty ? nil : query
     }
 
+    /// Text shown in the chat when an outcome is the final answer. Only
+    /// `.unconfigured` produces the "configure a backend" hint; a live backend
+    /// that errored surfaces its real failure message instead of hiding it.
+    static func displayText(for outcome: AIOutcome) -> String {
+        switch outcome {
+        case .text(let t): return t
+        case .unconfigured:
+            return "I can't reach an AI right now. Configure a codex/claude CLI, "
+                + "ai-base-url/ai-key, or enable Apple Intelligence."
+        case .failure(let msg):
+            return msg
+        }
+    }
+
+    /// The reply text used for directive parsing (`SEARCH:`) — only real model
+    /// text is a candidate; failures and the unconfigured case are not.
+    static func replyText(for outcome: AIOutcome) -> String? {
+        if case .text(let t) = outcome { return t }
+        return nil
+    }
+
     private func finish(
         answer: String, files: [String], query: String?,
         completion: AskCompletion?
@@ -1072,11 +1158,11 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     static func askAI(
         backend: Backend,
         system: String, user: String, cwd: String,
-        done: @escaping (String?) -> Void
+        done: @escaping (AIOutcome) -> Void
     ) {
         switch backend {
         case .none:
-            done(nil)
+            done(.unconfigured)
         case .command(let cmd):
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -1085,15 +1171,20 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             proc.standardInput = stdin
             proc.standardOutput = stdout
             proc.standardError = Pipe()
-            guard (try? proc.run()) != nil else { done(nil); return }
+            guard (try? proc.run()) != nil else {
+                done(.failure("Custom AI command failed to launch: \(cmd)")); return
+            }
             stdin.fileHandleForWriting.write(Data((system + "\n\n" + user).utf8))
             try? stdin.fileHandleForWriting.close()
             let data = stdout.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { done(nil); return }
+            guard proc.terminationStatus == 0 else {
+                done(.failure("Custom AI command exited \(proc.terminationStatus).")); return
+            }
             let text = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            done(text?.isEmpty == false ? text : nil)
+            if let text, !text.isEmpty { done(.text(text)) }
+            else { done(.failure("Custom AI command produced no output.")) }
         case .openai(let base, let key, let model):
             askOpenAI(base: base, key: key, model: model, system: system, user: user, done: done)
         case .codex(let model):
@@ -1105,11 +1196,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             if #available(macOS 26.0, *) {
                 Task {
                     let reply = await PetAssistantFM.answer(system: system, user: user)
-                    done(reply)
+                    if let reply, !reply.isEmpty { done(.text(reply)) }
+                    else { done(.failure("Apple Intelligence returned no response.")) }
                 }
-            } else { done(nil) }
+            } else { done(.failure("Apple Intelligence requires macOS 26 or later.")) }
             #else
-            done(nil)
+            done(.failure("This build has no Apple Intelligence support."))
             #endif
         }
     }
@@ -1119,7 +1211,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private static func askCodex(
         model: String?, cwd: String,
         system: String, user: String,
-        done: @escaping (String?) -> Void
+        done: @escaping (AIOutcome) -> Void
     ) {
         let prompt = system + "\n\n" + user
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1127,10 +1219,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 do {
                     let reply = try await CodexAppServer.shared.turn(
                         prompt: prompt, cwd: cwd, model: model ?? "gpt-5.4")
-                    done(reply.trimmingCharacters(in: .whitespacesAndNewlines))
+                    done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))
                 } catch {
                     PetLog.log("codex failed: \(error.localizedDescription)")
-                    done(nil)
+                    done(.failure("Codex: \(error.localizedDescription)"))
                 }
             }
         }
@@ -1141,17 +1233,17 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private static func askClaude(
         model: String?,
         system: String, user: String,
-        done: @escaping (String?) -> Void
+        done: @escaping (AIOutcome) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
             Task {
                 do {
                     let reply = try await ClaudeBridge.shared.turn(
                         prompt: user, system: system, model: model)
-                    done(reply.trimmingCharacters(in: .whitespacesAndNewlines))
+                    done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))
                 } catch {
                     PetLog.log("claude failed: \(error.localizedDescription)")
-                    done(nil)
+                    done(.failure("Claude: \(error.localizedDescription)"))
                 }
             }
         }
@@ -1160,12 +1252,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private static func askOpenAI(
         base: String, key: String, model: String,
         system: String, user: String,
-        done: @escaping (String?) -> Void
+        done: @escaping (AIOutcome) -> Void
     ) {
         let urlStr = base.hasSuffix("/chat/completions") ? base
             : base.hasSuffix("/v1") ? base + "/chat/completions"
             : base + "/v1/chat/completions"
-        guard let url = URL(string: urlStr) else { done(nil); return }
+        guard let url = URL(string: urlStr) else {
+            done(.failure("Invalid ai-base-url: \(base)")); return
+        }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1180,14 +1274,21 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             "max_tokens": 400,
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        URLSession(configuration: .ephemeral).dataTask(with: req) { data, _, _ in
+        URLSession(configuration: .ephemeral).dataTask(with: req) { data, _, err in
+            if let err {
+                done(.failure("OpenAI request failed: \(err.localizedDescription)")); return
+            }
             guard let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { done(.failure("OpenAI: unreadable response.")); return }
+            guard let choices = json["choices"] as? [[String: Any]],
                   let message = choices.first?["message"] as? [String: Any],
                   let content = message["content"] as? String
-            else { done(nil); return }
-            done(content.trimmingCharacters(in: .whitespacesAndNewlines))
+            else {
+                let apiErr = (json["error"] as? [String: Any])?["message"] as? String
+                done(.failure("OpenAI: \(apiErr ?? "no choices in response").")); return
+            }
+            done(.text(content.trimmingCharacters(in: .whitespacesAndNewlines)))
         }.resume()
     }
 }

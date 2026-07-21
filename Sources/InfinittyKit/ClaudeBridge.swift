@@ -51,6 +51,9 @@ final class ClaudeBridge: @unchecked Sendable {
     private var pending: [String: CheckedContinuation<String, Error>] = [:]
     private var currentTurnID: String?
     private var assistantAccumulator = ""
+    /// Uptime when the current turn's message was written — for phase timing.
+    private var turnStartUptime: Double = 0
+    private var sawFirstTextThisTurn = false
     private var stdoutBuffer = Data()
 
     private static let requestTimeoutSeconds: TimeInterval = 130
@@ -101,7 +104,11 @@ final class ClaudeBridge: @unchecked Sendable {
                     guard let self else {
                         cont.resume(throwing: CancellationError()); return
                     }
+                    let warm = self.process?.isRunning == true
+                    PetLog.log("ClaudeBridge.turn start turn=\(turnID.prefix(8)) warm=\(warm)")
                     self.currentTurnID = turnID
+                    self.turnStartUptime = ProcessInfo.processInfo.systemUptime
+                    self.sawFirstTextThisTurn = false
                     self.assistantAccumulator = ""
                     self.pending[turnID] = cont
                     self.writeUserMessage(turnID: turnID, text: prompt)
@@ -111,6 +118,12 @@ final class ClaudeBridge: @unchecked Sendable {
                         return
                     }
                     if self.currentTurnID == turnID { self.currentTurnID = nil }
+                    PetLog.log("ClaudeBridge.timeout after \(Int(timeout))s turn=\(turnID.prefix(8))")
+                    // Kill the child: it is still computing this turn, and Claude's
+                    // result envelopes carry no client turn id, so a late result
+                    // would be delivered as the NEXT turn's answer. Discard the
+                    // process so the next turn starts clean.
+                    self.teardownLocked()
                     pending.resume(throwing: ClaudeBridgeError.turnTimeout)
                 }
             }
@@ -119,6 +132,10 @@ final class ClaudeBridge: @unchecked Sendable {
                 guard let self, let id = self.currentTurnID,
                       let pending = self.pending.removeValue(forKey: id) else { return }
                 self.currentTurnID = nil
+                PetLog.log("ClaudeBridge.onCancel — Task was cancelled turn=\(id.prefix(8))")
+                // Same reasoning as the timeout path: discard the child so a
+                // late result from this cancelled turn can't resolve the next.
+                self.teardownLocked()
                 pending.resume(throwing: CancellationError())
             }
         })
@@ -130,6 +147,9 @@ final class ClaudeBridge: @unchecked Sendable {
 
     /// Must be called on `queue`.
     private func teardownLocked() {
+        if !pending.isEmpty {
+            PetLog.log("ClaudeBridge.teardown WITH \(pending.count) pending turn(s) — will cancel them")
+        }
         stdoutHandle?.readabilityHandler = nil
         stderrHandle?.readabilityHandler = nil
         try? stdinHandle?.close()
@@ -155,9 +175,16 @@ final class ClaudeBridge: @unchecked Sendable {
             let resolvedModel = model ?? Self.defaultModel
             if process?.isRunning == true {
                 if currentModel == resolvedModel, currentSystemPrompt == system { return }
+                // A turn is in flight on this process — tearing it down here
+                // would resume its continuation with CancellationError (this
+                // was the "Claude: …CancellationError" the sidebar showed when
+                // an ungated warmUp/prewarm raced a running turn). Leave the
+                // live turn alone; reconfiguration happens once it's idle.
+                if !pending.isEmpty { return }
                 // Model and system prompt are pinned at process launch.
                 teardownLocked()
             } else if process != nil {
+                if !pending.isEmpty { return }
                 teardownLocked()
             }
             guard let executable = executableURLOverride
@@ -179,7 +206,40 @@ final class ClaudeBridge: @unchecked Sendable {
                 "--model", resolvedModel,
                 "--system-prompt", system,
                 "--session-id", sessionID,
+                // Skip the user's GLOBAL settings (SessionStart hooks, plugin
+                // sync, auto-memory, CLAUDE.md discovery) — measured at
+                // ~25-30s of pure cold-start overhead on a heavy config. The
+                // embedded assistant is fully self-configured (model, system
+                // prompt, MCP, permissions all explicit), and OAuth lives in
+                // the keychain, so it stays authed. Cannot use `--bare` (it
+                // forces API-key auth and never reads OAuth). Opt back in to
+                // the full config with INFINITTY_AI_FULL_SETTINGS=1.
+                "--setting-sources",
+                ProcessInfo.processInfo.environment["INFINITTY_AI_FULL_SETTINGS"] == "1"
+                    ? "user,project,local" : "project,local",
+                // Disable the CLI's own shell tools. The embedded assistant is
+                // meant to DRIVE THE VISIBLE TERMINAL via the infinitty_* MCP
+                // tools (which type into a real pane the user can see). Left
+                // enabled, the model reached for its built-in Bash and ran
+                // `open -a "Claude"` — launching the desktop app in an invisible
+                // subprocess (wrong target) and adding slow shell round-trips.
+                // Removing Bash forces it to act in the pane. Opt out with
+                // INFINITTY_AI_ALLOW_SHELL=1.
             ]
+            if ProcessInfo.processInfo.environment["INFINITTY_AI_ALLOW_SHELL"] != "1" {
+                // Disable the CLI's built-in tools so ONLY the infinitty_* MCP
+                // tools remain. Two wins: (1) the assistant can't act outside
+                // the visible pane (no Bash `open -a`, no invisible file
+                // edits); (2) with a small tool set the MCP tools are presented
+                // to the model directly instead of being DEFERRED behind
+                // ToolSearch — which was costing ~10s of tool-discovery on the
+                // first turn. ToolSearch itself is left enabled as a safety net.
+                // File lookups go through the system prompt's SEARCH: directive,
+                // so Read/Grep/Glob aren't needed. Opt out: INFINITTY_AI_ALLOW_SHELL=1.
+                args += ["--disallowedTools",
+                    "Bash BashOutput KillShell Read Write Edit NotebookEdit "
+                    + "Glob Grep WebFetch WebSearch Task TodoWrite"]
+            }
             // YOLO by default — same opt-out as Codex (`INFINITTY_AI_YOLO=0`).
             // Background pet-assistant turns can't surface interactive
             // approval prompts, so tool calls would otherwise hang the
@@ -192,7 +252,8 @@ final class ClaudeBridge: @unchecked Sendable {
             let mcpURL = mcpExecutableURLOverride
                 ?? MCPConfiguration.mcpExecutablePath().map(URL.init(fileURLWithPath:))
             if let mcpURL,
-               let data = MCPConfiguration.claudeMCPJSON(binaryPath: mcpURL.path),
+               let data = MCPConfiguration.claudeMCPJSON(
+                   binaryPath: mcpURL.path, appSocketPath: AppControlServer.ownSocketPath),
                let json = String(data: data, encoding: .utf8) {
                 // Give the embedded assistant its terminal tools without
                 // depending on or mutating the user's global Claude config.
@@ -207,10 +268,15 @@ final class ClaudeBridge: @unchecked Sendable {
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "")
             env.removeValue(forKey: "CLAUDECODE")
             env.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
+            // Belt-and-suspenders alongside the MCP config `env`: the spawned
+            // infinitty-mcp inherits this and targets THIS instance's socket.
+            env["INFINITTY_APP_SOCKET"] = AppControlServer.ownSocketPath
             p.environment = env
+            PetLog.log("ClaudeBridge.spawn model=\(resolvedModel) (cold start begins)")
             p.terminationHandler = { [weak self] proc in
                 self?.queue.async {
                     guard let self, self.process === proc else { return }
+                    PetLog.log("ClaudeBridge.childExit status=\(proc.terminationStatus) pending=\(self.pending.count)")
                     self.stdoutHandle?.readabilityHandler = nil
                     self.stderrHandle?.readabilityHandler = nil
                     self.process = nil
@@ -265,8 +331,11 @@ final class ClaudeBridge: @unchecked Sendable {
         guard let data = try? JSONSerialization.data(
             withJSONObject: env, options: [.sortedKeys, .withoutEscapingSlashes]),
               let h = stdinHandle else { return }
-        h.write(data)
-        h.write(Data([0x0A]))
+        // `write(contentsOf:)` throws a catchable error if the child died and
+        // the pipe broke (EPIPE); the legacy `write(_:)` raises an uncatchable
+        // NSException that would crash the whole app.
+        try? h.write(contentsOf: data)
+        try? h.write(contentsOf: Data([0x0A]))
     }
 
     private func consumeStdout(_ chunk: Data) {
@@ -288,10 +357,19 @@ final class ClaudeBridge: @unchecked Sendable {
         case "assistant":
             if let message = event["message"] as? [String: Any],
                let content = message["content"] as? [[String: Any]] {
-                for block in content where (block["type"] as? String) == "text" {
-                    if let text = block["text"] as? String {
+                let dt = ProcessInfo.processInfo.systemUptime - turnStartUptime
+                for block in content {
+                    let kind = block["type"] as? String
+                    if kind == "text", let text = block["text"] as? String {
+                        if !sawFirstTextThisTurn, !text.isEmpty {
+                            sawFirstTextThisTurn = true
+                            PetLog.log(String(format: "ClaudeBridge.first-text at +%.1fs", dt))
+                        }
                         assistantAccumulator += text
                         assistantAccumulator += "\n"
+                    } else if kind == "tool_use" {
+                        let name = block["name"] as? String ?? "?"
+                        PetLog.log(String(format: "ClaudeBridge.toolcall %@ at +%.1fs", name, dt))
                     }
                 }
             }
@@ -308,6 +386,8 @@ final class ClaudeBridge: @unchecked Sendable {
         else { return }
         currentTurnID = nil
         let subtype = event["subtype"] as? String ?? ""
+        let dt = ProcessInfo.processInfo.systemUptime - turnStartUptime
+        PetLog.log(String(format: "ClaudeBridge.turn DONE in %.1fs subtype=%@", dt, subtype))
         switch subtype {
         case "success":
             // Prefer the explicit `result` field; fall back to the

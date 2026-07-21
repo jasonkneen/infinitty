@@ -173,6 +173,39 @@ final class ProviderDiscoveryTests: XCTestCase {
             binaryPath: "/some/path/infinitty-mcp"))
     }
 
+    /// Regression (discovery bug): the ephemeral bridge config must pin the
+    /// spawned infinitty-mcp to THIS instance's control socket via an `env`
+    /// block, instead of relying on the shared (stale-prone) current.sock.
+    func testClaudeMCPJSONInjectsAppSocketEnv() {
+        let data = MCPConfiguration.claudeMCPJSON(
+            binaryPath: "/b/infinitty-mcp", appSocketPath: "/tmp/infinitty-app-42.sock")
+        XCTAssertNotNil(data)
+        let root = try? JSONSerialization.jsonObject(with: data!) as? [String: Any]
+        let server = ((root?["mcpServers"] as? [String: Any])?["infinitty"]) as? [String: Any]
+        XCTAssertEqual(server?["command"] as? String, "/b/infinitty-mcp")
+        let env = server?["env"] as? [String: String]
+        XCTAssertEqual(env?["INFINITTY_APP_SOCKET"], "/tmp/infinitty-app-42.sock")
+
+        // Without a socket path (persistent global config) there is no env.
+        let plain = MCPConfiguration.claudeMCPJSON(binaryPath: "/b/infinitty-mcp")
+        let plainRoot = try? JSONSerialization.jsonObject(with: plain!) as? [String: Any]
+        let plainServer = ((plainRoot?["mcpServers"] as? [String: Any])?["infinitty"]) as? [String: Any]
+        XCTAssertNil(plainServer?["env"])
+    }
+
+    func testCodexConfigOverridesInjectAppSocketEnv() {
+        let overrides = MCPConfiguration.codexConfigOverrides(
+            binaryPath: "/b/infinitty-mcp", appSocketPath: "/tmp/infinitty-app-42.sock")
+        XCTAssertTrue(overrides.contains { $0.hasPrefix("mcp_servers.infinitty.command=") })
+        XCTAssertTrue(overrides.contains {
+            $0.contains("mcp_servers.infinitty.env.INFINITTY_APP_SOCKET")
+                && $0.contains("/tmp/infinitty-app-42.sock")
+        })
+        // No socket path → command only, no env override.
+        let plain = MCPConfiguration.codexConfigOverrides(binaryPath: "/b/infinitty-mcp")
+        XCTAssertEqual(plain.count, 1)
+    }
+
     // MARK: helpers
 
     private func makeExecutable() -> URL {

@@ -23,6 +23,10 @@ enum CodePalette {
     }
     static let outline = NSColor(white: 1, alpha: 0.22)
     static let hairline = NSColor(white: 1, alpha: 0.08)
+    /// Neutral "raised" fill for the active tab in the icon-style page control
+    /// (macOS-segment look), used instead of the accent so the tab bar reads
+    /// as clean chrome rather than a colored control.
+    static let tabSelectionNeutral = NSColor(calibratedWhite: 0.30, alpha: 1)
 
     static func isNeutral(_ color: NSColor) -> Bool {
         guard let rgb = color.usingColorSpace(.deviceRGB) else { return false }
@@ -40,22 +44,35 @@ final class CodeSegmentedBar: NSView {
     var onChange: ((Int) -> Void)?
     private(set) var selectedIndex: Int
     private let labels: [String]
+    /// Optional SF Symbol name per segment. When present the control renders an
+    /// icon + label per tab and uses the neutral raised-pill selection.
+    private let icons: [String?]
     private let font: NSFont
     private let fontWeight: NSFont.Weight
     private let squared: Bool
-    var selectionFillColor: NSColor { CodePalette.selectionAccent }
+    private let neutralSelection: Bool
+    private var hasIcons: Bool { icons.contains { $0 != nil } }
+    private let iconGap: CGFloat = 5
+
+    var selectionFillColor: NSColor {
+        neutralSelection ? CodePalette.tabSelectionNeutral : CodePalette.selectionAccent
+    }
     let outlineColor = CodePalette.outline
 
     init(
-        labels: [String], fontSize: CGFloat = NSFont.systemFontSize,
+        labels: [String], icons: [String?]? = nil,
+        fontSize: CGFloat = NSFont.systemFontSize,
         fontWeight: NSFont.Weight = .semibold,
-        initialIndex: Int = 0, squared: Bool = false
+        initialIndex: Int = 0, squared: Bool = false,
+        neutralSelection: Bool = false
     ) {
         self.labels = labels
+        self.icons = icons ?? Array(repeating: nil, count: labels.count)
         self.fontWeight = fontWeight
         self.font = .systemFont(ofSize: fontSize, weight: fontWeight)
         self.selectedIndex = min(max(initialIndex, 0), labels.count - 1)
         self.squared = squared
+        self.neutralSelection = neutralSelection
         super.init(frame: .zero)
     }
 
@@ -65,13 +82,33 @@ final class CodeSegmentedBar: NSView {
     var fontSizeForTesting: CGFloat { font.pointSize }
     var fontWeightForTesting: CGFloat { fontWeight.rawValue }
 
+    private var iconPointSize: CGFloat { font.pointSize + 2 }
+
+    /// Tinted SF Symbol for a segment (template flattened to `color`).
+    private func symbol(_ name: String, color: NSColor) -> NSImage? {
+        let cfg = NSImage.SymbolConfiguration(pointSize: iconPointSize, weight: .medium)
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(cfg) else { return nil }
+        let out = NSImage(size: base.size)
+        out.lockFocus()
+        base.draw(at: .zero, from: NSRect(origin: .zero, size: base.size),
+                  operation: .sourceOver, fraction: 1)
+        color.set()
+        NSRect(origin: .zero, size: base.size).fill(using: .sourceAtop)
+        out.unlockFocus()
+        return out
+    }
+
     override var intrinsicContentSize: NSSize {
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
         var width: CGFloat = 0
-        for label in labels {
-            width += max(ceil(label.size(withAttributes: attrs).width) + 20, 64)
+        for (i, label) in labels.enumerated() {
+            var seg = ceil(label.size(withAttributes: attrs).width) + 20
+            if icons[i] != nil { seg += iconPointSize + iconGap }
+            width += max(seg, 64)
         }
-        return NSSize(width: width, height: max(22, font.pointSize * 2.1))
+        let height = hasIcons ? max(28, font.pointSize * 2.6) : max(22, font.pointSize * 2.1)
+        return NSSize(width: width, height: height)
     }
 
     func setSelectedIndex(_ index: Int, notify: Bool = false) {
@@ -89,7 +126,18 @@ final class CodeSegmentedBar: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard bounds.width > 0, bounds.height > 0 else { return }
-        let outerRadius = squared ? 5.0 : bounds.height / 2
+        let outerRadius = squared ? 7.0 : bounds.height / 2
+
+        // Faint track so the strip reads as a container without a hard box.
+        if hasIcons {
+            let track = NSBezierPath(
+                roundedRect: bounds, xRadius: outerRadius, yRadius: outerRadius)
+            NSColor(white: 1, alpha: 0.04).setFill()
+            track.fill()
+        }
+
+        // Subtle outer hairline (kept intentionally — reads as a segmented
+        // container edge; also what `pageControlHasOutlineForTesting` checks).
         let container = NSBezierPath(
             roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
             xRadius: outerRadius, yRadius: outerRadius)
@@ -97,27 +145,60 @@ final class CodeSegmentedBar: NSView {
         outlineColor.setStroke()
         container.stroke()
 
+        // Active segment.
         let selectedRect = segmentRect(selectedIndex).insetBy(dx: 2, dy: 2)
-        let selectedRadius = squared ? 3.0 : (bounds.height - 4) / 2
+        let selectedRadius = squared ? 5.0 : (bounds.height - 4) / 2
         let selected = NSBezierPath(
-            roundedRect: selectedRect,
-            xRadius: selectedRadius, yRadius: selectedRadius)
-        selectionFillColor.setFill()
-        selected.fill()
+            roundedRect: selectedRect, xRadius: selectedRadius, yRadius: selectedRadius)
+        if neutralSelection {
+            // macOS-style raised pill: neutral fill + a soft top highlight and
+            // a 0.75px light border so it looks lifted off the track.
+            selectionFillColor.setFill()
+            selected.fill()
+            let border = NSBezierPath(
+                roundedRect: selectedRect.insetBy(dx: 0.375, dy: 0.375),
+                xRadius: selectedRadius, yRadius: selectedRadius)
+            border.lineWidth = 0.75
+            NSColor(white: 1, alpha: 0.14).setStroke()
+            border.stroke()
+        } else {
+            selectionFillColor.setFill()
+            selected.fill()
+        }
 
+        // Segment content: icon + label (when icons present), else label only.
         for (index, label) in labels.enumerated() {
-            let color: NSColor = index == selectedIndex ? .white : .secondaryLabelColor
+            let active = index == selectedIndex
+            let color: NSColor = active ? .white : .secondaryLabelColor
             let style = NSMutableParagraphStyle()
             style.alignment = .center
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font, .foregroundColor: color, .paragraphStyle: style,
             ]
-            let size = label.size(withAttributes: attrs)
             let rect = segmentRect(index)
-            let textRect = NSRect(
-                x: rect.minX, y: rect.midY - size.height / 2,
-                width: rect.width, height: size.height)
-            label.draw(in: textRect, withAttributes: attrs)
+            let labelSize = label.size(withAttributes: attrs)
+
+            if let iconName = icons[index], let image = symbol(iconName, color: color) {
+                let gap = iconGap
+                let groupW = image.size.width + gap + labelSize.width
+                let originX = rect.minX + (rect.width - groupW) / 2
+                let iconRect = NSRect(
+                    x: originX, y: rect.midY - image.size.height / 2,
+                    width: image.size.width, height: image.size.height)
+                image.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+                let textRect = NSRect(
+                    x: originX + image.size.width + gap,
+                    y: rect.midY - labelSize.height / 2,
+                    width: labelSize.width + 1, height: labelSize.height)
+                label.draw(in: textRect, withAttributes: [
+                    .font: font, .foregroundColor: color,
+                ])
+            } else {
+                let textRect = NSRect(
+                    x: rect.minX, y: rect.midY - labelSize.height / 2,
+                    width: rect.width, height: labelSize.height)
+                label.draw(in: textRect, withAttributes: attrs)
+            }
         }
     }
 

@@ -133,7 +133,7 @@ final class CodeViewTests: XCTestCase {
 
         XCTAssertEqual(controller.searchCornerRadiusForTesting, 6)
         XCTAssertTrue(controller.pageControlHasOutlineForTesting)
-        XCTAssertTrue(controller.tabAndRowSelectionMatchForTesting)
+        XCTAssertTrue(controller.pageControlSelectionIsNeutralForTesting)
         XCTAssertTrue(controller.diffModeSelectionIsNeutralForTesting)
     }
 

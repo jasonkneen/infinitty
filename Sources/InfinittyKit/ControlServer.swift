@@ -86,6 +86,13 @@ final class ControlServer {
     /// callers should page with `history N`).
     static let maxResponseBytes = 262_144
 
+    /// Cap on concurrent client threads. Each client gets a native thread +
+    /// 64 KiB buffer; without a cap, any local process could open thousands
+    /// of connections (trickling a byte before each 5s timeout to keep them
+    /// alive) and exhaust threads/fds. Excess connections are closed at once.
+    private static let maxConcurrentClients = 32
+    private let clientSlots = DispatchSemaphore(value: maxConcurrentClients)
+
     private func acceptLoop() {
         while true {
             let client = accept(listenFD, nil, nil)
@@ -97,11 +104,19 @@ final class ControlServer {
             // client fd — a leaked copy keeps the connection open (no EOF)
             // for as long as that shell lives.
             _ = fcntl(client, F_SETFD, FD_CLOEXEC)
+            // Reject (don't queue) when at the concurrency cap, so a flood of
+            // stalled clients can't exhaust threads.
+            guard clientSlots.wait(timeout: .now()) == .success else {
+                close(client)
+                continue
+            }
             // One thread per client: a stalled connection can't block the
             // control plane. Read/write deadlines bound each thread's life.
+            let slots = clientSlots
             let thread = Thread { [weak self] in
                 self?.handle(client)
                 close(client)
+                slots.signal()
             }
             thread.name = "infinitty-control-client"
             thread.qualityOfService = .utility

@@ -1646,10 +1646,59 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
             }
             return "ok"
+        case "sidebar":
+            // sidebar show|hide|toggle — explicit control of the code sidebar
+            // so an agent can drive its own interface, not just flip it.
+            let action = arg.trimmingCharacters(in: .whitespaces).lowercased()
+            guard ["show", "hide", "toggle", ""].contains(action) else {
+                return "error: sidebar show|hide|toggle"
+            }
+            _ = onMain {
+                guard let win = NSApp.keyWindow
+                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else { return }
+                let id = ObjectIdentifier(win)
+                switch action {
+                case "show": _ = self.openCodeView(in: win)
+                case "hide": if self.codeViews[id] != nil { self.toggleCodeView(in: win) }
+                default: self.toggleCodeView(in: win)
+                }
+            }
+            return "ok"
+        case "sidebar-tab":
+            // sidebar-tab files|changes|chat — switch the sidebar page,
+            // opening the sidebar first if it's closed.
+            let name = arg.trimmingCharacters(in: .whitespaces).lowercased()
+            guard ["files", "changes", "git", "chat"].contains(name) else {
+                return "error: sidebar-tab files|changes|chat"
+            }
+            let ok = onMain { () -> Bool in
+                guard let win = NSApp.keyWindow
+                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
+                      let controller = self.openCodeView(in: win) else { return false }
+                return controller.selectPage(named: name)
+            } ?? false
+            return ok ? "ok" : "error: could not switch sidebar tab"
+        case "chat-model", "chat-effort":
+            // chat-model <name> | chat-effort <auto|low|medium|high> — let the
+            // agent change its own chat model / reasoning depth. Opens the
+            // sidebar chat first so the composer exists.
+            let value = arg.trimmingCharacters(in: .whitespaces)
+            guard !value.isEmpty else { return "error: \(cmd) <value>" }
+            let ok = onMain { () -> Bool in
+                guard let win = NSApp.keyWindow
+                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
+                      let controller = self.openCodeView(in: win) else { return false }
+                _ = controller.selectPage(named: "chat")
+                return cmd == "chat-model"
+                    ? controller.setChatModel(value)
+                    : controller.setChatEffort(value)
+            } ?? false
+            return ok ? "ok" : "error: no match for \(cmd) '\(value)'"
         default:
             return "error: unknown command '\(cmd)' (ping | version | list | new-window | new-tab | "
                 + "split | focus | close | send | send-line | screen | history | last-output | "
-                + "last-command | exit-code | run | activity | toggle-quick-terminal | toggle-sidebar | subscribe)"
+                + "last-command | exit-code | run | activity | toggle-quick-terminal | toggle-sidebar | "
+                + "sidebar | sidebar-tab | chat-model | chat-effort | subscribe)"
         }
     }
 

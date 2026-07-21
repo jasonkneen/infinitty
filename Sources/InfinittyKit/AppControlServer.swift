@@ -39,10 +39,54 @@ final class AppControlServer {
     private let subscriberLock = NSLock()
 
     init() {
-        path = "/tmp/infinitty-app-\(getpid()).sock"
+        path = AppControlServer.ownSocketPath
+    }
+
+    /// The app control socket path for the current process. Deterministic from
+    /// the pid so the in-process AI bridges can hand it to their spawned
+    /// `infinitty-mcp` server (via `INFINITTY_APP_SOCKET`) without needing a
+    /// reference to this instance. Must match `init`'s `path`.
+    static var ownSocketPath: String { "/tmp/infinitty-app-\(getpid()).sock" }
+
+    /// Remove socket files left behind by infinitty processes that are no
+    /// longer running. `stop()` only runs on a clean quit, so a crash,
+    /// force-quit, or Xcode "stop" during a dev rebuild strands the pane and
+    /// app sockets forever. This is a cheap, pid-keyed sweep — it never
+    /// touches a live process's files and needs no cross-instance coordination.
+    static func sweepStaleSockets(fileManager: FileManager = .default) {
+        let dir = "/tmp"
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: dir) else { return }
+        let mypid = getpid()
+        for name in entries
+        where name.hasPrefix("infinitty-") && name.hasSuffix(".sock") {
+            let stem = name.dropFirst("infinitty-".count).dropLast(".sock".count)
+            let parts = stem.split(separator: "-")
+            // infinitty-<pid>-<n>.sock  or  infinitty-app-<pid>.sock
+            let pidToken = parts.first == "app" ? parts.dropFirst().first : parts.first
+            guard let pidToken, let pid = pid_t(pidToken), pid != mypid else { continue }
+            // kill(pid, 0): 0 = alive, ESRCH = gone.
+            if kill(pid, 0) != 0, errno == ESRCH {
+                unlink("\(dir)/\(name)")
+            }
+        }
+        // Drop a dangling discovery symlink (points at a now-removed socket).
+        if let target = readlinkString(currentLink),
+           !fileManager.fileExists(atPath: target) {
+            unlink(currentLink)
+        }
+    }
+
+    /// Resolve a symlink to its target path, or nil if not a readable link.
+    static func readlinkString(_ link: String) -> String? {
+        var buf = [CChar](repeating: 0, count: 1024)
+        let n = readlink(link, &buf, buf.count - 1)
+        guard n >= 0 else { return nil }
+        buf[n] = 0
+        return String(cString: buf)
     }
 
     func start() {
+        AppControlServer.sweepStaleSockets()
         unlink(path)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return }
@@ -86,8 +130,14 @@ final class AppControlServer {
     }
 
     func stop() {
-        if listenFD >= 0 { close(listenFD) }
+        if listenFD >= 0 { close(listenFD); listenFD = -1 }
         unlink(path)
+        // Only remove the shared discovery symlink if it still points at us.
+        // A newer instance may have repointed it to its own socket during our
+        // lifetime; clobbering that would break the live instance's discovery.
+        if AppControlServer.readlinkString(AppControlServer.currentLink) == path {
+            unlink(AppControlServer.currentLink)
+        }
         subscriberLock.lock()
         for fd in subscribers { close(fd) }
         subscribers.removeAll()
@@ -118,6 +168,12 @@ final class AppControlServer {
         subscriberLock.unlock()
     }
 
+    /// Cap on concurrent client threads (includes long-lived `subscribe`
+    /// streams). Prevents a flood of stalled local connections from
+    /// exhausting threads/fds. Excess connections are closed immediately.
+    private static let maxConcurrentClients = 48
+    private let clientSlots = DispatchSemaphore(value: maxConcurrentClients)
+
     private func acceptLoop() {
         while true {
             let client = accept(listenFD, nil, nil)
@@ -129,7 +185,15 @@ final class AppControlServer {
             // inherited client fd would hold the connection open (no EOF)
             // until that shell exits.
             _ = fcntl(client, F_SETFD, FD_CLOEXEC)
-            let thread = Thread { [weak self] in self?.handle(client) }
+            guard clientSlots.wait(timeout: .now()) == .success else {
+                close(client)
+                continue
+            }
+            let slots = clientSlots
+            let thread = Thread { [weak self] in
+                self?.handle(client)
+                slots.signal()
+            }
             thread.name = "infinitty-app-client"
             thread.qualityOfService = .utility
             thread.start()
@@ -139,6 +203,11 @@ final class AppControlServer {
     private func handle(_ fd: Int32) {
         var tv = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        // Also bound the response write: a client that requests a large
+        // response then stops reading must not park this thread forever once
+        // the kernel send buffer fills. The subscribe branch overrides this
+        // with its own short deadline below.
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         var buf = [UInt8](repeating: 0, count: 65536)
         var line: [UInt8] = []

@@ -77,7 +77,7 @@ final class PetAssistantTests: XCTestCase {
         // (b) sidebar chat has no panel background — sits on the black host.
         XCTAssertTrue(panel.surfaceIsClearForTesting)
         // (d) an effort/thinking control sits beside the model picker.
-        XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "Low", "Medium", "High"])
+        XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "None", "Low", "Medium", "High"])
         XCTAssertEqual(panel.effortValueForTesting, "Auto")
 
         // (c) user turns render as bubbles; assistant turns do not.
@@ -177,6 +177,29 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(
             PetAssistant.resolveBackend(config: config),
             .openai(base: "https://api.example.com/v1", key: "", model: "gpt-4o-mini"))
+    }
+
+    /// Regression: a live backend that ERRORED must not be reported the same
+    /// as having no backend configured. `.failure` surfaces the real message;
+    /// only `.unconfigured` shows the "configure a backend" hint.
+    func testDisplayTextDistinguishesUnconfiguredFromFailure() {
+        XCTAssertEqual(PetAssistant.displayText(for: .text("hello")), "hello")
+
+        let unconfigured = PetAssistant.displayText(for: .unconfigured)
+        XCTAssertTrue(unconfigured.contains("can't reach an AI"))
+
+        let failure = PetAssistant.displayText(for: .failure("Claude: turn timeout"))
+        XCTAssertEqual(failure, "Claude: turn timeout")
+        XCTAssertFalse(failure.contains("can't reach an AI"),
+                       "a real backend error must not be masked by the generic hint")
+    }
+
+    /// Only genuine model text is a candidate for `SEARCH:` directive parsing;
+    /// failures and the unconfigured case never are.
+    func testReplyTextOnlyForModelText() {
+        XCTAssertEqual(PetAssistant.replyText(for: .text("SEARCH: foo")), "SEARCH: foo")
+        XCTAssertNil(PetAssistant.replyText(for: .unconfigured))
+        XCTAssertNil(PetAssistant.replyText(for: .failure("boom")))
     }
 
 }

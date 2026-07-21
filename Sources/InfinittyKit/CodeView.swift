@@ -279,7 +279,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     // UI
     private let pageControl = CodeSegmentedBar(
         labels: ["FILES", "CHANGES", "CHAT"],
-        fontSize: 10, fontWeight: .medium, squared: true)
+        icons: ["folder", "arrow.triangle.branch", "bubble.left.and.bubble.right"],
+        fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
     private let searchField = NSSearchField()
     private let commitRow = NSView()
     private let commitField = NSTextField()
@@ -298,6 +299,9 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 280, height: 500))
     private let chatHost = NSView()
     private weak var assistant: PetAssistant?
+    /// The embedded sidebar-chat composer, so agent self-control commands can
+    /// switch its model / effort. Set whenever an assistant is attached.
+    private weak var chatPanel: PetAssistantPanelView?
     private var selectedChange: CodeChange?
     private var headerTopToSearch: NSLayoutConstraint?
     private var headerTopToCommit: NSLayoutConstraint?
@@ -941,6 +945,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         self.assistant = assistant
         chatHost.subviews.forEach { $0.removeFromSuperview() }
         let panel = assistant.makeSidebarPanelView()
+        chatPanel = panel
         panel.removeFromSuperview()
         chatHost.addSubview(panel)
         panel.onClose = { [weak self] in self?.setPage(.files) }
@@ -990,6 +995,9 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         searchField.isHidden = newPage != .files
         commitRow.isHidden = newPage != .changes
         let showingChat = newPage == .chat
+        // Warm the AI bridge the moment the chat tab is shown so its cold
+        // start overlaps the user reading/typing, not the first ask.
+        if showingChat { assistant?.prewarm() }
         chatHost.isHidden = !showingChat
         header.isHidden = showingChat
         split.isHidden = showingChat
@@ -1002,6 +1010,27 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         updateHeader()
         if newPage == .changes { refreshChanges() }
         outlineView.reloadData()
+    }
+
+    /// Agent/self-control: set the embedded chat composer's model / effort.
+    /// Returns false if there's no chat composer or the name didn't match.
+    @discardableResult
+    func setChatModel(_ name: String) -> Bool { chatPanel?.selectModel(named: name) ?? false }
+    @discardableResult
+    func setChatEffort(_ name: String) -> Bool { chatPanel?.selectEffort(named: name) ?? false }
+
+    /// Agent/self-control entry point: select a sidebar page by name
+    /// ("files" | "changes"/"git" | "chat"). Returns false for an
+    /// unrecognized name. Safe to call from the app control socket / MCP.
+    @discardableResult
+    func selectPage(named name: String) -> Bool {
+        switch name.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "files": setPage(.files)
+        case "changes", "git": setPage(.changes)
+        case "chat": setPage(.chat)
+        default: return false
+        }
+        return true
     }
 
     /// Pet-assistant hand-off: show these root-relative paths as the current
@@ -1628,9 +1657,10 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         CodeIcon.image(for: URL(fileURLWithPath: "file.swift"), isDirectory: false)?.size ?? .zero
     }
     var searchCornerRadiusForTesting: CGFloat { searchField.layer?.cornerRadius ?? 0 }
-    var tabAndRowSelectionMatchForTesting: Bool {
-        pageControl.selectionFillColor == CodeRowView.emphasizedSelectionColor
-            && pageControl.selectionFillColor == CodePalette.selectionAccent
+    /// The page-control tabs now use a neutral raised pill (clean chrome),
+    /// distinct from the accent used for file-row selection.
+    var pageControlSelectionIsNeutralForTesting: Bool {
+        CodePalette.isNeutral(pageControl.selectionFillColor)
     }
     var diffModeSelectionIsNeutralForTesting: Bool {
         CodePalette.isNeutral(unifiedButton.contentTintColor ?? .clear)

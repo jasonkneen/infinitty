@@ -157,7 +157,7 @@ final class Terminal {
 
     /// Returns a completion for the current input, or nil. Called on the PTY
     /// thread after input changes; must be fast (history match, cached).
-    var hintProvider: ((String) -> String?)?
+    private(set) var hintProvider: ((String) -> String?)?
     private var inputActive = false
     private var promptLine = 0   // absolute line of input start (OSC 133 B)
     private var promptCol = 0
@@ -320,6 +320,8 @@ final class Terminal {
         pendingBell = false
         let markerEvents = pendingMarkers
         pendingMarkers.removeAll(keepingCapacity: true)
+        let wantMarkdown = pendingMarkdownRender && !markdownRenderInFlight
+        if wantMarkdown { pendingMarkdownRender = false; markdownRenderInFlight = true }
         lock.unlock()
 
         if !out.isEmpty { onOutput?(out) }
@@ -327,6 +329,10 @@ final class Terminal {
         if bell { onBell?() }
         for (kind, exit) in markerEvents { onMarker?(kind, exit) }
         onChange?()
+
+        if wantMarkdown {
+            markdownQueue.async { [weak self] in self?.performMarkdownRender() }
+        }
     }
 
     // MARK: - snapshot (render thread)
@@ -1608,6 +1614,23 @@ final class Terminal {
         cellPxH = max(height, 1)
     }
 
+    /// Lock-guarded config setters. These values are read on the PTY thread
+    /// under the lock inside `feed`; writing them from the main thread (live
+    /// config reload) without the lock is a data race — a torn String or
+    /// closure read / bad ARC refcount that can crash.
+    func setMarkdownConfig(auto: Bool, command: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        markdownAuto = auto
+        markdownCommand = command
+    }
+
+    func setHintProvider(_ provider: ((String) -> String?)?) {
+        lock.lock()
+        defer { lock.unlock() }
+        hintProvider = provider
+    }
+
     /// Image pixels for the renderer's texture cache.
     func imageData(id: UInt64) -> (width: Int, height: Int, rgba: [UInt8])? {
         lock.lock()
@@ -1646,15 +1669,25 @@ final class Terminal {
 
         // Auto markdown: at command completion, if the output looks like
         // markdown and is on-screen, re-render it through glow in place.
+        // Only FLAG it here (we hold the terminal lock on the PTY thread);
+        // feed() drains the flag after unlocking and runs glow off-thread so
+        // the subprocess can never block the parser, render, or main threads.
         if kind == UInt8(ascii: "D"), markdownAuto, !usingAlt {
-            renderCommandOutputAsMarkdown()
+            pendingMarkdownRender = true
         }
     }
 
     // MARK: - auto markdown rendering (opt-in, guarded)
 
-    var markdownAuto = false
-    var markdownCommand = "glow -p"
+    private(set) var markdownAuto = false
+    private(set) var markdownCommand = "glow -p"
+
+    /// Set under the lock when an OSC 133 D completion wants a markdown
+    /// re-render; drained by `feed` after it unlocks. `inFlight` coalesces
+    /// bursts so only one glow subprocess runs at a time.
+    private var pendingMarkdownRender = false
+    private var markdownRenderInFlight = false
+    private let markdownQueue = DispatchQueue(label: "infinitty.markdown", qos: .utility)
 
     private func looksLikeMarkdown(_ s: String) -> Bool {
         var score = 0
@@ -1670,35 +1703,73 @@ final class Terminal {
         return false
     }
 
-    private func renderCommandOutputAsMarkdown() {
-        guard let dIdx = markers.lastIndex(where: { $0.kind == UInt8(ascii: "D") }),
+    /// Off-lock markdown render (runs on `markdownQueue`). Phase A extracts the
+    /// completed command's output under the lock; glow then runs WITHOUT the
+    /// lock (bounded by a timeout + concurrent pipe draining); Phase C re-injects
+    /// the styled result under the lock, but only if that output is still the
+    /// last thing on screen — otherwise the raw output is left untouched.
+    private func performMarkdownRender() {
+        defer { lock.lock(); markdownRenderInFlight = false; lock.unlock() }
+
+        // Phase A — capture region + text under the lock.
+        lock.lock()
+        guard !usingAlt,
+              let dIdx = markers.lastIndex(where: { $0.kind == UInt8(ascii: "D") }),
               let cIdx = markers[..<dIdx].lastIndex(where: { $0.kind == UInt8(ascii: "C") })
-        else { return }
+        else { lock.unlock(); return }
         let c = markers[cIdx]
         let d = markers[dIdx]
-
-        // Output must still be fully on-screen (not scrolled into history).
         let startRow = c.line - sbAppended
-        guard startRow >= 0, startRow < rows, d.line - c.line <= 300 else { return }
-
+        guard startRow >= 0, startRow < rows, d.line - c.line <= 300 else {
+            lock.unlock(); return
+        }
         let text = textBetween(startLine: c.line, startCol: c.col, endLine: d.line, endCol: d.col)
-        guard !text.isEmpty, looksLikeMarkdown(text),
-              let rendered = Terminal.runGlow(markdownCommand, input: text) else { return }
+        let command = markdownCommand
+        let dLine = d.line
+        lock.unlock()
 
-        // Erase the raw output region and re-emit glow's ANSI at its start.
-        // We're being called mid-OSC-dispatch, so force the parser back to
-        // ground before re-feeding, else glow's bytes get eaten as OSC data.
+        // Phase B — glow OFF the lock. Cannot stall the parser/render/main.
+        guard !text.isEmpty, looksLikeMarkdown(text),
+              let rendered = Terminal.runGlow(command, input: text) else { return }
+
+        // Phase C — re-inject under the lock, only if the same completed
+        // command is STILL the last marker on screen (nothing has scrolled it
+        // off or started a new prompt/command in the meantime).
+        lock.lock()
+        guard !usingAlt,
+              let last = markers.last, last.kind == UInt8(ascii: "D"), last.line == dLine,
+              let cIdx2 = markers[..<(markers.count - 1)].lastIndex(where: {
+                  $0.kind == UInt8(ascii: "C")
+              })
+        else { lock.unlock(); return }
+        let startRow2 = markers[cIdx2].line - sbAppended
+        guard startRow2 >= 0, startRow2 < rows else { lock.unlock(); return }
+        // Force the parser back to ground before re-feeding, else glow's bytes
+        // get eaten as OSC data.
         pstate = .ground
-        cy = min(max(startRow, 0), rows - 1)
+        cy = min(max(startRow2, 0), rows - 1)
         cx = 0
         wrapPending = false
         eraseInDisplay(0)
         for b in rendered { process(b) }
+        generation &+= 1
+        let out = pendingOutput; pendingOutput.removeAll(keepingCapacity: true)
+        pendingMarkers.removeAll(keepingCapacity: true)
+        pendingMarkdownRender = false
+        lock.unlock()
+
+        if !out.isEmpty { onOutput?(out) }
+        onChange?()
     }
 
     /// Run the markdown command with `input` on stdin; return its ANSI stdout.
-    /// Synchronous — called on the PTY read thread, bounded by a short timeout.
-    private static func runGlow(_ command: String, input: String) -> [UInt8]? {
+    /// Called OFF the terminal lock on `markdownQueue`. Bounded by a hard
+    /// timeout and concurrent stdin/stdout draining, so neither a hung `glow`
+    /// nor a >64 KB pipe-buffer deadlock can wedge anything — on timeout the
+    /// child is killed and nil is returned.
+    private static func runGlow(
+        _ command: String, input: String, timeout: TimeInterval = 2.0
+    ) -> [UInt8]? {
         // Drop interactive pager flags — we capture stdout, not a TTY pager.
         let parts = command.split(separator: " ").map(String.init)
             .filter { $0 != "-p" && $0 != "--pager" }
@@ -1721,9 +1792,28 @@ final class Terminal {
         } catch {
             return nil
         }
-        stdin.fileHandleForWriting.write(Data(input.utf8))
-        stdin.fileHandleForWriting.closeFile()
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        // Write stdin concurrently so a large input can't deadlock against the
+        // child filling stdout. `write(contentsOf:)` throws (not an uncatchable
+        // NSException) if the child died / the pipe broke — swallow it.
+        let inputData = Data(input.utf8)
+        DispatchQueue.global(qos: .utility).async {
+            try? stdin.fileHandleForWriting.write(contentsOf: inputData)
+            try? stdin.fileHandleForWriting.close()
+        }
+        // Read stdout concurrently; signal when EOF is reached.
+        var data = Data()
+        let readDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            data = stdout.fileHandleForReading.readDataToEndOfFile()
+            readDone.signal()
+        }
+        if readDone.wait(timeout: .now() + timeout) == .timedOut {
+            proc.terminate()
+            if readDone.wait(timeout: .now() + 0.3) == .timedOut, proc.isRunning {
+                kill(proc.processIdentifier, SIGKILL)
+            }
+            return nil
+        }
         proc.waitUntilExit()
         guard proc.terminationStatus == 0, !data.isEmpty else { return nil }
         // Normalize LF -> CRLF so the terminal advances columns correctly.

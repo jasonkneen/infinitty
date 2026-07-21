@@ -6,6 +6,10 @@ import Foundation
 //   claude mcp add infinitty -- /path/to/infinitty-mcp
 // Discovery: $INFINITTY_APP_SOCKET, else /tmp/infinitty-current.sock.
 
+// Ignore SIGPIPE: a control-socket or stdout write to a peer that has gone
+// away must fail with EPIPE, not kill this process (the app does the same).
+signal(SIGPIPE, SIG_IGN)
+
 // MARK: - socket bridge
 
 func infinittyRequest(_ line: String, timeout: Int32 = 130) -> String {
@@ -84,6 +88,72 @@ let tools: [Tool] = [
         description: "Show or hide infinitty's persistent quick terminal.",
         schema: ["type": "object", "properties": [:]],
         invoke: { _ in infinittyRequest("toggle-quick-terminal") }
+    ),
+    Tool(
+        name: "infinitty_sidebar",
+        description: "Show, hide, or toggle infinitty's code sidebar (the Files / "
+            + "Changes / Chat panel). Lets the assistant drive its own interface.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "action": [
+                    "type": "string",
+                    "enum": ["show", "hide", "toggle"],
+                    "description": "show, hide, or toggle (default toggle)",
+                ] as [String: Any],
+            ],
+        ],
+        invoke: { args in infinittyRequest("sidebar \(args["action"] as? String ?? "toggle")") }
+    ),
+    Tool(
+        name: "infinitty_sidebar_tab",
+        description: "Switch infinitty's sidebar to a tab: files, changes (git), or "
+            + "chat. Opens the sidebar first if it is closed.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "tab": [
+                    "type": "string",
+                    "enum": ["files", "changes", "chat"],
+                    "description": "Which sidebar tab to show",
+                ] as [String: Any],
+            ],
+            "required": ["tab"],
+        ],
+        invoke: { args in infinittyRequest("sidebar-tab \(args["tab"] as? String ?? "")") }
+    ),
+    Tool(
+        name: "infinitty_chat_model",
+        description: "Set the infinitty sidebar chat's model (e.g. \"Claude Sonnet 5\", "
+            + "\"claude\", \"gpt\", \"auto\"). Opens the chat first.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "model": [
+                    "type": "string",
+                    "description": "Model name or substring to select",
+                ] as [String: Any],
+            ],
+            "required": ["model"],
+        ],
+        invoke: { args in infinittyRequest("chat-model \(args["model"] as? String ?? "")") }
+    ),
+    Tool(
+        name: "infinitty_chat_effort",
+        description: "Set the infinitty sidebar chat's reasoning effort: auto, low, "
+            + "medium, or high. Opens the chat first.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "effort": [
+                    "type": "string",
+                    "enum": ["auto", "low", "medium", "high"],
+                    "description": "Reasoning effort level",
+                ] as [String: Any],
+            ],
+            "required": ["effort"],
+        ],
+        invoke: { args in infinittyRequest("chat-effort \(args["effort"] as? String ?? "")") }
     ),
     Tool(
         name: "infinitty_run",

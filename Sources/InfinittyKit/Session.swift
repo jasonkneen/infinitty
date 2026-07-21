@@ -42,15 +42,19 @@ final class TerminalSession: NSObject {
         // the desktop through the new pane for a frame.
         renderer.prepare(layer: view.metalLayer)
 
-        pty.onData = { [terminal] buf, count in terminal.feed(buf, count) }
+        // Weak captures: Session owns terminal/pty/renderer for the pane's
+        // whole life, so these callbacks never need to keep each other alive.
+        // Strong captures here form pty<->terminal and terminal->renderer
+        // cycles that leak the entire engine on every pane close.
+        pty.onData = { [weak terminal] buf, count in terminal?.feed(buf, count) }
         pty.onEOF = { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.onExited?(self)
             }
         }
-        terminal.onOutput = { [pty] bytes in pty.write(bytes) }
-        terminal.onChange = { [renderer] in renderer.poke() }
+        terminal.onOutput = { [weak pty] bytes in pty?.write(bytes) }
+        terminal.onChange = { [weak renderer] in renderer?.poke() }
         terminal.onTitle = { [weak self] t in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -74,8 +78,8 @@ final class TerminalSession: NSObject {
 
     /// Push markdown-render settings into the terminal (launch + live reload).
     func applyMarkdownConfig(_ config: AppConfig) {
-        terminal.markdownAuto = config.markdownRender == "auto"
-        terminal.markdownCommand = config.markdownCommand
+        terminal.setMarkdownConfig(
+            auto: config.markdownRender == "auto", command: config.markdownCommand)
         applyHintConfig(config)
     }
 
@@ -84,7 +88,7 @@ final class TerminalSession: NSObject {
     func applyHintConfig(_ config: AppConfig) {
         guard config.hints else {
             hintEngine = nil
-            terminal.hintProvider = nil
+            terminal.setHintProvider(nil)
             return
         }
         let smart = HintEngine.resolveSmart(
@@ -93,7 +97,7 @@ final class TerminalSession: NSObject {
         let engine = HintEngine(smart: smart)
         engine.onAsyncSuggestion = { [weak self] in self?.terminal.touch() }
         hintEngine = engine
-        terminal.hintProvider = { [weak engine] input in engine?.suggest(input) }
+        terminal.setHintProvider { [weak engine] input in engine?.suggest(input) }
     }
 
     /// Call once the view is inside a window (display link needs it).
@@ -138,6 +142,7 @@ final class TerminalSession: NSObject {
         processTracker?.stop()
         processTracker = nil
         control.stop()
+        terminal.setHintProvider(nil)
         renderer.shutdown()
         if pty.pid > 0 { kill(pty.pid, SIGHUP) }
     }

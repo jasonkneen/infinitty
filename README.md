@@ -95,6 +95,11 @@ printf 'split 1 right\n'       | nc -U /tmp/infinitty-current.sock
 printf 'toggle-quick-terminal\n' | nc -U /tmp/infinitty-current.sock
 printf 'focus 2\n'             | nc -U /tmp/infinitty-current.sock
 printf 'activity deploying…\n' | nc -U /tmp/infinitty-current.sock  # post to the notch widget
+printf 'toggle-sidebar\n'      | nc -U /tmp/infinitty-current.sock  # show/hide code sidebar
+printf 'sidebar show\n'        | nc -U /tmp/infinitty-current.sock  # show|hide|toggle the sidebar
+printf 'sidebar-tab chat\n'    | nc -U /tmp/infinitty-current.sock  # switch tab: files|changes|chat
+printf 'chat-model claude\n'   | nc -U /tmp/infinitty-current.sock  # set chat model (name/substring)
+printf 'chat-effort high\n'    | nc -U /tmp/infinitty-current.sock  # set effort: auto|low|medium|high
 printf 'subscribe\n'           | nc -U /tmp/infinitty-current.sock  # JSON event stream
 ```
 
@@ -278,6 +283,22 @@ Font to use one everywhere.
   `~/.codex/pets` spritesheet instead
 - **Notch live activity**: `notch = true` shows a slim strip beside the
   MacBook notch with the running command and its exit status (OSC 133)
+
+### Sidebar: Files, Changes, and Chat
+
+The side panel (toggle via sidebar button or `toggle-sidebar` socket command) has three tabs:
+
+- **Files**: Directory tree with search, syntax-highlighted code preview, and
+  breadcrumb navigation. Quickly explore and open files in your workspace.
+- **Changes**: Git status and diffs when in a repository. See modified files,
+  stage/unstage changes without leaving the terminal.
+- **Chat**: AI agent for conversation and terminal control. Ask questions about
+  your code, execute shell commands, read the screen, or switch between panes.
+  Choose your AI model (Claude, Codex, or Apple Intelligence) via the dropdown,
+  and enable reasoning/thinking via the effort selector for deeper analysis.
+
+All three tabs are always available in the sidebar and sync with your current
+directory.
 
 ## Terminal feature coverage
 
