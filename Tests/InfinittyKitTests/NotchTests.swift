@@ -12,16 +12,18 @@ final class NotchTests: XCTestCase {
         XCTAssertEqual(NotchDisplayMode("unknown"), .builtin)
     }
 
-    func testIndicatorLayoutKeepsItsRightEdgeWhenActivityAppears() {
+    func testIndicatorLayoutKeepsNotchCenteredWhenActivityAppears() {
         let idle = NotchLayout.indicatorFrame(
-            rightEdge: 720, screenTop: 900, barHeight: 32, showsActivity: false)
+            centerX: 720, notchWidth: 180,
+            screenTop: 900, barHeight: 32, showsActivity: false)
         let active = NotchLayout.indicatorFrame(
-            rightEdge: 720, screenTop: 900, barHeight: 32, showsActivity: true)
+            centerX: 720, notchWidth: 180,
+            screenTop: 900, barHeight: 32, showsActivity: true)
 
-        XCTAssertEqual(idle.width, 66)
-        XCTAssertEqual(active.width, 260)
-        XCTAssertEqual(idle.maxX, 720)
-        XCTAssertEqual(active.maxX, 720)
+        XCTAssertEqual(idle.width, 312)
+        XCTAssertEqual(active.width, 506)
+        XCTAssertEqual(idle.minX + 66 + 90, 720)
+        XCTAssertEqual(active.minX + 260 + 90, 720)
         XCTAssertEqual(active.maxY, 900)
     }
 
@@ -43,9 +45,48 @@ final class NotchTests: XCTestCase {
         XCTAssertEqual(NotchActivityPresentation.custom(String(repeating: "x", count: 50)).text.count, 38)
     }
 
-    func testBundledCodexPetDoesNotDependOnAgentNotchCheckout() {
-        IndicatorView.currentPetID = "codex"
+    func testConfiguredPetUsesInfinittyTerminalSpritesheet() {
+        IndicatorView.configurePet("infinitty")
         XCTAssertNotNil(IndicatorView.codexSprite)
+    }
+
+    func testLiveQuietSessionRendersIdleInsteadOfBlank() {
+        XCTAssertEqual(
+            NotchSessionState.resolve(
+                live: true, busy: false, wasLive: true, current: .running),
+            .idle)
+        XCTAssertEqual(
+            NotchSessionState.resolve(
+                live: false, busy: false, wasLive: true, current: .idle),
+            .done)
+    }
+
+    func testResumeCommandsUseValidatedSessionIdentifiers() {
+        let id = "019f7bb9-0f19-7200-8b30-70fcea423ab5"
+        let claude = AgentSession(
+            id: "/tmp/claude.jsonl", kind: .claude, title: "repo",
+            snippet: "", model: "", lastModified: Date(), threadID: id)
+        let codex = AgentSession(
+            id: "/tmp/codex.jsonl", kind: .codex, title: "repo",
+            snippet: "", model: "", lastModified: Date(), threadID: id)
+        let invalid = AgentSession(
+            id: "/tmp/invalid.jsonl", kind: .codex, title: "repo",
+            snippet: "", model: "", lastModified: Date(), threadID: "not-a-uuid")
+
+        XCTAssertEqual(
+            claude.resumeCommand(executablePath: "/opt/tools/claude"),
+            "'/opt/tools/claude' --resume '\(id)'")
+        XCTAssertEqual(
+            codex.resumeCommand(executablePath: "/opt/tools/codex"),
+            "'/opt/tools/codex' resume '\(id)'")
+        XCTAssertNil(invalid.resumeCommand())
+    }
+
+    func testConfiguredNotchTypographyUsesMainFontFamily() {
+        let font = NotchAppearance(
+            fontName: "Helvetica", fontSize: 13, pet: "infinitty")
+            .font(size: 11, bold: false)
+        XCTAssertTrue(font.familyName?.contains("Helvetica") == true)
     }
 
     func testScannerGroupsCodexSubagentAndKeepsRuntimeModelIdentifier() throws {
@@ -84,6 +125,53 @@ final class NotchTests: XCTestCase {
         XCTAssertEqual(result[0].children.count, 1)
         XCTAssertEqual(result[0].children[0].nickname, "Gauss")
         XCTAssertEqual(result[0].children[0].model, "runtime-subagent-model")
+    }
+
+    func testScannerPreservesClaudeResumeIDAndWorkingDirectory() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("infinitty-notch-tests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let project = home.appendingPathComponent(".claude/projects/-tmp-titerm")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let id = "019f7bb9-0f19-7200-8b30-70fcea423ab5"
+        let transcript = project.appendingPathComponent("\(id).jsonl")
+        try writeJSONLines([
+            ["type": "user", "sessionId": id, "cwd": "/tmp/titerm",
+             "timestamp": "2026-07-21T12:00:00.000Z",
+             "message": ["content": "continue the work"]],
+        ], to: transcript)
+
+        let result = SessionScanner(home: home).scan(live: [], claudeCwdCounts: [:])
+
+        XCTAssertEqual(result.first?.threadID, id)
+        XCTAssertEqual(result.first?.workingDirectory, "/tmp/titerm")
+    }
+
+    func testMultipleClaudeProcessesInOneDirectoryStayOwnershipAmbiguous() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("infinitty-notch-tests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let project = home.appendingPathComponent(".claude/projects/-tmp-shared")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        for id in [
+            "019f7bb9-0f19-7200-8b30-70fcea423ab5",
+            "019f7bb9-0f19-7200-8b30-70fcea423ab6",
+        ] {
+            try writeJSONLines([
+                ["type": "user", "sessionId": id, "cwd": "/tmp/shared",
+                 "message": ["content": "work"]],
+            ], to: project.appendingPathComponent("\(id).jsonl"))
+        }
+        let processes = [101, 102].map {
+            ProcessDiscovery.Snapshot(
+                kind: .claude, processID: pid_t($0),
+                transcriptPath: nil, cwd: "/tmp/shared")
+        }
+
+        let result = SessionScanner(home: home).scan(liveProcesses: processes)
+
+        XCTAssertEqual(result.filter(\.isLive).count, 2)
+        XCTAssertTrue(result.allSatisfy { $0.processID == nil })
     }
 
     private func writeJSONLines(_ objects: [[String: Any]], to url: URL) throws {

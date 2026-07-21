@@ -1,8 +1,8 @@
 import AppKit
 import ApplicationServices
 
-// Agent session discovery and notch UI adapted from Agent Notch.
-// Copyright (c) 2026 realfishsam, MIT licensed; see THIRD_PARTY_NOTICES.md.
+// Session discovery and notch UI include MIT-licensed upstream work.
+// Copyright (c) 2026 realfishsam; see THIRD_PARTY_NOTICES.md.
 
 // MARK: - Model
 
@@ -17,6 +17,8 @@ struct AgentSession {
     let lastModified: Date
     var prompt: String = ""
     var threadID: String = ""
+    var workingDirectory: String?
+    var processID: pid_t?
     var parentID: String?
     var nickname: String?
     var children: [AgentSession] = []
@@ -29,6 +31,37 @@ struct AgentSession {
     var anyLive: Bool { isLive || children.contains { $0.isLive } }
     var anyBusy: Bool { isBusy || children.contains { $0.isBusy } }
     var effectiveLastModified: Date { children.reduce(lastModified) { max($0, $1.lastModified) } }
+
+    func resumeCommand(executablePath: String? = nil) -> String? {
+        guard UUID(uuidString: threadID) != nil else { return nil }
+        let executable: String
+        switch kind {
+        case .claude:
+            executable = executablePath ?? "claude"
+            return "\(Self.shellQuote(executable)) --resume \(Self.shellQuote(threadID))"
+        case .codex:
+            executable = executablePath ?? "codex"
+            return "\(Self.shellQuote(executable)) resume \(Self.shellQuote(threadID))"
+        }
+    }
+
+    var recoveryContext: String {
+        let location = workingDirectory.map { "\nWorking directory: \($0)" } ?? ""
+        let lastPrompt = prompt.isEmpty ? "(not available)" : prompt
+        let lastReply = snippet.isEmpty ? "(not available)" : snippet
+        return """
+        Recovered \(kind.rawValue) session
+        Session ID: \(threadID.isEmpty ? id : threadID)
+        Model: \(model.isEmpty ? "unknown" : model)\(location)
+        Last user message: \(lastPrompt)
+        Last reply: \(lastReply)
+        Transcript: \(id)
+        """
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
 }
 
 // MARK: - Process discovery
@@ -43,7 +76,12 @@ final class ProcessDiscovery {
     // open jsonl for it — open-vibe-island falls back to the process cwd (and
     // claims by tty so a terminal maps to one session). Codex holds its
     // rollout file open, so the path route always works there.
-    struct Snapshot { let kind: AgentKind; let transcriptPath: String?; let cwd: String? }
+    struct Snapshot {
+        let kind: AgentKind
+        let processID: pid_t
+        let transcriptPath: String?
+        let cwd: String?
+    }
 
     // open-vibe-island uses 0.5s/0.2s here, but Process-spawn overhead under
     // heavy load (a codex swarm compiling) blows through 0.2s and every agent
@@ -79,11 +117,15 @@ final class ProcessDiscovery {
                 guard path != nil || cwd != nil else { continue }
                 // claim key: sessionID ?? tty ?? cwd — one session per terminal
                 guard claimed.insert("claude:\(path ?? tty)").inserted else { continue }
-                out.append(Snapshot(kind: kind, transcriptPath: path, cwd: cwd))
+                out.append(Snapshot(
+                    kind: kind, processID: pid_t(pid) ?? 0,
+                    transcriptPath: path, cwd: cwd))
             case .codex:
                 guard let path = bestCodexTranscript(in: lsof),
                       claimed.insert("codex:\(path)").inserted else { continue }
-                out.append(Snapshot(kind: kind, transcriptPath: path, cwd: cwd))
+                out.append(Snapshot(
+                    kind: kind, processID: pid_t(pid) ?? 0,
+                    transcriptPath: path, cwd: cwd))
             }
         }
         return out
@@ -197,8 +239,34 @@ final class SessionScanner {
     /// Together they are the sole source of truth for isRunning.
     func scan(live: Set<String>, claudeCwdCounts: [String: Int]) -> [AgentSession] {
         let recent: (AgentSession) -> Bool = { $0.isLive || Date().timeIntervalSince($0.lastModified) < 6 * 3600 }
-        var sessions = scanClaude(live: live, cwdCounts: claudeCwdCounts).filter(recent)
-            + groupCodex(scanCodex(live: live).filter(recent))
+        var sessions = scanClaude(
+            live: live, cwdCounts: claudeCwdCounts,
+            liveByPath: [:], cwdProcesses: [:]).filter(recent)
+            + groupCodex(scanCodex(live: live, liveByPath: [:]).filter(recent))
+        sessions.sort { $0.effectiveLastModified > $1.effectiveLastModified }
+        return sessions
+    }
+
+    func scan(liveProcesses: [ProcessDiscovery.Snapshot]) -> [AgentSession] {
+        var liveByPath: [String: ProcessDiscovery.Snapshot] = [:]
+        var cwdProcesses: [String: [ProcessDiscovery.Snapshot]] = [:]
+        for process in liveProcesses {
+            if let path = process.transcriptPath {
+                liveByPath[path] = process
+            } else if process.kind == .claude, let cwd = process.cwd {
+                let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+                cwdProcesses[encoded, default: []].append(process)
+            }
+        }
+        let counts = cwdProcesses.mapValues(\.count)
+        let recent: (AgentSession) -> Bool = {
+            $0.isLive || Date().timeIntervalSince($0.lastModified) < 6 * 3600
+        }
+        var sessions = scanClaude(
+            live: Set(liveByPath.keys), cwdCounts: counts,
+            liveByPath: liveByPath, cwdProcesses: cwdProcesses).filter(recent)
+            + groupCodex(scanCodex(
+                live: Set(liveByPath.keys), liveByPath: liveByPath).filter(recent))
         sessions.sort { $0.effectiveLastModified > $1.effectiveLastModified }
         return sessions
     }
@@ -225,8 +293,18 @@ final class SessionScanner {
             // its most recently opened rollout fd — so liveness observed on
             // any member means the shared process is alive for all of them.
             if parent.isLive || kids.contains(where: { $0.isLive }) {
+                let sharedProcessID = parent.processID
+                    ?? kids.first(where: { $0.processID != nil })?.processID
+                let sharedDirectory = parent.workingDirectory
+                    ?? kids.first(where: { $0.workingDirectory != nil })?.workingDirectory
                 parent.isLive = true
-                for i in kids.indices { kids[i].isLive = true }
+                parent.processID = sharedProcessID
+                parent.workingDirectory = sharedDirectory
+                for i in kids.indices {
+                    kids[i].isLive = true
+                    kids[i].processID = sharedProcessID
+                    kids[i].workingDirectory = sharedDirectory
+                }
             }
             parent.children = kids
             out.append(parent)
@@ -234,7 +312,11 @@ final class SessionScanner {
         return out
     }
 
-    private func scanClaude(live: Set<String>, cwdCounts: [String: Int]) -> [AgentSession] {
+    private func scanClaude(
+        live: Set<String>, cwdCounts: [String: Int],
+        liveByPath: [String: ProcessDiscovery.Snapshot],
+        cwdProcesses: [String: [ProcessDiscovery.Snapshot]]
+    ) -> [AgentSession] {
         var out: [AgentSession] = []
         let root = home.appendingPathComponent(".claude/projects")
         guard let projects = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return out }
@@ -252,19 +334,38 @@ final class SessionScanner {
             for (idx, (f, mtime)) in dated.enumerated() {
                 let projName = proj.lastPathComponent.split(separator: "-").last.map(String.init) ?? proj.lastPathComponent
                 let info = tailInfo(of: f)
+                let context = claudeContext(of: f)
                 var sess = AgentSession(id: f.path, kind: .claude, title: projName,
                                         snippet: info.snippet, model: info.model, lastModified: mtime)
                 sess.prompt = info.prompt
                 sess.lastActivity = info.activity
                 sess.isLive = live.contains(f.path) || idx < liveByCwd
+                sess.threadID = context.sessionID
+                    ?? f.deletingPathExtension().lastPathComponent
+                let cwdCandidates = cwdProcesses[proj.lastPathComponent] ?? []
+                // Claude normally closes its transcript. A single process in
+                // the cwd can be paired safely; two processes in the same cwd
+                // cannot be assigned to two transcript files from ordering
+                // alone, so keep them live but deliberately ownership-unknown.
+                let cwdProcess = cwdCandidates.count == 1 && idx == 0
+                    ? cwdCandidates[0] : nil
+                let process = liveByPath[f.path] ?? cwdProcess
+                sess.processID = process?.processID
+                sess.workingDirectory = process?.cwd ?? context.cwd
                 sess.children = claudeSubagents(sessionFile: f, parentLive: sess.isLive)
+                for i in sess.children.indices {
+                    sess.children[i].processID = sess.processID
+                    sess.children[i].workingDirectory = sess.workingDirectory
+                }
                 out.append(sess)
             }
         }
         return out
     }
 
-    private func scanCodex(live: Set<String>) -> [AgentSession] {
+    private func scanCodex(
+        live: Set<String>, liveByPath: [String: ProcessDiscovery.Snapshot]
+    ) -> [AgentSession] {
         var out: [AgentSession] = []
         let root = home.appendingPathComponent(".codex/sessions")
         guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { return out }
@@ -277,10 +378,13 @@ final class SessionScanner {
             var sess = AgentSession(id: f.path, kind: .codex, title: meta.title,
                                     snippet: info.snippet, model: info.model, lastModified: mtime)
             sess.prompt = info.prompt
+            sess.lastActivity = info.activity
             sess.isLive = live.contains(f.path)
             sess.threadID = meta.id
             sess.parentID = meta.parentID
             sess.nickname = meta.nickname
+            sess.workingDirectory = liveByPath[f.path]?.cwd ?? meta.cwd
+            sess.processID = liveByPath[f.path]?.processID
             out.append(sess)
         }
         return out
@@ -308,18 +412,44 @@ final class SessionScanner {
         return kids.sorted { $0.lastModified > $1.lastModified }
     }
 
-    private func codexMeta(of file: URL) -> (title: String, id: String, parentID: String?, nickname: String?) {
-        guard let fh = try? FileHandle(forReadingFrom: file) else { return ("Codex", file.path, nil, nil) }
+    private func codexMeta(
+        of file: URL
+    ) -> (title: String, id: String, parentID: String?, nickname: String?, cwd: String?) {
+        guard let fh = try? FileHandle(forReadingFrom: file) else {
+            return ("Codex", file.path, nil, nil, nil)
+        }
         defer { try? fh.close() }
         let head = fh.readData(ofLength: 262_144)
         guard let line = String(data: head, encoding: .utf8)?.split(separator: "\n").first,
               let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-              let payload = obj["payload"] as? [String: Any] else { return ("Codex", file.path, nil, nil) }
-        let title = ((payload["cwd"] as? String).map { ($0 as NSString).lastPathComponent }) ?? "Codex"
+              let payload = obj["payload"] as? [String: Any] else {
+            return ("Codex", file.path, nil, nil, nil)
+        }
+        let cwd = payload["cwd"] as? String
+        let title = cwd.map { ($0 as NSString).lastPathComponent } ?? "Codex"
         let id = (payload["id"] as? String) ?? file.path
         let parentID = payload["parent_thread_id"] as? String
         let nickname = (((payload["source"] as? [String: Any])?["subagent"] as? [String: Any])?["thread_spawn"] as? [String: Any])?["agent_nickname"] as? String
-        return (title, id, parentID, nickname)
+        return (title, id, parentID, nickname, cwd)
+    }
+
+    private func claudeContext(of file: URL) -> (sessionID: String?, cwd: String?) {
+        guard let fh = try? FileHandle(forReadingFrom: file) else { return (nil, nil) }
+        defer { try? fh.close() }
+        let head = fh.readData(ofLength: 262_144)
+        guard let text = String(data: head, encoding: .utf8) else { return (nil, nil) }
+        var sessionID: String?
+        var cwd: String?
+        for line in text.split(separator: "\n").prefix(80) {
+            guard let object = try? JSONSerialization.jsonObject(
+                with: Data(line.utf8)) as? [String: Any] else { continue }
+            sessionID = sessionID
+                ?? object["sessionId"] as? String
+                ?? object["session_id"] as? String
+            cwd = cwd ?? object["cwd"] as? String
+            if sessionID != nil, cwd != nil { break }
+        }
+        return (sessionID, cwd)
     }
 
     private static let isoParser: ISO8601DateFormatter = {
@@ -351,8 +481,12 @@ final class SessionScanner {
                 if prompt.isEmpty, let p = extractUserPrompt(obj) { prompt = p }
                 // "system" entries (away_summary, compaction notes…) are
                 // housekeeping, not activity
-                if activity == nil, let ty = obj["type"] as? String,
-                   ty == "user" || ty == "assistant",
+                let topLevelType = obj["type"] as? String
+                let payloadType = (obj["payload"] as? [String: Any])?["type"] as? String
+                let conversational = topLevelType == "user" || topLevelType == "assistant"
+                    || payloadType == "user_message" || payloadType == "agent_message"
+                    || payloadType == "message"
+                if activity == nil, conversational,
                    let ts = obj["timestamp"] as? String {
                     activity = Self.isoParser.date(from: ts)
                 }
@@ -417,6 +551,26 @@ final class SessionScanner {
 }
 
 // MARK: - Dither theme views
+
+struct NotchAppearance {
+    var fontName: String?
+    var fontSize: CGFloat = 13
+    var pet: String?
+
+    func font(size: CGFloat, bold: Bool) -> NSFont {
+        let scale = min(max(fontSize / 13, 0.85), 1.25)
+        let pointSize = size * scale
+        if let fontName, let configured = NSFont(name: fontName, size: pointSize) {
+            guard bold else { return configured }
+            return NSFontManager.shared.convert(
+                configured, toHaveTrait: .boldFontMask)
+        }
+        return NSFont.systemFont(
+            ofSize: pointSize, weight: bold ? .semibold : .regular)
+    }
+}
+
+enum SessionOpenMode { case automatic, resume, chat }
 
 /// Row icon: mini mascot / Codex pet while running, green pixel checkmark when done.
 final class DitherIconView: NSView {
@@ -498,11 +652,14 @@ final class DitherSeparator: NSView {
 
 final class SessionListController: NSViewController {
     var sessions: [AgentSession] = [] { didSet { rebuild() } }
+    var notchAppearance = NotchAppearance() { didSet { rebuild() } }
     var onLayoutChange: (() -> Void)?
+    var onOpenSession: ((AgentSession, SessionOpenMode) -> Void)?
     private let stack = NSStackView()
     private var icons: [DitherIconView] = []
     private var animTimer: Timer?
     private var expandedIDs = Set<String>()
+    private var sessionsByID: [String: AgentSession] = [:]
 
     override func loadView() {
         let v = NSView()
@@ -524,6 +681,7 @@ final class SessionListController: NSViewController {
     private func rebuild() {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         icons.removeAll()
+        sessionsByID.removeAll()
         if sessions.isEmpty {
             stack.addArrangedSubview(label("No recent agent sessions", size: 12, color: .secondaryLabelColor, bold: false))
             return
@@ -535,13 +693,14 @@ final class SessionListController: NSViewController {
                 stack.addArrangedSubview(sep)
                 sep.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
             }
-            stack.addArrangedSubview(row(for: s))
+            sessionsByID[s.id] = s
+            stack.addArrangedSubview(interactive(row(for: s), session: s))
             if !s.children.isEmpty {
                 let open = expandedIDs.contains(s.id)
                 let btn = NSButton(title: "\(open ? "▾" : "▸") \(s.children.count) subagent\(s.children.count == 1 ? "" : "s")",
                                    target: self, action: #selector(toggleChildren(_:)))
                 btn.isBordered = false
-                btn.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold)
+                btn.font = notchAppearance.font(size: 10, bold: true)
                 btn.contentTintColor = .systemBlue
                 btn.identifier = NSUserInterfaceItemIdentifier(s.id)
                 let wrap = NSStackView(views: [btn])
@@ -549,7 +708,9 @@ final class SessionListController: NSViewController {
                 stack.addArrangedSubview(wrap)
                 if open {
                     for child in s.children.prefix(8) {
-                        stack.addArrangedSubview(childRow(for: child))
+                        sessionsByID[child.id] = child
+                        stack.addArrangedSubview(interactive(
+                            childRow(for: child), session: child))
                     }
                 }
             }
@@ -567,6 +728,66 @@ final class SessionListController: NSViewController {
         if expandedIDs.contains(id) { expandedIDs.remove(id) } else { expandedIDs.insert(id) }
         rebuild()
         onLayoutChange?()
+    }
+
+    private func interactive(_ row: NSView, session: AgentSession) -> NSView {
+        row.identifier = NSUserInterfaceItemIdentifier(session.id)
+        row.toolTip = session.isLive
+            ? "Open the terminal running this session"
+            : "Resume this session in Infinitty"
+        let click = NSClickGestureRecognizer(
+            target: self, action: #selector(openClickedSession(_:)))
+        click.buttonMask = 0x1
+        row.addGestureRecognizer(click)
+        let context = NSClickGestureRecognizer(
+            target: self, action: #selector(showSessionMenu(_:)))
+        context.buttonMask = 0x2
+        row.addGestureRecognizer(context)
+        row.addCursorRect(row.bounds, cursor: .pointingHand)
+        return row
+    }
+
+    @objc private func openClickedSession(_ gesture: NSClickGestureRecognizer) {
+        guard gesture.state == .ended,
+              let id = gesture.view?.identifier?.rawValue,
+              let session = sessionsByID[id] else { return }
+        let mode: SessionOpenMode = NSEvent.modifierFlags.contains(.option)
+            ? .chat : .automatic
+        onOpenSession?(session, mode)
+    }
+
+    @objc private func showSessionMenu(_ gesture: NSClickGestureRecognizer) {
+        guard gesture.state == .ended,
+              let view = gesture.view,
+              let id = view.identifier?.rawValue,
+              let session = sessionsByID[id] else { return }
+        let menu = NSMenu()
+        let openTitle = session.isLive ? "Jump to Running Session" : "Resume in Terminal"
+        let open = menu.addItem(
+            withTitle: openTitle, action: #selector(openSessionMenuItem(_:)),
+            keyEquivalent: "")
+        open.target = self
+        open.representedObject = id
+        let chat = menu.addItem(
+            withTitle: "Continue in Built-In Chat",
+            action: #selector(chatSessionMenuItem(_:)), keyEquivalent: "")
+        chat.target = self
+        chat.representedObject = id
+        menu.popUp(positioning: nil, at: gesture.location(in: view), in: view)
+    }
+
+    @objc private func openSessionMenuItem(_ sender: NSMenuItem) {
+        openSession(sender, mode: .automatic)
+    }
+
+    @objc private func chatSessionMenuItem(_ sender: NSMenuItem) {
+        openSession(sender, mode: .chat)
+    }
+
+    private func openSession(_ sender: NSMenuItem, mode: SessionOpenMode) {
+        guard let id = sender.representedObject as? String,
+              let session = sessionsByID[id] else { return }
+        onOpenSession?(session, mode)
     }
 
     private func childRow(for s: AgentSession) -> NSView {
@@ -641,7 +862,7 @@ final class SessionListController: NSViewController {
 
     private func label(_ text: String, size: CGFloat, color: NSColor, bold: Bool) -> NSTextField {
         let l = NSTextField(labelWithString: text)
-        l.font = NSFont.monospacedSystemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        l.font = notchAppearance.font(size: size, bold: bold)
         l.textColor = color
         l.lineBreakMode = .byTruncatingTail
         // Truncate rather than force the window wider than its frame
@@ -660,13 +881,26 @@ final class SessionListController: NSViewController {
 // MARK: - Notch window content
 
 /// Indicator content: branded pixel animations for whichever agents are running.
-enum AgentGlyphState { case inactive, running, done }
+enum AgentGlyphState: Equatable { case inactive, idle, running, done }
+
+enum NotchSessionState {
+    static func resolve(
+        live: Bool, busy: Bool, wasLive: Bool, current: AgentGlyphState
+    ) -> AgentGlyphState {
+        if busy { return .running }
+        if live { return .idle }
+        if wasLive { return .done }
+        return current
+    }
+}
 
 final class IndicatorView: NSView {
     var claudeState: AgentGlyphState = .inactive { didSet { needsDisplay = true } }
     var codexState: AgentGlyphState = .inactive { didSet { needsDisplay = true } }
     var activityText: String? { didSet { needsDisplay = true } }
     var activityColor: NSColor = .systemGray { didSet { needsDisplay = true } }
+    var notchAppearance = NotchAppearance() { didSet { needsDisplay = true } }
+    var notchWidth: CGFloat = 180 { didSet { needsDisplay = true } }
     var t: CGFloat = 0 { didSet { needsDisplay = true } }
 
     static let claudeOrange = NSColor(red: 0.85, green: 0.47, blue: 0.34, alpha: 1)  // Anthropic coral
@@ -701,17 +935,23 @@ final class IndicatorView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let cy = bounds.midY
+        let leftSlotWidth = activityText == nil
+            ? NotchLayout.collapsedIndicatorWidth
+            : NotchLayout.activityIndicatorWidth
+        let notchLeft = bounds.minX + leftSlotWidth
+        let notchRight = notchLeft + notchWidth
         if let activityText, !activityText.isEmpty {
             let statusRect = NSRect(
                 x: bounds.minX + 2, y: bounds.minY + 3,
-                width: max(0, bounds.width - 70), height: max(0, bounds.height - 6))
+                width: max(0, notchLeft - bounds.minX - 44),
+                height: max(0, bounds.height - 6))
             let background = NSBezierPath(roundedRect: statusRect, xRadius: 8, yRadius: 8)
             NSColor.black.withAlphaComponent(0.92).setFill()
             background.fill()
             activityColor.setFill()
             NSBezierPath(ovalIn: NSRect(x: statusRect.minX + 9, y: cy - 3, width: 6, height: 6)).fill()
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+                .font: notchAppearance.font(size: 11, bold: true),
                 .foregroundColor: NSColor.white,
             ]
             let text = NSAttributedString(string: activityText, attributes: attributes)
@@ -719,17 +959,25 @@ final class IndicatorView: NSView {
                 x: statusRect.minX + 22, y: cy - 8,
                 width: max(0, statusRect.width - 28), height: 16))
         }
-        var x = bounds.maxX - 6  // right-aligned toward the notch
-        // each agent keeps its own slot: mascot while running, green blob when
-        // freshly done (cleared once you revisit the terminal)
+        let claudeRight = notchLeft - 8
+        let codexLeft = notchRight + 8
+        // Claude owns the slot left of the centered notch; the configured pet
+        // owns the slot on its right. Both stay visible but dim while live and
+        // quiet, so a running session can never collapse into a blank bar.
         switch claudeState {
-        case .running: x = drawCrab(ctx, right: x, cy: cy) - 6
-        case .done: drawGreenBlob(ctx, right: x, cy: cy); x -= 24
+        case .idle: _ = drawCrab(
+            ctx, right: claudeRight, cy: cy, animated: false, alpha: 0.42)
+        case .running: _ = drawCrab(
+            ctx, right: claudeRight, cy: cy, animated: true, alpha: 1)
+        case .done: drawGreenBlob(ctx, right: claudeRight, cy: cy)
         case .inactive: break
         }
         switch codexState {
-        case .running: _ = drawCodexPet(ctx, right: x, cy: cy)
-        case .done: drawGreenBlob(ctx, right: x, cy: cy)
+        case .idle: _ = drawCodexPet(
+            ctx, left: codexLeft, cy: cy, animated: false, alpha: 0.42)
+        case .running: _ = drawCodexPet(
+            ctx, left: codexLeft, cy: cy, animated: true, alpha: 1)
+        case .done: drawGreenBlob(ctx, right: codexLeft + 18, cy: cy)
         case .inactive: break
         }
     }
@@ -754,10 +1002,13 @@ final class IndicatorView: NSView {
     }
 
     /// Returns the left edge of what was drawn.
-    private func drawCrab(_ ctx: CGContext, right: CGFloat, cy: CGFloat) -> CGFloat {
+    private func drawCrab(
+        _ ctx: CGContext, right: CGFloat, cy: CGFloat,
+        animated: Bool, alpha baseAlpha: CGFloat
+    ) -> CGFloat {
         // terminal cells are ~2x taller than wide — keep that aspect or he squishes
         let subW: CGFloat = 1.6, subH: CGFloat = 3.2
-        let walk = Int(t * 2.5)
+        let walk = animated ? Int(t * 2.5) : 0
         let frame = Self.mascotFrames[walk % 2]
         let cols = frame[0].count * 2, rows = frame.count * 2
         let x0 = right - CGFloat(cols) * subW
@@ -773,7 +1024,7 @@ final class IndicatorView: NSView {
                     let r = n - n.rounded(.down)
                     // feet stay solid; body shimmers gently
                     let isFeet = j == frame.count - 1
-                    let alpha = isFeet ? 1.0 : 0.8 + 0.2 * r
+                    let alpha = (isFeet ? 1.0 : 0.8 + 0.2 * r) * baseAlpha
                     ctx.setFillColor(Self.claudeOrange.withAlphaComponent(alpha).cgColor)
                     ctx.fill(CGRect(x: x0 + CGFloat(i * 2 + qx) * subW,
                                     y: y0 - CGFloat(j * 2 + qy + 1) * subH,
@@ -784,52 +1035,60 @@ final class IndicatorView: NSView {
         return x0
     }
 
-    // Official Codex pet spritesheets (8 cols x 9 rows, 192x208 frames);
-    // row 1 is the "running-right" animation, 8 frames @ 120 ms.
-    // The pet is chosen by ~/.config/agent-notch/pet (codex, dewey, fireball,
-    // rocky, seedy, stacky, bsod, null-signal).
-    static var currentPetID = "codex"
+    // The activity indicator uses Infinitty's configured terminal pet. Sheets
+    // use the same 8-column × 9-row layout as the terminal renderer.
+    static var currentPetID: String?
     private static var spriteCache: [String: NSImage] = [:]
     static var codexSprite: NSImage? {
+        guard let currentPetID, !currentPetID.isEmpty else { return nil }
         if let img = spriteCache[currentPetID] { return img }
-        let resource = "pet-\(currentPetID)"
-        let url = Bundle.module.url(forResource: resource, withExtension: "webp", subdirectory: "NotchPets")
+        let configuredURL = Pet.resolveImagePath(currentPetID).map {
+            URL(fileURLWithPath: $0)
+        }
+        let resource = "pet-\(currentPetID.lowercased())"
+        let url = configuredURL
+            ?? Bundle.module.url(
+                forResource: resource, withExtension: "webp",
+                subdirectory: "NotchPets")
             ?? Bundle.module.url(forResource: resource, withExtension: "webp")
         guard let url, let img = NSImage(contentsOf: url) else { return nil }
         spriteCache[currentPetID] = img
         return img
     }
-    static func refreshPetChoice() {
-        let cfg = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/agent-notch/pet")
-        if let id = try? String(contentsOf: cfg, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty {
-            currentPetID = id
-        }
+    static func configurePet(_ name: String?) {
+        currentPetID = name
     }
 
-    private func drawCodexPet(_ ctx: CGContext, right: CGFloat, cy: CGFloat) -> CGFloat {
+    private func drawCodexPet(
+        _ ctx: CGContext, left: CGFloat, cy: CGFloat,
+        animated: Bool, alpha: CGFloat
+    ) -> CGFloat {
         guard let sprite = Self.codexSprite else {
-            return drawRing(ctx, right: right, cy: cy, color: Self.codexTeal)
+            return drawRing(
+                ctx, right: left + 22.5, cy: cy,
+                color: Self.codexTeal, animated: animated, baseAlpha: alpha)
         }
         let fw: CGFloat = 192, fh: CGFloat = 208
-        let idx = Int(t / 0.12) % 8
+        let idx = animated ? Int(t / 0.12) % 8 : 0
         let src = NSRect(x: CGFloat(idx) * fw, y: 1872 - 2 * fh, width: fw, height: fh)
         let h: CGFloat = 26, w = h * fw / fh
-        let dest = NSRect(x: right - w, y: cy - h / 2, width: w, height: h)
+        let dest = NSRect(x: left, y: cy - h / 2, width: w, height: h)
         NSGraphicsContext.current?.imageInterpolation = .none  // keep the pixel art crisp
-        sprite.draw(in: dest, from: src, operation: .sourceOver, fraction: 1)
-        return dest.minX
+        sprite.draw(in: dest, from: src, operation: .sourceOver, fraction: alpha)
+        return dest.maxX
     }
 
     /// Returns the left edge of what was drawn.
-    private func drawRing(_ ctx: CGContext, right: CGFloat, cy: CGFloat, color: NSColor) -> CGFloat {
+    private func drawRing(
+        _ ctx: CGContext, right: CGFloat, cy: CGFloat, color: NSColor,
+        animated: Bool, baseAlpha: CGFloat
+    ) -> CGFloat {
         let cell: CGFloat = 2.5, grid = 9
         let x0 = right - CGFloat(grid) * cell
         let y0 = cy - CGFloat(grid) * cell / 2
         let c = CGFloat(grid) / 2
-        let phase = t * 1.4
-        let step = Int(t * 3)
+        let phase = animated ? t * 1.4 : 0
+        let step = animated ? Int(t * 3) : 0
         for i in 0..<grid {
             for j in 0..<grid {
                 let dx = CGFloat(i) + 0.5 - c
@@ -843,7 +1102,7 @@ final class IndicatorView: NSView {
                 let r = n - n.rounded(.down)
                 let a = intensity * intensity * (0.55 + 0.45 * r)
                 guard a > 0.08 else { continue }
-                ctx.setFillColor(color.withAlphaComponent(a).cgColor)
+                ctx.setFillColor(color.withAlphaComponent(a * baseAlpha).cgColor)
                 ctx.fill(CGRect(x: x0 + CGFloat(i) * cell, y: y0 + CGFloat(j) * cell,
                                 width: cell - 0.5, height: cell - 0.5))
             }
@@ -855,13 +1114,17 @@ final class IndicatorView: NSView {
 final class NotchView: NSView {
     var expanded = false { didSet { needsDisplay = true } }
     var barHeight: CGFloat = 32
+    var notchWidth: CGFloat = 180
+    var simulatesNotch = false
     var onCollapse: (() -> Void)?
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) { }
     override func mouseUp(with event: NSEvent) { onCollapse?() }
     override func rightMouseUp(with event: NSEvent) {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Quit Agent Notch", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(
+            title: "Quit Infinitty", action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"))
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
@@ -882,6 +1145,24 @@ final class NotchView: NSView {
             path.fill()
             return  // no spinner while the panel is open
         }
+        guard simulatesNotch else { return }
+        let r: CGFloat = min(12, barHeight / 2)
+        let path = NSBezierPath()
+        let left = b.midX - notchWidth / 2
+        let right = b.midX + notchWidth / 2
+        path.move(to: NSPoint(x: left, y: b.maxY))
+        path.line(to: NSPoint(x: left, y: b.minY + r))
+        path.appendArc(
+            withCenter: NSPoint(x: left + r, y: b.minY + r), radius: r,
+            startAngle: 180, endAngle: 270, clockwise: false)
+        path.line(to: NSPoint(x: right - r, y: b.minY))
+        path.appendArc(
+            withCenter: NSPoint(x: right - r, y: b.minY + r), radius: r,
+            startAngle: 270, endAngle: 0, clockwise: false)
+        path.line(to: NSPoint(x: right, y: b.maxY))
+        path.close()
+        NSColor.black.setFill()
+        path.fill()
     }
 }
 
@@ -892,19 +1173,23 @@ struct NotchLayout {
     static let activityIndicatorWidth: CGFloat = 260
 
     static func indicatorFrame(
-        rightEdge: CGFloat,
+        centerX: CGFloat,
+        notchWidth: CGFloat,
         screenTop: CGFloat,
         barHeight: CGFloat,
         showsActivity: Bool
     ) -> NSRect {
-        let width = showsActivity ? activityIndicatorWidth : collapsedIndicatorWidth
-        return NSRect(x: rightEdge - width, y: screenTop - barHeight, width: width, height: barHeight)
+        let leftWidth = showsActivity ? activityIndicatorWidth : collapsedIndicatorWidth
+        let rightWidth = collapsedIndicatorWidth
+        return NSRect(
+            x: centerX - notchWidth / 2 - leftWidth,
+            y: screenTop - barHeight,
+            width: leftWidth + notchWidth + rightWidth,
+            height: barHeight)
     }
 }
 
-/// The standalone Agent Notch app, embedded as one runtime per selected
-/// display. The process discovery, transcript scanner, pixel-art views,
-/// grouped session panel, and animations above are kept from Agent Notch.
+/// One centered session-notch runtime per selected display.
 private final class NotchRuntime: NSObject {
     private var window: NSWindow!
     private var indicatorWindow: NSWindow!
@@ -912,10 +1197,11 @@ private final class NotchRuntime: NSObject {
     private let indicatorView = IndicatorView()
     private let scanner = SessionScanner()
     private let discovery = ProcessDiscovery()
-    private let scanQueue = DispatchQueue(label: "agent-notch.scan", qos: .utility)
+    private let scanQueue = DispatchQueue(label: "infinitty.session-notch.scan", qos: .utility)
     // open-vibe-island removal rule: a transcript's process must be missing
     // for 2 consecutive polls (~6 s) before its session stops being live
     private var missCounts: [String: Int] = [:]
+    private var processesByKey: [String: ProcessDiscovery.Snapshot] = [:]
     private let listController = SessionListController()
     private var frame = 0
     private var claudeWasLive = false
@@ -929,9 +1215,16 @@ private final class NotchRuntime: NSObject {
     private var localMouseMonitor: Any?
     private var workspaceObserver: NSObjectProtocol?
     private var isShown = false
+    private let appearance: NotchAppearance
+    private let onOpenSession: (AgentSession, SessionOpenMode) -> Void
 
-    init(screen: NSScreen) {
+    init(
+        screen: NSScreen, appearance: NotchAppearance,
+        onOpenSession: @escaping (AgentSession, SessionOpenMode) -> Void
+    ) {
         self.screen = screen
+        self.appearance = appearance
+        self.onOpenSession = onOpenSession
         super.init()
     }
 
@@ -963,13 +1256,6 @@ private final class NotchRuntime: NSObject {
         return NSRect(x: s.minX, y: s.maxY - barHeight, width: s.width, height: barHeight)
     }
 
-    /// Fixed spot just left of the notch.
-    private var indicatorScreenX: CGFloat {
-        let s = screen
-        var notchLeftX = s.frame.midX - 90
-        if #available(macOS 12.0, *), let left = s.auxiliaryTopLeftArea { notchLeftX = left.maxX }
-        return notchLeftX - 36
-    }
     private func expandedFrame() -> NSRect {
         let s = screen.frame
         let w = max(expandedSize.width, notchWidth + sidePad * 2)
@@ -993,6 +1279,8 @@ private final class NotchRuntime: NSObject {
         window.contentView = notchView
         notchView.wantsLayer = true
         notchView.barHeight = barHeight
+        notchView.notchWidth = notchWidth
+        notchView.simulatesNotch = screen.safeAreaInsets.top <= 0
 
         // Indicator window: tiny, always interactive, never steals focus
         indicatorWindow = NSPanel(contentRect: indicatorScreenRect,
@@ -1004,6 +1292,15 @@ private final class NotchRuntime: NSObject {
         indicatorWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         indicatorWindow.ignoresMouseEvents = true  // visual only — clicks are caught by the global monitor
         indicatorWindow.contentView = indicatorView
+        indicatorView.notchWidth = notchWidth
+        indicatorView.notchAppearance = appearance
+        IndicatorView.configurePet(appearance.pet)
+        listController.notchAppearance = appearance
+        listController.onOpenSession = { [weak self] session, mode in
+            guard let self else { return }
+            self.setExpanded(false)
+            self.onOpenSession(session, mode)
+        }
 
         listController.onLayoutChange = { [weak self] in
             guard let self, self.isShown, self.expanded else { return }
@@ -1086,7 +1383,8 @@ private final class NotchRuntime: NSObject {
     /// Screen rect of the indicator — the only collapsed region that should catch clicks
     private var indicatorScreenRect: NSRect {
         NotchLayout.indicatorFrame(
-            rightEdge: indicatorScreenX + 36,
+            centerX: screen.frame.midX,
+            notchWidth: notchWidth,
             screenTop: screen.frame.maxY,
             barHeight: barHeight,
             showsActivity: indicatorView.activityText != nil)
@@ -1177,30 +1475,31 @@ private final class NotchRuntime: NSObject {
             var seen = Set<String>()
             var cwdIndex: [String: Int] = [:]
             for snap in self.discovery.liveTranscripts() {
+                let key: String
                 if let path = snap.transcriptPath {
-                    seen.insert(path)
+                    key = path
                 } else if snap.kind == .claude, let cwd = snap.cwd {
                     let encoded = cwd.replacingOccurrences(of: "/", with: "-")
                     let i = cwdIndex[encoded, default: 0]
                     cwdIndex[encoded] = i + 1
-                    seen.insert("cwd#\(encoded)#\(i)")
-                }
+                    key = "cwd#\(encoded)#\(i)"
+                } else { continue }
+                seen.insert(key)
+                self.processesByKey[key] = snap
             }
             for p in seen { self.missCounts[p] = 0 }
             for (p, n) in self.missCounts where !seen.contains(p) {
-                if n + 1 >= 2 { self.missCounts.removeValue(forKey: p) } else { self.missCounts[p] = n + 1 }
-            }
-            var live = Set<String>()
-            var cwdCounts: [String: Int] = [:]
-            for key in self.missCounts.keys {
-                if key.hasPrefix("cwd#") {
-                    let encoded = String(key.dropFirst(4).split(separator: "#")[0])
-                    cwdCounts[encoded, default: 0] += 1
+                if n + 1 >= 2 {
+                    self.missCounts.removeValue(forKey: p)
+                    self.processesByKey.removeValue(forKey: p)
                 } else {
-                    live.insert(key)
+                    self.missCounts[p] = n + 1
                 }
             }
-            let result = self.scanner.scan(live: live, claudeCwdCounts: cwdCounts)
+            let liveProcesses = self.missCounts.keys.compactMap {
+                self.processesByKey[$0]
+            }
+            let result = self.scanner.scan(liveProcesses: liveProcesses)
             DispatchQueue.main.async {
                 guard self.isShown else { return }
                 // Track fullscreen-space changes: full-width bar when the menu bar is hidden
@@ -1212,20 +1511,19 @@ private final class NotchRuntime: NSObject {
                     let r = self.indicatorScreenRect
                     if self.indicatorWindow.frame != r { self.indicatorWindow.setFrame(r, display: true) }
                 }
-                IndicatorView.refreshPetChoice()
                 self.listController.sessions = result
-                // busy → mascot; alive-but-quiet → nothing (idle, not done);
+                // busy → animation; alive-but-quiet → dim static indicator;
                 // process exited → done blob (cleared on terminal focus)
                 let claudeLive = result.contains { $0.kind == .claude && $0.anyLive }
                 let claudeBusy = result.contains { $0.kind == .claude && $0.anyBusy }
                 let codexLive = result.contains { $0.kind == .codex && $0.anyLive }
                 let codexBusy = result.contains { $0.kind == .codex && $0.anyBusy }
-                self.claudeState = claudeBusy ? .running
-                    : claudeLive ? .inactive
-                    : (self.claudeWasLive ? .done : self.claudeState)
-                self.codexState = codexBusy ? .running
-                    : codexLive ? .inactive
-                    : (self.codexWasLive ? .done : self.codexState)
+                self.claudeState = NotchSessionState.resolve(
+                    live: claudeLive, busy: claudeBusy,
+                    wasLive: self.claudeWasLive, current: self.claudeState)
+                self.codexState = NotchSessionState.resolve(
+                    live: codexLive, busy: codexBusy,
+                    wasLive: self.codexWasLive, current: self.codexState)
                 self.claudeWasLive = claudeLive
                 self.codexWasLive = codexLive
                 self.render()
@@ -1291,14 +1589,19 @@ struct NotchActivityPresentation: Equatable {
     }
 }
 
-/// Infinitty lifecycle adapter around the original Agent Notch implementation.
-/// The existing OSC 133 and app-socket activity APIs remain visible in the
-/// collapsed indicator while Agent Notch independently discovers and groups
-/// Claude Code and Codex sessions for its animated indicator and panel.
+/// Infinitty lifecycle adapter for centered session activity and recovery.
 final class NotchActivityController {
     private var runtimes: [NotchRuntime] = []
     private var hideTimer: Timer?
     private var activity: NotchActivityPresentation?
+    private var appearance = NotchAppearance()
+    var onOpenSession: ((AgentSession, SessionOpenMode) -> Void)?
+
+    func configure(fontName: String?, fontSize: CGFloat, pet: String?) {
+        appearance = NotchAppearance(
+            fontName: fontName, fontSize: fontSize, pet: pet)
+        IndicatorView.configurePet(pet)
+    }
 
     /// display: builtin | external | primary | all
     func show(display: String) {
@@ -1322,7 +1625,11 @@ final class NotchActivityController {
         }
 
         runtimes = targets.map { screen in
-            let runtime = NotchRuntime(screen: screen)
+            let runtime = NotchRuntime(
+                screen: screen, appearance: appearance,
+                onOpenSession: { [weak self] session, mode in
+                    self?.onOpenSession?(session, mode)
+                })
             runtime.show()
             if let activity { apply(activity, to: runtime) }
             return runtime

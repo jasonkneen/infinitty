@@ -43,6 +43,12 @@ final class TerminalView: NSView {
         paneOutline.isSelected = selected
     }
 
+    func setPaneAccent(_ color: NSColor) {
+        paneOutline.accentColor = color
+    }
+
+    var paneAccentColorForTesting: NSColor { paneOutline.accentColor }
+
     private var scrollAccumulator: CGFloat = 0
     private var mouseScrollAccumulator: CGFloat = 0
     private var lastMouseCell: (Int, Int) = (-1, -1)

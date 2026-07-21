@@ -274,7 +274,7 @@ Font to use one everywhere.
 - **⌘-click a .md path** opens it via `markdown-command` (default `glow -p`)
 - **Agent glow**: a pulsing inner border while an agent drives the pane over
   the control socket (disable with `agent-glow = false`)
-- **Agent Notch placement**: `notch-display = builtin | external | primary | all`
+- **Session notch placement**: `notch-display = builtin | external | primary | all`
 
 ### Settings, window chrome, pets
 
@@ -288,9 +288,13 @@ Font to use one everywhere.
   changes expression as the terminal works, waits, succeeds, or fails. Set
   `pet = none` to hide it, or `pet = r2d2` to use an installed
   `~/.codex/pets` spritesheet instead
-- **Agent Notch**: `notch = true` shows animated Claude Code and Codex agents
-  beside the MacBook notch. Click the indicator for recent sessions grouped
-  with their subagents, prompts, runtime model names, and live/done state.
+- **Session notch**: `notch = true` shows Claude Code to the left and the
+  configured Infinitty pet to the right of a centered notch. Notchless external
+  screens receive the same simulated center geometry. Click the indicator for
+  recent sessions grouped with their subagents, prompts, runtime model names,
+  and live/idle/done state; click a session to jump to its terminal or resume it,
+  Option-click to continue it in the built-in Chat pane, or right-click for all
+  recovery choices.
   Infinitty's running command, exit status (OSC 133), and `infinitty_activity`
   socket/MCP messages continue to appear in the same indicator.
 

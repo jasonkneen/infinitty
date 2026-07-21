@@ -173,6 +173,47 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
     }
 
+    func testRecoveredSessionImportsTurnsAndPrefixesFirstRequest() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("infinitty-chat-recovery-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let lines: [[String: Any]] = [
+            ["type": "user", "message": ["content": "fix the split"]],
+            ["type": "assistant", "message": ["content": "I found the layout issue."]],
+            ["type": "system", "message": ["content": "housekeeping"]],
+        ]
+        let data = try lines.map {
+            String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self)
+        }.joined(separator: "\n").data(using: .utf8)!
+        try data.write(to: url)
+
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude, modelID: nil,
+            displayName: "Claude", symbolName: "a.circle")
+        var requests: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, claude],
+            requestRunner: { request, _, _, _ in requests.append(request) })
+        let panel = assistant.makeSidebarPanelView()
+
+        assistant.prepareRecovery(
+            context: "Session ID: 019f7bb9-0f19-7200-8b30-70fcea423ab5",
+            provider: .claude, transcriptPath: url.path)
+        XCTAssertTrue(panel.transcriptForTesting.contains("fix the split"))
+        XCTAssertTrue(panel.transcriptForTesting.contains("I found the layout issue."))
+        XCTAssertFalse(panel.transcriptForTesting.contains("housekeeping"))
+        XCTAssertEqual(panel.modelValueForTesting, "Claude")
+
+        panel.submitForTesting("carry on")
+        let sent = try XCTUnwrap(requests.first)
+        XCTAssertTrue(sent.contains("recovered session context"))
+        XCTAssertTrue(sent.contains("Session ID:"))
+        XCTAssertTrue(sent.contains("fix the split"))
+        XCTAssertTrue(sent.contains("I found the layout issue."))
+        XCTAssertTrue(sent.contains("carry on"))
+        XCTAssertTrue(panel.transcriptForTesting.hasSuffix("YOU\ncarry on"))
+    }
+
     func testNewChatDropsQueuedTurnsAndIgnoresStaleCompletion() {
         var started: [String] = []
         var completions: [PetAssistant.AskCompletion] = []

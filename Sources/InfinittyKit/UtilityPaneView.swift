@@ -141,6 +141,12 @@ final class UtilityPaneView: NSView {
         paneOutline.isSelected = selected
     }
 
+    func setPaneAccent(_ color: NSColor) {
+        paneOutline.accentColor = color
+    }
+
+    var paneAccentColorForTesting: NSColor { paneOutline.accentColor }
+
     func updateSurface(background: NSColor, blurred: Bool) {
         // The standard window owns one edge-to-edge themed surface. Utility
         // content stays clear so pane interiors and gutters cannot

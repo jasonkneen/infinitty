@@ -991,6 +991,10 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         ])
     }
 
+    func focusChatInput() {
+        chatPanel?.focusInput()
+    }
+
     private func reRootDebounced(_ path: String) {
         pendingReRoot?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.reRoot(path) }

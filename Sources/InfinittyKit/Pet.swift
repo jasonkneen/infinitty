@@ -70,7 +70,7 @@ enum Pet {
         return texture
     }
 
-    private static func resolveImagePath(_ nameOrPath: String) -> String? {
+    static func resolveImagePath(_ nameOrPath: String) -> String? {
         let fm = FileManager.default
         let expanded = NSString(string: nameOrPath).expandingTildeInPath
 

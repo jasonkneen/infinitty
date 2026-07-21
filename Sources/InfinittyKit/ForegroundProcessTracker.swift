@@ -136,6 +136,31 @@ public final class ForegroundProcessTracker {
         probeForeground(of: shellPid)
     }
 
+    static func parentProcessID(of pid: pid_t) -> pid_t? {
+        guard pid > 1 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let count = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
+        guard count == size, info.pbi_ppid > 0 else { return nil }
+        return pid_t(info.pbi_ppid)
+    }
+
+    /// True when `pid` is the shell itself or one of its descendants. This is
+    /// the ownership test used when a detected AI session is clicked.
+    static func isProcess(_ pid: pid_t, ownedByShell shellPID: pid_t) -> Bool {
+        guard pid > 1, shellPID > 1 else { return false }
+        var current = pid
+        var visited = Set<pid_t>()
+        for _ in 0..<32 {
+            if current == shellPID { return true }
+            guard visited.insert(current).inserted,
+                  let parent = parentProcessID(of: current), parent > 1
+            else { return false }
+            current = parent
+        }
+        return false
+    }
+
     /// The sessions with a real process in the foreground right now (fresh
     /// probe, not the 2s poll): an idle shell at a prompt doesn't count.
     static func runningProcesses(

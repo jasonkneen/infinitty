@@ -335,6 +335,9 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
     var selectionPillAlphaForTesting: CGFloat {
         selectionPill.layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.alphaComponent ?? 0
     }
+    var selectionPillColorForTesting: NSColor? {
+        selectionPill.layer?.backgroundColor.flatMap(NSColor.init(cgColor:))
+    }
 
     /// Pin metadata for a tab: a compact SF-symbol icon + accent color shown
     /// instead of the title. Pinned tabs render first, icon-only, fixed width.
@@ -344,6 +347,9 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
     }
     /// Pin state keyed by tab index (from the last update()).
     private var pins: [Int: Pin] = [:]
+    /// Per-tab accent remains active whether the tab is pinned compactly or
+    /// shown at its normal full width.
+    private var tints: [Int: NSColor] = [:]
     /// Right-click a tab to pin/unpin or restyle.
     var onContextMenu: ((Int, NSButton) -> Void)?
 
@@ -351,6 +357,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
     func update(
         titles: [String], selectedIndex: Int,
         pins: [Int: Pin] = [:], icons: [Int: NSImage] = [:],
+        tints: [Int: NSColor] = [:],
         animateFromIndex: Int? = nil
     ) {
         // Palette actions are positional. Never leave one open across a tab
@@ -365,6 +372,10 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
             && !tabButtons.isEmpty
         self.selectedIndex = selectedIndex
         self.pins = pins
+        self.tints = tints
+        let selectedTint = tints[selectedIndex] ?? CodePalette.paneFocusAccent
+        selectionPill.layer?.backgroundColor = selectedTint.withAlphaComponent(0.24).cgColor
+        selectionPill.layer?.borderColor = selectedTint.withAlphaComponent(0.48).cgColor
         if titles.count != self.titles.count {
             // Structure changed mid-rename: positional target is now ambiguous.
             if renameEditor != nil { finishRename(committing: false) }
@@ -377,8 +388,8 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
             let pin = pins[index]
             if let pin {
                 button.title = ""
-                tabIconViews[index].image = NSImage(
-                    systemSymbolName: pin.icon, accessibilityDescription: title)
+                tabIconViews[index].image = icons[index] ?? NSImage(
+                    systemSymbolName: "terminal", accessibilityDescription: title)
                 tabIconViews[index].contentTintColor = .white
                 tabTitleLabels[index].isHidden = true
                 button.contentTintColor = .white

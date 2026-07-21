@@ -558,6 +558,15 @@ final class PetAssistantPanelView: NSView {
         return false
     }
 
+    @discardableResult
+    func selectProvider(_ kind: PetAssistant.AgentChoice.Kind) -> Bool {
+        guard let item = modelPicker.menu?.items.first(where: {
+            ($0.representedObject as? PetAssistant.AgentChoice)?.kind == kind
+        }) else { return false }
+        modelPicker.select(item)
+        return true
+    }
+
     /// Agent/self-control: select reasoning effort by name (auto/low/medium/high).
     @discardableResult
     func selectEffort(named name: String) -> Bool {
@@ -963,6 +972,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private var pendingRequests: [PendingRequest] = []
     private var requestInFlight = false
     private var conversationGeneration = 0
+    private var recoveryContext: String?
     private weak var sidebarPanel: PetAssistantPanelView?
     /// AI provider choices available in the composer's MODEL picker,
     /// gated by which CLIs/models this Mac actually has.
@@ -1050,11 +1060,38 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         sidebarMessages.removeAll()
         lastFiles.removeAll()
         lastQuery = nil
+        recoveryContext = nil
         setPanelsThinking(false)
         updatePanels()
     }
 
     func startNewChat() { resetConversation() }
+
+    func prepareRecovery(
+        context: String, provider: AgentChoice.Kind, transcriptPath: String? = nil
+    ) {
+        resetConversation()
+        var imported: [AssistantChatMessage] = []
+        if let transcriptPath {
+            imported = Self.recentConversation(at: transcriptPath)
+            sidebarMessages = imported
+        }
+        let importedContext = imported.map {
+            "\($0.role): \($0.text)"
+        }.joined(separator: "\n\n")
+        recoveryContext = importedContext.isEmpty
+            ? context
+            : context + "\n--- recent recovered turns ---\n" + importedContext
+        if sidebarMessages.isEmpty {
+            sidebarMessages = [AssistantChatMessage(
+                role: "Assistant",
+                text: "Session context recovered. Continue below when you're ready.")]
+        }
+        for panel in [sidebarPanel, popoverPanel].compactMap({ $0 }) {
+            _ = panel.selectProvider(provider)
+        }
+        updatePanels()
+    }
 
     private func updatePanels() {
         for panel in [sidebarPanel, popoverPanel].compactMap({ $0 }) {
@@ -1091,6 +1128,18 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
 
         let request = pendingRequests.removeFirst()
+        let backendRequest: String
+        if let recoveryContext {
+            backendRequest = """
+            --- recovered session context ---
+            \(recoveryContext)
+            --- new user request ---
+            \(request.text)
+            """
+            self.recoveryContext = nil
+        } else {
+            backendRequest = request.text
+        }
         requestInFlight = true
         sidebarMessages.append(AssistantChatMessage(role: "You", text: request.text))
         updatePanels()
@@ -1106,12 +1155,78 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             else { DispatchQueue.main.async(execute: finish) }
         }
         if let requestRunner {
-            requestRunner(request.text, request.model, request.effort, completion)
+            requestRunner(backendRequest, request.model, request.effort, completion)
         } else {
             ask(
-                request.text, model: request.model, effort: request.effort,
+                backendRequest, model: request.model, effort: request.effort,
                 completion: completion)
         }
+    }
+
+    private static func recentConversation(
+        at path: String, limit: Int = 12
+    ) -> [AssistantChatMessage] {
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        else { return [] }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let readLength = min(size, 512 * 1024)
+        try? handle.seek(toOffset: size - readLength)
+        guard let data = try? handle.readToEnd(),
+              let text = String(data: data, encoding: .utf8) else { return [] }
+        var messages: [AssistantChatMessage] = []
+        for line in text.split(separator: "\n").reversed() {
+            guard messages.count < limit,
+                  let object = try? JSONSerialization.jsonObject(
+                      with: Data(line.utf8)) as? [String: Any],
+                  let turn = recoveryTurn(from: object) else { continue }
+            messages.append(AssistantChatMessage(role: turn.role, text: turn.text))
+        }
+        return Array(messages.reversed())
+    }
+
+    private static func recoveryTurn(
+        from object: [String: Any]
+    ) -> (role: String, text: String)? {
+        if let type = object["type"] as? String,
+           type == "user" || type == "assistant",
+           let message = object["message"] as? [String: Any],
+           let text = recoveryText(message["content"]) {
+            return (type == "user" ? "You" : "Assistant", text)
+        }
+        guard let payload = object["payload"] as? [String: Any],
+              let type = payload["type"] as? String else { return nil }
+        if type == "user_message", let text = recoveryText(payload["message"]) {
+            return ("You", text)
+        }
+        if type == "agent_message", let text = recoveryText(payload["message"]) {
+            return ("Assistant", text)
+        }
+        if type == "message", let role = payload["role"] as? String,
+           role == "user" || role == "assistant",
+           let text = recoveryText(payload["content"]) {
+            return (role == "user" ? "You" : "Assistant", text)
+        }
+        return nil
+    }
+
+    private static func recoveryText(_ value: Any?) -> String? {
+        var text: String?
+        if let string = value as? String {
+            text = string
+        } else if let parts = value as? [[String: Any]] {
+            text = parts.compactMap { part in
+                guard part["type"] as? String == "text"
+                    || part["type"] as? String == "input_text"
+                    || part["type"] as? String == "output_text"
+                else { return nil }
+                return part["text"] as? String
+            }.joined(separator: "\n")
+        }
+        guard var cleaned = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !cleaned.isEmpty, !cleaned.hasPrefix("<") else { return nil }
+        if cleaned.count > 4_000 { cleaned = String(cleaned.prefix(4_000)) + "…" }
+        return cleaned
     }
 
     private func completeRequest(

@@ -55,7 +55,8 @@ final class SettingsWindowController: NSWindowController {
     private let petModePopup = NSPopUpButton()
     private let petScaleSlider = NSSlider(value: 0.5, minValue: 0.2, maxValue: 1.2, target: nil, action: nil)
     private let petScaleValue = NSTextField(labelWithString: "")
-    private let notchCheck = NSButton(checkboxWithTitle: "Show Agent Notch", target: nil, action: nil)
+    private let notchCheck = NSButton(
+        checkboxWithTitle: "Show Session Notch", target: nil, action: nil)
     private let notchPopup = NSPopUpButton()
     private let fgWell = NSColorWell()
     private let bgWell = NSColorWell()

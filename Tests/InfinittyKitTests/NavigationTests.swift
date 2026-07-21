@@ -445,12 +445,98 @@ final class NavigationTests: XCTestCase {
         XCTAssertLessThanOrEqual(frames[0].width, 40)
     }
 
+    func testExpandedTabSelectionUsesItsPerTabTint() throws {
+        let strip = TerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 600, height: 34))
+        strip.update(
+            titles: ["infinitty"], selectedIndex: 0,
+            tints: [0: .systemRed])
+        strip.layoutSubtreeIfNeeded()
+
+        let tint = try XCTUnwrap(
+            strip.selectionPillColorForTesting?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(tint.redComponent, tint.blueComponent)
+        XCTAssertEqual(tint.alphaComponent, 0.24, accuracy: 0.01)
+    }
+
+    func testExpandedTabSelectionDefaultsToPaneBlue() throws {
+        let strip = TerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 600, height: 34))
+        strip.update(titles: ["infinitty"], selectedIndex: 0)
+
+        let tint = try XCTUnwrap(
+            strip.selectionPillColorForTesting?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(tint.blueComponent, tint.redComponent)
+        XCTAssertEqual(tint.alphaComponent, 0.24, accuracy: 0.01)
+    }
+
+    func testMainTabContextMenuOffersPinAndTintColorsTogether() {
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        let titles = delegate.tabPinMenuForTesting(for: window).items.map(\.title)
+
+        XCTAssertTrue(titles.contains("Pin Tab"))
+        XCTAssertTrue(titles.contains("Default Blue"))
+        XCTAssertTrue(titles.contains("Red"))
+        XCTAssertTrue(titles.contains("Purple"))
+    }
+
+    func testMainTabUsesAgentBrandAssetsForAgentProcesses() {
+        let delegate = AppDelegate()
+        XCTAssertEqual(
+            delegate.tabIconAssetNameForTesting("Claude Code claude"),
+            "anthropic")
+        XCTAssertEqual(
+            delegate.tabIconAssetNameForTesting("Codex codex"),
+            "openai")
+        XCTAssertNil(delegate.tabIconAssetNameForTesting("zsh"))
+        XCTAssertNotNil(delegate.bundledTabIconForTesting("anthropic"))
+        XCTAssertNotNil(delegate.bundledTabIconForTesting("openai"))
+    }
+
+    func testPaneInsertedAfterTintSelectionInheritsTabTint() throws {
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 500),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        let session = TerminalSession(config: AppConfig(), scale: 2)
+        defer { session.shutdown() }
+        let terminal = session.view
+        terminal.frame = window.contentView!.bounds
+        window.contentView = terminal
+        delegate.setTabTintForTesting(.systemRed, in: window)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+
+        XCTAssertTrue(delegate.insertPaneViewForTesting(
+            chat, relativeTo: terminal, vertical: true))
+        let terminalTint = try XCTUnwrap(
+            terminal.paneAccentColorForTesting.usingColorSpace(.sRGB))
+        let chatTint = try XCTUnwrap(
+            chat.paneAccentColorForTesting.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(terminalTint.redComponent, terminalTint.blueComponent)
+        XCTAssertGreaterThan(chatTint.redComponent, chatTint.blueComponent)
+    }
+
     func testTabStripUsesLiveProcessIconWhenProvided() {
         let strip = TerminalTabStripView(frame: NSRect(x: 0, y: 0, width: 600, height: 36))
         let icon = NSImage(size: NSSize(width: 16, height: 16))
         strip.update(titles: ["shell", "btop"], selectedIndex: 1, icons: [1: icon])
         XCTAssertTrue(strip.tabButtonImagesForTesting[1] === icon)
         XCTAssertNotNil(strip.tabButtonImagesForTesting[0])
+
+        let pin = TerminalTabStripView.Pin(icon: "pin.fill", color: .systemRed)
+        strip.update(
+            titles: ["shell", "btop"], selectedIndex: 0,
+            pins: [0: pin], icons: [0: icon])
+        XCTAssertTrue(strip.tabButtonImagesForTesting[0] === icon)
+
+        strip.update(
+            titles: ["shell", "btop"], selectedIndex: 0,
+            pins: [0: pin])
+        XCTAssertEqual(strip.tabButtonImagesForTesting[0]?.accessibilityDescription, "shell")
     }
 
     func testMainTabUsesWiderShorterRoundedRectWhenSpaceAllows() throws {
@@ -514,7 +600,7 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 24), 24)
     }
 
-    func testHorizontalPaneRowGivesWindowGrowthToTheMiddleTerminal() {
+    func testHorizontalPaneRowPreservesDividerRatiosWhenWindowGrows() {
         let split = PaneSplitView(frame: NSRect(x: 0, y: 0, width: 1_000, height: 500))
         split.isVertical = true
         split.dividerStyle = .thin
@@ -530,38 +616,18 @@ final class NavigationTests: XCTestCase {
         split.setPosition(200, ofDividerAt: 0)
         split.setPosition(799, ofDividerAt: 1)
         let before = [files.frame.width, terminal.frame.width, chat.frame.width]
+        let beforeAvailable = before.reduce(0, +)
 
         split.setFrameSize(NSSize(width: 1_200, height: 500))
         let after = [files.frame.width, terminal.frame.width, chat.frame.width]
+        let afterAvailable = after.reduce(0, +)
 
-        XCTAssertEqual(after[0], before[0], accuracy: 0.5)
-        XCTAssertEqual(after[1], before[1] + 200, accuracy: 0.5)
-        XCTAssertEqual(after[2], before[2], accuracy: 0.5)
-    }
-
-    func testHorizontalPaneRowUsesGeometricMiddleEvenWhenItIsFiles() {
-        let split = PaneSplitView(frame: NSRect(x: 0, y: 0, width: 1_000, height: 500))
-        split.isVertical = true
-        split.dividerStyle = .thin
-        let terminal = TerminalView(frame: .zero)
-        let files = UtilityPaneView(
-            kind: .files, contentView: NSView(), background: .black)
-        let chat = UtilityPaneView(
-            kind: .chat, contentView: NSView(), background: .black)
-        split.addArrangedSubview(terminal)
-        split.addArrangedSubview(files)
-        split.addArrangedSubview(chat)
-        split.adjustSubviews()
-        split.setPosition(200, ofDividerAt: 0)
-        split.setPosition(799, ofDividerAt: 1)
-        let before = [terminal.frame.width, files.frame.width, chat.frame.width]
-
-        split.setFrameSize(NSSize(width: 1_200, height: 500))
-        let after = [terminal.frame.width, files.frame.width, chat.frame.width]
-
-        XCTAssertEqual(after[0], before[0], accuracy: 0.5)
-        XCTAssertEqual(after[1], before[1] + 200, accuracy: 0.5)
-        XCTAssertEqual(after[2], before[2], accuracy: 0.5)
+        for index in before.indices {
+            XCTAssertEqual(
+                after[index] / afterAvailable,
+                before[index] / beforeAvailable,
+                accuracy: 0.002)
+        }
     }
 
     func testMaximizedPaneResizeKeepsVisiblePaneInsideSplitBounds() {
@@ -589,6 +655,26 @@ final class NavigationTests: XCTestCase {
         }
     }
 
+    func testZoomDividerSnapshotRestoresRatioAfterResize() throws {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
+        let split = PaneSplitView(frame: host.bounds)
+        split.isVertical = true
+        host.addSubview(split)
+        split.addArrangedSubview(TerminalView(frame: .zero))
+        split.addArrangedSubview(TerminalView(frame: .zero))
+        split.adjustSubviews()
+        split.setPosition(150, ofDividerAt: 0)
+        let snapshot = PaneLayoutController.captureDividerRatios(in: host)
+
+        split.setFrameSize(NSSize(width: 1_000, height: 300))
+        split.setPosition(900, ofDividerAt: 0)
+        PaneLayoutController.restoreDividerRatios(snapshot)
+
+        let divider = try XCTUnwrap(
+            PaneLayoutController.captureDividerPositions(in: host).first?.positions.first)
+        XCTAssertEqual(divider, 300, accuracy: 1)
+    }
+
     func testEveryPaneUsesSubtleBlueAndFocusBrightensIt() throws {
         let outline = PaneOutlineView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
         let idleFillAlpha = outline.backgroundAlphaForTesting
@@ -606,6 +692,11 @@ final class NavigationTests: XCTestCase {
         XCTAssertGreaterThan(focusedColor.blueComponent, focusedColor.redComponent)
         XCTAssertEqual(outline.layer?.borderWidth, 1.5)
         XCTAssertGreaterThan(outline.backgroundAlphaForTesting, idleFillAlpha)
+
+        outline.accentColor = .systemRed
+        let custom = try XCTUnwrap(
+            outline.accentColorForTesting.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(custom.redComponent, custom.blueComponent)
     }
 
     func testPaneHeaderExposesSplitZoomAndDragAccessibility() {
@@ -846,6 +937,40 @@ final class NavigationTests: XCTestCase {
         try verify(
             source: UtilityPaneView(kind: .files, contentView: NSView(), background: .black),
             target: TerminalView(frame: .zero))
+    }
+
+    func testTwoPaneTopAndBottomDropNeverCollapseRootGeometry() throws {
+        for zone in [PaneDropZone.top, .bottom] {
+            let chrome = TerminalChromeView(
+                frame: NSRect(x: 0, y: 0, width: 800, height: 646))
+            let root = PaneSplitView(frame: chrome.body.bounds)
+            root.isVertical = true
+            root.autoresizingMask = [.width, .height]
+            let terminal = TerminalView(frame: .zero)
+            let utility = UtilityPaneView(
+                kind: zone == .top ? .chat : .files,
+                contentView: NSView(), background: .black)
+            chrome.body.addSubview(root)
+            root.addArrangedSubview(terminal)
+            root.addArrangedSubview(utility)
+            chrome.layoutSubtreeIfNeeded()
+            root.adjustSubviews()
+
+            let result = PaneLayoutController.move(
+                source: utility, target: terminal, zone: zone)
+            let stack = try XCTUnwrap(result.insertedSplit)
+            chrome.layoutSubtreeIfNeeded()
+            stack.setPosition(stack.bounds.height / 2, ofDividerAt: 0)
+            chrome.layoutSubtreeIfNeeded()
+
+            XCTAssertEqual(stack.frame, chrome.body.bounds, "zone=\(zone)")
+            for pane in [terminal, utility] {
+                let frame = pane.convert(pane.bounds, to: chrome.body)
+                XCTAssertGreaterThan(frame.width, 0, "zone=\(zone) frame=\(frame)")
+                XCTAssertGreaterThan(frame.height, 0, "zone=\(zone) frame=\(frame)")
+                XCTAssertTrue(chrome.body.bounds.contains(frame), "zone=\(zone) frame=\(frame)")
+            }
+        }
     }
 
     func testRepeatedNestedPaneMovesPreserveEveryLeafIdentity() {

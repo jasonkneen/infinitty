@@ -59,64 +59,6 @@ enum PaneMetrics {
 /// breaks the window's one continuous tinted surface.
 final class PaneSplitView: NSSplitView {
     override var dividerColor: NSColor { .clear }
-
-    /// Keep edge columns stable as the window width changes. The physical
-    /// middle column absorbs horizontal growth, matching the reference pane
-    /// model; a terminal is only the tie-breaker in a two-column nested row.
-    override func resizeSubviews(withOldSize oldSize: NSSize) {
-        guard isVertical, arrangedSubviews.count > 1, oldSize.width > 0,
-              !arrangedSubviews.contains(where: \.isHidden) else {
-            super.resizeSubviews(withOldSize: oldSize)
-            return
-        }
-        let delta = bounds.width - oldSize.width
-        guard abs(delta) > 0.001,
-              let flexibleIndex = flexibleColumnIndex() else {
-            super.resizeSubviews(withOldSize: oldSize)
-            return
-        }
-        var widths = arrangedSubviews.map(\.frame.width)
-        let flexibleWidth = widths[flexibleIndex] + delta
-        // Once the flexible column reaches a usable minimum, fall back to
-        // AppKit's proportional shrink rather than crushing it to nothing.
-        guard flexibleWidth >= 120 else {
-            super.resizeSubviews(withOldSize: oldSize)
-            return
-        }
-        widths[flexibleIndex] = flexibleWidth
-        var x: CGFloat = 0
-        for (index, view) in arrangedSubviews.enumerated() {
-            view.frame = NSRect(
-                x: x, y: 0, width: max(widths[index], 0), height: bounds.height)
-            x += widths[index]
-            if index < arrangedSubviews.count - 1 { x += dividerThickness }
-        }
-    }
-
-    private func flexibleColumnIndex() -> Int? {
-        let center = CGFloat(arrangedSubviews.count - 1) / 2
-        let visible = arrangedSubviews.indices.filter {
-            !arrangedSubviews[$0].isHiddenOrHasHiddenAncestor
-        }
-        // In a true row the physical middle is flexible regardless of pane
-        // kind. Pane type is only a tie-breaker for two-column nested rows.
-        if visible.count >= 3, visible.count % 2 == 1 {
-            return visible[visible.count / 2]
-        }
-        let terminals = visible.filter { containsTerminal(arrangedSubviews[$0]) }
-        let candidates = terminals.isEmpty ? visible : terminals
-        return candidates.min {
-            abs(CGFloat($0) - center) < abs(CGFloat($1) - center)
-        }
-    }
-
-    private func containsTerminal(_ view: NSView) -> Bool {
-        if view is TerminalView { return true }
-        if let split = view as? NSSplitView {
-            return split.arrangedSubviews.contains(where: containsTerminal)
-        }
-        return view.subviews.contains(where: containsTerminal)
-    }
 }
 
 extension NSView {
@@ -237,6 +179,7 @@ indirect enum PaneLayoutNode: Equatable {
 
 enum PaneLayoutController {
     typealias DividerPositions = [(split: NSSplitView, positions: [CGFloat])]
+    typealias DividerRatios = [(split: NSSplitView, ratios: [CGFloat])]
 
     static func snapshot(of view: NSView) -> PaneLayoutNode? {
         if view is TerminalView || view is UtilityPaneView {
@@ -323,6 +266,28 @@ enum PaneLayoutController {
                 + "source=\(ObjectIdentifier(source)) parent=\(ObjectIdentifier(sourceParent))")
             return (false, nil)
         }
+        // Reorient a two-pane sibling split in place. Building a nested split,
+        // removing the source, then collapsing the old root briefly detaches
+        // the only layout node from TerminalChromeView; AppKit can resolve
+        // that transient tree to a zero-width, double-height stack.
+        if targetParent === sourceSplit, sourceSplit.arrangedSubviews.count == 2 {
+            source.removeFromSuperview()
+            target.removeFromSuperview()
+            sourceSplit.isVertical = zone == .left || zone == .right
+            source.autoresizingMask = []
+            target.autoresizingMask = []
+            if zone == .left || zone == .top {
+                sourceSplit.addArrangedSubview(source)
+                sourceSplit.addArrangedSubview(target)
+            } else {
+                sourceSplit.addArrangedSubview(target)
+                sourceSplit.addArrangedSubview(source)
+            }
+            normalizeArrangedSubviewMasks(around: source)
+            PaneLog.log("reorient two-pane split=\(ObjectIdentifier(sourceSplit)) "
+                + "vertical=\(sourceSplit.isVertical) zone=\(zone)")
+            return (true, sourceSplit)
+        }
         let split = PaneSplitView(frame: target.frame)
         split.isVertical = zone == .left || zone == .right
         split.dividerStyle = .thin
@@ -394,6 +359,39 @@ enum PaneLayoutController {
         where snapshot.split.superview != nil
             && snapshot.split.arrangedSubviews.count == snapshot.positions.count + 1 {
             for (index, position) in snapshot.positions.enumerated() {
+                snapshot.split.setPosition(position, ofDividerAt: index)
+            }
+        }
+    }
+
+    /// Zoom snapshots are ratios rather than pixels so restoring after a
+    /// window resize preserves the layout the user had before maximizing.
+    static func captureDividerRatios(in root: NSView) -> DividerRatios {
+        ratios(for: captureDividerPositions(in: root))
+    }
+
+    static func ratios(for snapshots: DividerPositions) -> DividerRatios {
+        snapshots.map { snapshot in
+            let length = snapshot.split.isVertical
+                ? snapshot.split.bounds.width : snapshot.split.bounds.height
+            let denominator = max(length, 1)
+            return (snapshot.split, snapshot.positions.map { $0 / denominator })
+        }
+    }
+
+    static func positions(
+        for snapshot: (split: NSSplitView, ratios: [CGFloat])
+    ) -> [CGFloat] {
+        let length = snapshot.split.isVertical
+            ? snapshot.split.bounds.width : snapshot.split.bounds.height
+        return snapshot.ratios.map { min(max($0, 0), 1) * length }
+    }
+
+    static func restoreDividerRatios(_ snapshots: DividerRatios) {
+        for snapshot in snapshots where snapshot.split.superview != nil {
+            let values = positions(for: snapshot)
+            guard snapshot.split.arrangedSubviews.count == values.count + 1 else { continue }
+            for (index, position) in values.enumerated() {
                 snapshot.split.setPosition(position, ofDividerAt: index)
             }
         }
@@ -614,6 +612,9 @@ final class PaneDropPreviewView: NSView {
 }
 
 final class PaneOutlineView: NSView {
+    var accentColor = CodePalette.paneFocusAccent {
+        didSet { updateAppearance(animated: window != nil) }
+    }
     var isSelected = false {
         didSet {
             guard oldValue != isSelected else { return }
@@ -635,11 +636,11 @@ final class PaneOutlineView: NSView {
     private func updateAppearance(animated: Bool) {
         let oldBackground = layer?.presentation()?.backgroundColor ?? layer?.backgroundColor
         let oldBorder = layer?.presentation()?.borderColor ?? layer?.borderColor
-        let background = CodePalette.paneFocusAccent.withAlphaComponent(
+        let background = accentColor.withAlphaComponent(
             isSelected ? 0.09 : 0.045).cgColor
         let border = (isSelected
-            ? CodePalette.paneFocusAccent.withAlphaComponent(0.68)
-            : CodePalette.paneFocusAccent.withAlphaComponent(0.30)).cgColor
+            ? accentColor.withAlphaComponent(0.68)
+            : accentColor.withAlphaComponent(0.30)).cgColor
         layer?.backgroundColor = background
         layer?.borderColor = border
         layer?.borderWidth = isSelected ? 1.5 : 1
@@ -660,6 +661,7 @@ final class PaneOutlineView: NSView {
     var backgroundAlphaForTesting: CGFloat {
         layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.alphaComponent ?? 0
     }
+    var accentColorForTesting: NSColor { accentColor }
 }
 
 final class PaneDragBadgeView: NSView {

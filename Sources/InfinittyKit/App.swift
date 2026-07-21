@@ -17,8 +17,8 @@ private struct PaneDragState {
 private struct PaneZoomState {
     let pane: NSView
     let root: NSView
-    let dividerPositions: PaneLayoutController.DividerPositions
-    let maximizedPositions: PaneLayoutController.DividerPositions
+    let dividerRatios: PaneLayoutController.DividerRatios
+    let maximizedRatios: PaneLayoutController.DividerRatios
     let collapsedViews: [NSView]
 }
 
@@ -180,6 +180,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let notch = NotchActivityController()
     private let appControl = AppControlServer()
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
+    private var pendingLaunchCommands: [Int: String] = [:]
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
     private var sidebarToggleAccessories: [ObjectIdentifier: SidebarToggleAccessory] = [:]
@@ -245,6 +246,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         watchConfigFile()
         configureQuickTerminalHotKey()
         if config.mcpAutoRegister { _ = MCPConfiguration.registerIfNeeded() }
+        configureSessionNotch()
         if config.notch { notch.show(display: config.notchDisplay) }
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
             openSettings(nil) // UI testing hook
@@ -471,6 +473,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let command = kind == UInt8(ascii: "C") ? s.terminal.lastCommandLine() : nil
             DispatchQueue.main.async {
                 self.notch.handleMarker(kind: kind, exitCode: exit, commandLine: command)
+                if kind == UInt8(ascii: "A") || kind == UInt8(ascii: "B") {
+                    self.flushPendingLaunchCommand(for: s)
+                }
                 if kind == UInt8(ascii: "C") {
                     s.petAnimator?.commandStarted()
                     s.processTracker?.poke()
@@ -537,8 +542,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func focusPane(for session: TerminalSession) {
         restorePaneZoom(revealing: session.view)
         guard let win = session.view.window else { return }
+        win.tabGroup?.selectedWindow = win
         win.makeFirstResponder(session.view)
         win.makeKeyAndOrderFront(nil)
+    }
+
+    private func focusSession(_ session: TerminalSession) {
+        restorePaneZoom(revealing: session.view)
+        if quickTerminal.contains(session) {
+            _ = quickTerminal.focus(session)
+        } else {
+            focusPane(for: session)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     private func panesInVisualOrder(in win: NSWindow) -> [TerminalSession] {
@@ -826,6 +842,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// Per-window pin metadata (icon + color). Pinned tabs render as compact
     /// colored icon chips. Keyed by window identity like titleOverrides.
     private var tabPins: [ObjectIdentifier: TerminalTabStripView.Pin] = [:]
+    /// Independent per-tab tint. It survives unpinning and drives both the
+    /// full-width active tab and every pane card inside that tab.
+    private var tabTints: [ObjectIdentifier: NSColor] = [:]
 
     /// Tab/window title: custom name if renamed, else the focused pane's
     /// title, plus the pane count when the tab holds more than one shell.
@@ -870,7 +889,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 chrome.showsStrip = true
                 chrome.strip.update(
                     titles: tabs.map { self.tabTitle(for: $0) }, selectedIndex: index,
-                    pins: presentation.pins, icons: presentation.icons)
+                    pins: presentation.pins, icons: presentation.icons,
+                    tints: presentation.tints)
             }
         }
     }
@@ -961,6 +981,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             : []
         let win = s.view.window
         s.shutdown()
+        pendingLaunchCommands.removeValue(forKey: s.id)
         sessions.removeAll { $0 === s }
         petAssistants.removeValue(forKey: s.id)?.detach()
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
@@ -1206,9 +1227,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @discardableResult
-    private func openWindow(cwd: String?) -> TerminalSession {
+    private func openWindow(
+        cwd: String?, launchCommand: String? = nil
+    ) -> TerminalSession {
         let (window, session) = makeTerminalWindow(cwd: cwd)
         window.makeKeyAndOrderFront(nil)
+        if let launchCommand { queueLaunchCommand(launchCommand, for: session) }
         session.launch()
         DispatchQueue.main.async {
             self.refreshPets()
@@ -1222,15 +1246,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// key window, or the first terminal window, and takes focus — unlike
     /// the socket new-tab, which never steals it.
     @discardableResult
-    private func openTab(cwd: String?) -> TerminalSession {
+    private func openTab(
+        cwd: String?, launchCommand: String? = nil
+    ) -> TerminalSession {
         let key = NSApp.keyWindow.flatMap { $0.tabbingIdentifier == "infinitty" ? $0 : nil }
         guard let host = key ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" })
         else {
-            return openWindow(cwd: cwd)
+            return openWindow(cwd: cwd, launchCommand: launchCommand)
         }
         let (window, session) = makeTerminalWindow(cwd: cwd)
         host.addTabbedWindow(window, ordered: .above)
         window.makeKeyAndOrderFront(nil)
+        if let launchCommand { queueLaunchCommand(launchCommand, for: session) }
         session.launch()
         DispatchQueue.main.async {
             self.refreshPets()
@@ -1338,6 +1365,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         _ newView: NSView, relativeTo oldView: NSView,
         vertical: Bool, newFirst: Bool = false
     ) -> Bool {
+        let owningWindow = oldView.window
         let split = PaneSplitView(frame: oldView.frame)
         split.isVertical = vertical
         split.dividerStyle = .thin
@@ -1360,6 +1388,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             split.addArrangedSubview(oldView)
             split.addArrangedSubview(newView)
         }
+        if let owningWindow { applyTabTint(to: owningWindow) }
         DispatchQueue.main.async {
             let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
             split.setPosition(mid, ofDividerAt: 0)
@@ -1391,7 +1420,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let panes = paneLeafViews(in: win)
         guard panes.count > 1, pane !== root else { return }
         root.layoutSubtreeIfNeeded()
-        let dividerPositions = PaneLayoutController.captureDividerPositions(in: root)
+        let dividerRatios = PaneLayoutController.captureDividerRatios(in: root)
         let splitPath = paneSplitPath(from: pane, to: root)
         guard !splitPath.isEmpty else { return }
 
@@ -1420,7 +1449,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
             )
         }
-        PaneLayoutController.restoreDividerPositions(dividerPositions)
+        PaneLayoutController.restoreDividerRatios(dividerRatios)
         root.layoutSubtreeIfNeeded()
 
         let orderedTargets = Array(targets.reversed())
@@ -1431,8 +1460,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         paneZoomStates[key] = PaneZoomState(
-            pane: pane, root: root, dividerPositions: dividerPositions,
-            maximizedPositions: orderedTargets, collapsedViews: collapsedViews)
+            pane: pane, root: root, dividerRatios: dividerRatios,
+            maximizedRatios: PaneLayoutController.ratios(for: orderedTargets),
+            collapsedViews: collapsedViews)
         win.makeFirstResponder(pane)
         let keyframes = orderedTargets.map { split, positions in
             PaneDividerKeyframe(
@@ -1501,24 +1531,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let wasFullyMaximized = state.collapsedViews.contains(where: \.isHidden)
             state.collapsedViews.forEach { $0.isHidden = false }
             if wasFullyMaximized {
-                PaneLayoutController.restoreDividerPositions(state.maximizedPositions)
+                PaneLayoutController.restoreDividerRatios(state.maximizedRatios)
                 state.root.layoutSubtreeIfNeeded()
             }
-            let keyframes: [PaneDividerKeyframe] = state.dividerPositions.compactMap { snapshot in
+            let keyframes: [PaneDividerKeyframe] = state.dividerRatios.compactMap { snapshot in
                 guard snapshot.split.superview != nil,
-                      snapshot.split.arrangedSubviews.count == snapshot.positions.count + 1
+                      snapshot.split.arrangedSubviews.count == snapshot.ratios.count + 1
                 else { return nil }
                 return PaneDividerKeyframe(
                     split: snapshot.split,
                     start: currentDividerPositions(in: snapshot.split),
-                    end: snapshot.positions)
+                    end: PaneLayoutController.positions(for: snapshot))
             }
             animatePaneDividers(key: key, keyframes: keyframes, duration: 0.18) { [weak self] in
                 self?.paneZoomRestoreStates.removeValue(forKey: key)
             }
         } else {
             state.collapsedViews.forEach { $0.isHidden = false }
-            PaneLayoutController.restoreDividerPositions(state.dividerPositions)
+            PaneLayoutController.restoreDividerRatios(state.dividerRatios)
         }
         if refocus, let win = state.pane.window { win.makeFirstResponder(state.pane) }
     }
@@ -1527,7 +1557,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let state = paneZoomRestoreStates.removeValue(forKey: key) else { return }
         paneDividerAnimations.removeValue(forKey: key)?.cancel()
         state.collapsedViews.forEach { $0.isHidden = false }
-        PaneLayoutController.restoreDividerPositions(state.dividerPositions)
+        PaneLayoutController.restoreDividerRatios(state.dividerRatios)
         state.root.layoutSubtreeIfNeeded()
         if refocus, let win = state.pane.window { win.makeFirstResponder(state.pane) }
     }
@@ -1810,6 +1840,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             splitView.addArrangedSubview(old)
             splitView.addArrangedSubview(newSession.view)
         }
+        applyTabTint(to: win)
 
         DispatchQueue.main.async {
             let mid = vertical ? splitView.bounds.width / 2 : splitView.bounds.height / 2
@@ -1899,27 +1930,96 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             chrome.strip.update(
                 titles: titles, selectedIndex: index,
                 pins: presentation.pins, icons: presentation.icons,
+                tints: presentation.tints,
                 animateFromIndex: tabWin === selectedWindow ? previousIndex : nil)
+            applyTabTint(to: tabWin)
         }
     }
 
     private func tabPresentation(
         for tabs: [NSWindow]
-    ) -> (pins: [Int: TerminalTabStripView.Pin], icons: [Int: NSImage]) {
+    ) -> (pins: [Int: TerminalTabStripView.Pin], icons: [Int: NSImage],
+          tints: [Int: NSColor]) {
         var pins: [Int: TerminalTabStripView.Pin] = [:]
         var icons: [Int: NSImage] = [:]
+        var tints: [Int: NSColor] = [:]
         for (index, window) in tabs.enumerated() {
-            if let pin = tabPins[ObjectIdentifier(window)] { pins[index] = pin }
+            let id = ObjectIdentifier(window)
+            if var pin = tabPins[id] {
+                pin.color = tabTints[id] ?? CodePalette.paneFocusAccent
+                pins[index] = pin
+            }
+            if let tint = tabTints[id] { tints[index] = tint }
             let inWindow = activeSessions(in: window)
             let focused = inWindow.first { window.firstResponder === $0.view } ?? inWindow.first
             if let focused,
                let process = focused.processTracker?.current,
-               process.pid != focused.pty.pid,
-               let icon = process.icon() {
+               let icon = tabIcon(for: process, shellPID: focused.pty.pid) {
                 icons[index] = icon
             }
         }
-        return (pins, icons)
+        return (pins, icons, tints)
+    }
+
+    private func tabIcon(
+        for process: ForegroundProcessInfo, shellPID: pid_t
+    ) -> NSImage? {
+        if let asset = tabIconAssetName(forProcessName:
+            "\(process.displayName) \(process.rawName)"),
+           let image = bundledTabIcon(named: asset) {
+            return image
+        }
+        // An idle shell keeps the terminal glyph; foreground CLI/GUI apps use
+        // their executable or bundle icon.
+        return process.pid == shellPID ? nil : process.icon()
+    }
+
+    private func bundledTabIcon(named asset: String) -> NSImage? {
+        guard let url = Bundle.main.url(
+            forResource: asset, withExtension: "svg", subdirectory: "Logos")
+            ?? Bundle.main.url(forResource: asset, withExtension: "svg")
+            ?? Bundle.module.url(
+                forResource: asset, withExtension: "svg", subdirectory: "Logos")
+            ?? Bundle.module.url(forResource: asset, withExtension: "svg"),
+            let data = try? Data(contentsOf: url),
+            let image = NSImage(data: data), image.isValid
+        else { return nil }
+        image.size = NSSize(width: 24, height: 24)
+        return image
+    }
+
+    private func tabIconAssetName(forProcessName name: String) -> String? {
+        let value = name.lowercased()
+        if value.contains("claude") { return "anthropic" }
+        if value.contains("codex") { return "openai" }
+        return nil
+    }
+
+    func tabIconAssetNameForTesting(_ processName: String) -> String? {
+        tabIconAssetName(forProcessName: processName)
+    }
+
+    func bundledTabIconForTesting(_ asset: String) -> NSImage? {
+        bundledTabIcon(named: asset)
+    }
+
+    private func applyTabTint(to win: NSWindow) {
+        let color = tabTints[ObjectIdentifier(win)] ?? CodePalette.paneFocusAccent
+        for pane in paneLeafViews(in: win) {
+            (pane as? TerminalView)?.setPaneAccent(color)
+            (pane as? UtilityPaneView)?.setPaneAccent(color)
+        }
+    }
+
+    func setTabTintForTesting(_ color: NSColor, in window: NSWindow) {
+        tabTints[ObjectIdentifier(window)] = color
+        applyTabTint(to: window)
+    }
+
+    func insertPaneViewForTesting(
+        _ newView: NSView, relativeTo oldView: NSView, vertical: Bool
+    ) -> Bool {
+        insertPaneView(newView, relativeTo: oldView, vertical: vertical)
     }
 
     private func tabTitle(for win: NSWindow) -> String {
@@ -1995,12 +2095,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         chrome.strip.onContextMenu = { [weak self, weak win] index, button in
             guard let self, let win, let tabs = win.tabbedWindows,
                   tabs.indices.contains(index) else { return }
-            self.showTabPinMenu(for: tabs[index], anchor: button, host: win)
+            self.showTabPinMenu(for: tabs[index], anchor: button)
         }
     }
 
     /// Context menu for a tab: pin/unpin and pick a pin color.
-    private func showTabPinMenu(for tabWin: NSWindow, anchor: NSView, host: NSWindow) {
+    private func showTabPinMenu(for tabWin: NSWindow, anchor: NSView) {
+        let menu = makeTabPinMenu(for: tabWin)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+    }
+
+    private func makeTabPinMenu(for tabWin: NSWindow) -> NSMenu {
         let id = ObjectIdentifier(tabWin)
         let menu = NSMenu()
         if tabPins[id] == nil {
@@ -2011,38 +2116,50 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let unpin = menu.addItem(withTitle: "Unpin Tab", action: #selector(unpinTabAction(_:)), keyEquivalent: "")
             unpin.target = self
             unpin.representedObject = tabWin
-            menu.addItem(.separator())
-            let colors: [(String, NSColor)] = [
-                ("Indigo", CodePalette.selectionAccent),
-                ("Red", .systemRed), ("Orange", .systemOrange),
-                ("Green", .systemGreen), ("Blue", .systemBlue),
-                ("Purple", .systemPurple), ("Gray", .systemGray),
-            ]
-            for (name, color) in colors {
-                let item = menu.addItem(withTitle: name, action: #selector(setPinColorAction(_:)), keyEquivalent: "")
-                item.target = self
-                let swatch = NSImage(size: NSSize(width: 12, height: 12))
-                swatch.lockFocus()
-                color.setFill()
-                NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 12, height: 12), xRadius: 3, yRadius: 3).fill()
-                swatch.unlockFocus()
-                item.image = swatch
-                item.representedObject = TabPinColorChoice(window: tabWin, color: color)
-            }
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+        menu.addItem(.separator())
+        let colors: [(String, NSColor?)] = [
+            ("Default Blue", nil),
+            ("Indigo", CodePalette.selectionAccent),
+            ("Red", .systemRed), ("Orange", .systemOrange),
+            ("Green", .systemGreen), ("Blue", .systemBlue),
+            ("Purple", .systemPurple), ("Gray", .systemGray),
+        ]
+        for (name, color) in colors {
+            let item = menu.addItem(
+                withTitle: name, action: #selector(setPinColorAction(_:)), keyEquivalent: "")
+            item.target = self
+            let swatch = NSImage(size: NSSize(width: 12, height: 12))
+            swatch.lockFocus()
+            (color ?? CodePalette.paneFocusAccent).setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: 0, y: 0, width: 12, height: 12),
+                xRadius: 3, yRadius: 3).fill()
+            swatch.unlockFocus()
+            item.image = swatch
+            item.state = color == nil
+                ? (tabTints[id] == nil ? .on : .off)
+                : (color?.isEqual(tabTints[id]) == true ? .on : .off)
+            item.representedObject = TabPinColorChoice(window: tabWin, color: color)
+        }
+        return menu
+    }
+
+    func tabPinMenuForTesting(for window: NSWindow) -> NSMenu {
+        makeTabPinMenu(for: window)
     }
 
     private final class TabPinColorChoice: NSObject {
         let window: NSWindow
-        let color: NSColor
-        init(window: NSWindow, color: NSColor) { self.window = window; self.color = color }
+        let color: NSColor?
+        init(window: NSWindow, color: NSColor?) { self.window = window; self.color = color }
     }
 
     @objc private func pinTabAction(_ sender: NSMenuItem) {
         guard let win = sender.representedObject as? NSWindow else { return }
+        let color = tabTints[ObjectIdentifier(win)] ?? CodePalette.paneFocusAccent
         tabPins[ObjectIdentifier(win)] = TerminalTabStripView.Pin(
-            icon: "pin.fill", color: CodePalette.selectionAccent)
+            icon: "pin.fill", color: color)
         refreshTabStrips(in: win)
     }
 
@@ -2054,8 +2171,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc private func setPinColorAction(_ sender: NSMenuItem) {
         guard let choice = sender.representedObject as? TabPinColorChoice else { return }
-        tabPins[ObjectIdentifier(choice.window)] = TerminalTabStripView.Pin(
-            icon: "pin.fill", color: choice.color)
+        let id = ObjectIdentifier(choice.window)
+        if let color = choice.color {
+            tabTints[id] = color
+        } else {
+            tabTints.removeValue(forKey: id)
+        }
+        if var pin = tabPins[id] {
+            pin.color = choice.color ?? CodePalette.paneFocusAccent
+            tabPins[id] = pin
+        }
         refreshTabStrips(in: choice.window)
     }
 
@@ -2065,8 +2190,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               let tabs = win.tabbedWindows,
               let index = tabs.firstIndex(where: { $0 === win }) else { return }
         chrome.showsStrip = true
+        let presentation = tabPresentation(for: tabs)
         chrome.strip.update(
-            titles: tabs.map { self.tabTitle(for: $0) }, selectedIndex: index)
+            titles: tabs.map { self.tabTitle(for: $0) }, selectedIndex: index,
+            pins: presentation.pins, icons: presentation.icons,
+            tints: presentation.tints)
         _ = chrome.strip.beginRename(at: index, currentName: tabTitle(for: win))
     }
 
@@ -2216,6 +2344,105 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     /// One assistant per session (kept so the popover survives focus changes).
     private var petAssistants: [Int: PetAssistant] = [:]
+
+    private func configureSessionNotch() {
+        notch.configure(
+            fontName: config.fontName, fontSize: config.fontSize, pet: config.pet)
+        notch.onOpenSession = { [weak self] session, mode in
+            self?.openDetectedSession(session, mode: mode)
+        }
+    }
+
+    private func openDetectedSession(
+        _ detected: AgentSession, mode: SessionOpenMode
+    ) {
+        switch mode {
+        case .chat:
+            recoverDetectedSessionInChat(detected)
+        case .resume:
+            if !resumeDetectedSession(detected) {
+                recoverDetectedSessionInChat(detected)
+            }
+        case .automatic:
+            if let processID = detected.processID,
+               let owner = sessions.first(where: {
+                   ForegroundProcessTracker.isProcess(
+                       processID, ownedByShell: $0.pty.pid)
+               }) {
+                focusSession(owner)
+                return
+            }
+            if detected.isLive, let processID = detected.processID,
+               activateHostApplication(for: processID) {
+                return
+            }
+            if !detected.isLive, resumeDetectedSession(detected) { return }
+            recoverDetectedSessionInChat(detected)
+        }
+    }
+
+    private func activateHostApplication(for processID: pid_t) -> Bool {
+        var current = processID
+        var visited = Set<pid_t>()
+        for _ in 0..<32 {
+            guard visited.insert(current).inserted else { break }
+            if let app = NSRunningApplication(processIdentifier: current),
+               app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+               app.activationPolicy == .regular {
+                return app.activate(options: [.activateAllWindows])
+            }
+            guard let parent = ForegroundProcessTracker.parentProcessID(of: current),
+                  parent > 1 else { break }
+            current = parent
+        }
+        return false
+    }
+
+    @discardableResult
+    private func resumeDetectedSession(_ detected: AgentSession) -> Bool {
+        guard !detected.isLive else { return false }
+        let kind: CLIExecutableKind = detected.kind == .claude ? .claude : .codex
+        guard let executable = CLIExecutableResolver.resolve(kind),
+              let command = detected.resumeCommand(executablePath: executable.path)
+        else { return false }
+        _ = openTab(cwd: detected.workingDirectory, launchCommand: command)
+        return true
+    }
+
+    private func queueLaunchCommand(_ command: String, for session: TerminalSession) {
+        pendingLaunchCommands[session.id] = command
+        // OSC 133 A/B normally arrives first. This fallback supports shells
+        // without Infinitty's integration and is cancelled by the first marker.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.flushPendingLaunchCommand(for: session)
+        }
+    }
+
+    private func flushPendingLaunchCommand(for session: TerminalSession) {
+        guard let command = pendingLaunchCommands.removeValue(forKey: session.id) else { return }
+        session.view.showAgentGlow()
+        session.pty.write(Array(command.utf8) + [0x0D])
+    }
+
+    private func recoverDetectedSessionInChat(_ detected: AgentSession) {
+        let source = focusedSession()
+            ?? sessions.first(where: { !$0.view.isHiddenOrHasHiddenAncestor })
+            ?? openTab(cwd: detected.workingDirectory)
+        guard let win = source.view.window else { return }
+        focusSession(source)
+        guard let record = openUtilityPanel(
+            .chat, in: win, relativeTo: source.view, vertical: true)
+        else { return }
+        let assistant = petAssistant(for: source)
+        assistant.prepareRecovery(
+            context: detected.recoveryContext,
+            provider: detected.kind == .claude ? .claude : .codex,
+            transcriptPath: detected.id)
+        record.controller.track(session: source)
+        record.controller.attachAssistant(assistant)
+        record.controller.focusChatInput()
+    }
 
     private func petAssistant(for session: TerminalSession) -> PetAssistant {
         if let existing = petAssistants[session.id] { return existing }
@@ -2384,13 +2611,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "focus":
             guard let (s, _) = paneAndText(arg) else { return "error: focus <id>" }
             _ = onMain {
-                self.restorePaneZoom(revealing: s.view)
-                if self.quickTerminal.contains(s) {
-                    _ = self.quickTerminal.focus(s)
-                } else {
-                    self.focusPane(for: s)
-                    NSApp.activate(ignoringOtherApps: true)
-                }
+                self.focusSession(s)
             }
             return "ok"
         case "close":
@@ -2550,6 +2771,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func reloadConfig() {
         config = AppConfig.load()
         CodePalette.apply(config)
+        configureSessionNotch()
         quickTerminal.applyConfig(config)
         configureQuickTerminalHotKey()
         var windows = Set<NSWindow>()
@@ -2578,6 +2800,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                         blurred: config.backgroundBlur)
                 }
             }
+            applyTabTint(to: win)
+            refreshTabStrips(in: win)
         }
         refreshPets()
         if config.notch { notch.show(display: config.notchDisplay) } else { notch.hide() }
@@ -2643,6 +2867,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Cancel any in-flight tab rename in this window's strip.
         terminalChromes[ObjectIdentifier(win)]?.strip.cancelRename()
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
+        tabPins.removeValue(forKey: ObjectIdentifier(win))
+        tabTints.removeValue(forKey: ObjectIdentifier(win))
         utilityPanels.removeValue(forKey: ObjectIdentifier(win))
         sidebarToggleAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
         terminalChromes.removeValue(forKey: ObjectIdentifier(win))

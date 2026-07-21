@@ -2,6 +2,12 @@ import XCTest
 @testable import InfinittyKit
 
 final class ForegroundProcessTrackerTests: XCTestCase {
+    func testProcessOwnershipWalkIncludesDirectParent() {
+        XCTAssertTrue(ForegroundProcessTracker.isProcess(
+            getpid(), ownedByShell: getppid()))
+        XCTAssertFalse(ForegroundProcessTracker.isProcess(
+            getpid(), ownedByShell: -1))
+    }
     func testShellAtPromptReportsShell() {
         // Run a long-lived shell and confirm the tracker reports the shell
         // itself as the foreground (no children).
