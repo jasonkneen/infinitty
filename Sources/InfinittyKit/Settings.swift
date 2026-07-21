@@ -1,12 +1,26 @@
 import AppKit
 
+enum SettingsMetrics {
+    static let windowWidth: CGFloat = 700
+    static let minimumPanelHeight: CGFloat = 440
+    static let sidebarWidth: CGFloat = 184
+    static let panelWidth: CGFloat = 480
+    static let labelWidth: CGFloat = 126
+    static let controlWidth: CGFloat = 340
+    static let bodyFontSize: CGFloat = 15
+    static let labelFontSize: CGFloat = 14
+    static let sectionFontSize: CGFloat = 16
+    static let sidebarFontSize: CGFloat = 16
+    static let detailFontSize: CGFloat = 13
+}
+
 extension NSBox {
     /// A thin horizontal separator line for settings panels.
     static func separatorLine() -> NSBox {
         let box = NSBox()
         box.boxType = .separator
         box.translatesAutoresizingMaskIntoConstraints = false
-        box.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        box.widthAnchor.constraint(equalToConstant: 600).isActive = true
         return box
     }
 }
@@ -30,8 +44,8 @@ final class SettingsWindowController: NSWindowController {
     private var current: AppConfig
     private let onSave: (AppConfig) -> Void
 
-    private static let labelWidth: CGFloat = 110
-    private static let controlWidth: CGFloat = 300
+    private static let labelWidth = SettingsMetrics.labelWidth
+    private static let controlWidth = SettingsMetrics.controlWidth
 
     private let fontCombo = NSComboBox()
     private let stylePopup = NSPopUpButton()
@@ -70,12 +84,14 @@ final class SettingsWindowController: NSWindowController {
         self.current = config
         self.onSave = onSave
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 620),
+            contentRect: NSRect(
+                x: 0, y: 0, width: SettingsMetrics.windowWidth,
+                height: SettingsMetrics.minimumPanelHeight),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "infinitty Settings"
+        window.title = "Infinitty Settings"
         super.init(window: window)
         buildUI()
         populate()
@@ -90,7 +106,8 @@ final class SettingsWindowController: NSWindowController {
         let l = NSTextField(labelWithString: text)
         l.alignment = .right
         l.textColor = .secondaryLabelColor
-        l.font = .systemFont(ofSize: 12)
+        l.font = .systemFont(
+            ofSize: SettingsMetrics.labelFontSize, weight: .medium)
         l.widthAnchor.constraint(equalToConstant: Self.labelWidth).isActive = true
         return l
     }
@@ -100,7 +117,7 @@ final class SettingsWindowController: NSWindowController {
         control.widthAnchor.constraint(equalToConstant: width).isActive = true
         let stack = NSStackView(views: [label(title), control])
         stack.orientation = .horizontal
-        stack.spacing = 10
+        stack.spacing = 14
         stack.alignment = .firstBaseline
         return stack
     }
@@ -109,47 +126,51 @@ final class SettingsWindowController: NSWindowController {
         _ title: String, _ slider: NSSlider, _ value: NSTextField
     ) -> NSStackView {
         slider.translatesAutoresizingMaskIntoConstraints = false
-        slider.widthAnchor.constraint(equalToConstant: Self.controlWidth - 54).isActive = true
+        slider.widthAnchor.constraint(equalToConstant: Self.controlWidth - 64).isActive = true
+        slider.controlSize = .regular
         slider.target = self
         slider.action = #selector(sliderMoved(_:))
-        value.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        value.font = .monospacedDigitSystemFont(
+            ofSize: SettingsMetrics.detailFontSize, weight: .medium)
         value.textColor = .secondaryLabelColor
         value.alignment = .right
-        value.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        value.widthAnchor.constraint(equalToConstant: 54).isActive = true
         let group = NSStackView(views: [slider, value])
         group.orientation = .horizontal
         group.spacing = 10
         let stack = NSStackView(views: [label(title), group])
         stack.orientation = .horizontal
-        stack.spacing = 10
+        stack.spacing = 14
         stack.alignment = .centerY
         return stack
     }
 
     private func section(_ title: String) -> NSStackView {
         let l = NSTextField(labelWithString: title)
-        l.font = .boldSystemFont(ofSize: 12)
+        l.font = .systemFont(
+            ofSize: SettingsMetrics.sectionFontSize, weight: .semibold)
         let line = NSBox()
         line.boxType = .separator
         line.translatesAutoresizingMaskIntoConstraints = false
         let stack = NSStackView(views: [l, line])
         stack.orientation = .horizontal
-        stack.spacing = 8
+        stack.spacing = 12
         return stack
     }
 
     private func colorRow() -> NSStackView {
         func item(_ name: String, _ well: NSColorWell) -> NSStackView {
             well.translatesAutoresizingMaskIntoConstraints = false
-            well.widthAnchor.constraint(equalToConstant: 44).isActive = true
-            well.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            well.widthAnchor.constraint(equalToConstant: 52).isActive = true
+            well.heightAnchor.constraint(equalToConstant: 30).isActive = true
             let l = NSTextField(labelWithString: name)
-            l.font = .systemFont(ofSize: 10)
+            l.font = .systemFont(
+                ofSize: SettingsMetrics.detailFontSize, weight: .medium)
             l.textColor = .secondaryLabelColor
             l.alignment = .center
             let s = NSStackView(views: [well, l])
             s.orientation = .vertical
-            s.spacing = 3
+            s.spacing = 5
             s.alignment = .centerX
             return s
         }
@@ -159,7 +180,7 @@ final class SettingsWindowController: NSWindowController {
             item("Accent", accentWell),
         ])
         group.orientation = .horizontal
-        group.spacing = 14
+        group.spacing = 18
         return group
     }
 
@@ -171,12 +192,23 @@ final class SettingsWindowController: NSWindowController {
         fontCombo.completes = true
         fontCombo.addItems(withObjectValues: NSFontManager.shared.availableFontFamilies)
         fontCombo.placeholderString = "SF Mono (default)"
+        fontCombo.controlSize = .large
+        fontCombo.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
         fontCombo.target = self
         fontCombo.action = #selector(fontChanged(_:))
 
         lightsPopup.addItems(withTitles: ["circle", "square", "rectangle", "diamond"])
         petModePopup.addItems(withTitles: ["one per window", "every pane"])
         notchPopup.addItems(withTitles: ["builtin", "external", "primary", "all"])
+
+        for popup in [stylePopup, lightsPopup, petPopup, petModePopup, notchPopup] {
+            popup.controlSize = .large
+            popup.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
+        }
+        for check in [blurCheck, glowCheck, hintsCheck, notchCheck] {
+            check.controlSize = .large
+            check.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
+        }
 
         petPopup.addItem(withTitle: "none")
         petPopup.addItem(withTitle: "infinitty")
@@ -192,40 +224,43 @@ final class SettingsWindowController: NSWindowController {
         notchGroup.orientation = .horizontal
         notchGroup.spacing = 10
 
-        hintsWarning.stringValue = "⚠ Disable your shell's autosuggestions (zsh-autosuggestions, fish) to avoid overlapping ghost text. Uses on-device Apple Intelligence by default; set an AI endpoint via Edit Config."
-        hintsWarning.font = .systemFont(ofSize: 10)
-        hintsWarning.textColor = .tertiaryLabelColor
+        hintsWarning.stringValue = "Disable your shell's autosuggestions (zsh-autosuggestions, fish) to avoid overlapping ghost text. Uses on-device Apple Intelligence by default; set an AI endpoint via Edit Config."
+        hintsWarning.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
+        hintsWarning.textColor = .secondaryLabelColor
         hintsWarning.lineBreakMode = .byWordWrapping
         hintsWarning.maximumNumberOfLines = 3
         hintsWarning.preferredMaxLayoutWidth = Self.controlWidth
-        notchPopup.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        notchPopup.widthAnchor.constraint(equalToConstant: 130).isActive = true
 
         let apply = NSButton(title: "Apply", target: self, action: #selector(applyPressed))
         apply.keyEquivalent = "\r"
         apply.bezelStyle = .rounded
+        apply.controlSize = .large
+        apply.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize, weight: .medium)
         let note = NSTextField(wrappingLabelWithString:
             "Changes apply live to every pane and are written to the config file.")
-        note.font = .systemFont(ofSize: 10)
-        note.textColor = .tertiaryLabelColor
+        note.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
+        note.textColor = .secondaryLabelColor
         let footer = NSStackView(views: [note, apply])
         footer.orientation = .horizontal
-        footer.spacing = 16
+        footer.spacing = 22
         footer.alignment = .centerY
 
         // Version, author, links + update check.
         let versionLabel = NSTextField(labelWithString: "infinitty \(Updater.currentVersion ?? "dev build")")
-        versionLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        versionLabel.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize, weight: .medium)
         versionLabel.textColor = .secondaryLabelColor
         let byLabel = NSTextField(labelWithString: "by Jason Kneen")
-        byLabel.font = .systemFont(ofSize: 11)
-        byLabel.textColor = .tertiaryLabelColor
+        byLabel.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
+        byLabel.textColor = .secondaryLabelColor
         func linkButton(_ title: String, _ url: String) -> NSButton {
             let b = NSButton(title: title, target: nil, action: nil)
             b.isBordered = false
             b.contentTintColor = .linkColor
-            b.font = .systemFont(ofSize: 11)
+            b.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
             b.attributedTitle = NSAttributedString(string: title, attributes: [
-                .foregroundColor: NSColor.linkColor, .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.linkColor,
+                .font: NSFont.systemFont(ofSize: SettingsMetrics.detailFontSize),
                 .link: url,
             ])
             b.target = SettingsWindowController.linkOpener
@@ -237,11 +272,13 @@ final class SettingsWindowController: NSWindowController {
         let updateButton = NSButton(title: "Check for Updates…", target: nil,
             action: Selector(("checkForUpdates:")))
         updateButton.bezelStyle = .rounded
-        updateButton.controlSize = .small
+        updateButton.controlSize = .regular
+        updateButton.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
         let editConfigButton = NSButton(title: "Edit Config…", target: self,
             action: #selector(editConfig))
         editConfigButton.bezelStyle = .rounded
-        editConfigButton.controlSize = .small
+        editConfigButton.controlSize = .regular
+        editConfigButton.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
         editConfigButton.toolTip = "Open the config file (fonts, colors, AI endpoint, …) in your editor"
         let versionRow = NSStackView(views: [
             versionLabel, byLabel,
@@ -258,8 +295,8 @@ final class SettingsWindowController: NSWindowController {
             let s = NSStackView(views: rows)
             s.orientation = .vertical
             s.alignment = .leading
-            s.spacing = 12
-            s.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
+            s.spacing = 16
+            s.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
             s.translatesAutoresizingMaskIntoConstraints = false
             for view in rows { s.setVisibilityPriority(.mustHold, for: view) }
             return s
@@ -308,8 +345,8 @@ final class SettingsWindowController: NSWindowController {
         let sidebar = NSStackView()
         sidebar.orientation = .vertical
         sidebar.alignment = .leading
-        sidebar.spacing = 2
-        sidebar.edgeInsets = NSEdgeInsets(top: 14, left: 8, bottom: 14, right: 8)
+        sidebar.spacing = 4
+        sidebar.edgeInsets = NSEdgeInsets(top: 18, left: 10, bottom: 18, right: 10)
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebarButtons = names.enumerated().map { index, name in
             let button = NSButton(title: "  \(name)", target: self, action: #selector(sidebarPicked(_:)))
@@ -320,11 +357,16 @@ final class SettingsWindowController: NSWindowController {
             button.isBordered = false
             button.bezelStyle = .inline
             button.wantsLayer = true
-            button.layer?.cornerRadius = 6
+            button.layer?.cornerRadius = 9
+            button.font = .systemFont(
+                ofSize: SettingsMetrics.sidebarFontSize, weight: .medium)
+            button.symbolConfiguration = NSImage.SymbolConfiguration(
+                pointSize: 17, weight: .regular)
             button.contentTintColor = .labelColor
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.widthAnchor.constraint(equalToConstant: 150).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+            button.widthAnchor.constraint(
+                equalToConstant: SettingsMetrics.sidebarWidth).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 42).isActive = true
             sidebar.addArrangedSubview(button)
             return button
         }
@@ -346,8 +388,8 @@ final class SettingsWindowController: NSWindowController {
         let root = NSStackView(views: [bodyRow, NSBox.separatorLine(), footer])
         root.orientation = .vertical
         root.alignment = .centerX
-        root.spacing = 12
-        root.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 14, right: 0)
+        root.spacing = 16
+        root.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 18, right: 0)
         root.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -357,7 +399,7 @@ final class SettingsWindowController: NSWindowController {
             root.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             root.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            panelHost.widthAnchor.constraint(equalToConstant: 340),
+            panelHost.widthAnchor.constraint(equalToConstant: SettingsMetrics.panelWidth),
             panelHost.topAnchor.constraint(equalTo: bodyRow.topAnchor),
         ])
         window?.contentView = content
@@ -388,8 +430,9 @@ final class SettingsWindowController: NSWindowController {
             view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
         ])
         window?.layoutIfNeeded()
-        let target = max(view.fittingSize.height + 90, 340)
-        window?.setContentSize(NSSize(width: 560, height: target))
+        let target = max(
+            view.fittingSize.height + 112, SettingsMetrics.minimumPanelHeight)
+        window?.setContentSize(NSSize(width: SettingsMetrics.windowWidth, height: target))
     }
 
     // MARK: populate & actions
@@ -509,4 +552,17 @@ final class SettingsWindowController: NSWindowController {
         current = c
         onSave(c)
     }
+
+    var contentSizeForTesting: NSSize {
+        window?.contentView?.bounds.size ?? .zero
+    }
+    var sidebarFontSizesForTesting: [CGFloat] {
+        sidebarButtons.compactMap { $0.font?.pointSize }
+    }
+    var sidebarRowHeightsForTesting: [CGFloat] {
+        window?.layoutIfNeeded()
+        return sidebarButtons.map { $0.frame.height }
+    }
+    var fontControlSizeForTesting: NSControl.ControlSize { fontCombo.controlSize }
+    var fontControlPointSizeForTesting: CGFloat { fontCombo.font?.pointSize ?? 0 }
 }

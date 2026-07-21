@@ -84,9 +84,18 @@ final class NotchTests: XCTestCase {
 
     func testConfiguredNotchTypographyUsesMainFontFamily() {
         let font = NotchAppearance(
-            fontName: "Helvetica", fontSize: 13, pet: "infinitty")
+            fontName: "Helvetica", fontStyle: nil,
+            fontSize: 13, pet: "infinitty")
             .font(size: 11, bold: false)
         XCTAssertTrue(font.familyName?.contains("Helvetica") == true)
+    }
+
+    func testConfiguredNotchTypographyUsesConfiguredFaceStyle() throws {
+        let font = NotchAppearance(
+            fontName: "Berkeley Mono", fontStyle: "ExtraLight",
+            fontSize: 14, pet: "infinitty")
+            .font(size: 11, bold: false)
+        XCTAssertEqual(font.fontName, "BerkeleyMono-ExtraLight")
     }
 
     func testScannerGroupsCodexSubagentAndKeepsRuntimeModelIdentifier() throws {

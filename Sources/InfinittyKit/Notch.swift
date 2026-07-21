@@ -554,18 +554,21 @@ final class SessionScanner {
 
 struct NotchAppearance {
     var fontName: String?
+    var fontStyle: String?
     var fontSize: CGFloat = 13
     var pet: String?
 
     func font(size: CGFloat, bold: Bool) -> NSFont {
         let scale = min(max(fontSize / 13, 0.85), 1.25)
         let pointSize = size * scale
-        if let fontName, let configured = NSFont(name: fontName, size: pointSize) {
+        if let fontName,
+           let configured = GlyphAtlas.resolveFace(
+               family: fontName, style: fontStyle, size: pointSize) {
             guard bold else { return configured }
             return NSFontManager.shared.convert(
                 configured, toHaveTrait: .boldFontMask)
         }
-        return NSFont.systemFont(
+        return NSFont.monospacedSystemFont(
             ofSize: pointSize, weight: bold ? .semibold : .regular)
     }
 }
@@ -1597,9 +1600,12 @@ final class NotchActivityController {
     private var appearance = NotchAppearance()
     var onOpenSession: ((AgentSession, SessionOpenMode) -> Void)?
 
-    func configure(fontName: String?, fontSize: CGFloat, pet: String?) {
+    func configure(
+        fontName: String?, fontStyle: String?, fontSize: CGFloat, pet: String?
+    ) {
         appearance = NotchAppearance(
-            fontName: fontName, fontSize: fontSize, pet: pet)
+            fontName: fontName, fontStyle: fontStyle,
+            fontSize: fontSize, pet: pet)
         IndicatorView.configurePet(pet)
     }
 

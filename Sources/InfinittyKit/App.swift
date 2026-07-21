@@ -2347,7 +2347,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func configureSessionNotch() {
         notch.configure(
-            fontName: config.fontName, fontSize: config.fontSize, pet: config.pet)
+            fontName: config.fontName, fontStyle: config.fontStyle,
+            fontSize: config.fontSize, pet: config.pet)
         notch.onOpenSession = { [weak self] session, mode in
             self?.openDetectedSession(session, mode: mode)
         }

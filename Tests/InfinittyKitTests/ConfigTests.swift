@@ -75,4 +75,15 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(serialized.contains("traffic-lights = diamond"))
     }
 
+    func testSettingsUseReadableLargeControlTypography() {
+        let controller = SettingsWindowController(config: AppConfig()) { _ in }
+
+        XCTAssertGreaterThanOrEqual(controller.contentSizeForTesting.width, 700)
+        XCTAssertGreaterThanOrEqual(controller.contentSizeForTesting.height, 440)
+        XCTAssertTrue(controller.sidebarFontSizesForTesting.allSatisfy { $0 >= 16 })
+        XCTAssertTrue(controller.sidebarRowHeightsForTesting.allSatisfy { $0 >= 42 })
+        XCTAssertEqual(controller.fontControlSizeForTesting, .large)
+        XCTAssertGreaterThanOrEqual(controller.fontControlPointSizeForTesting, 15)
+    }
+
 }
