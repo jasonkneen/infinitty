@@ -3,6 +3,21 @@ import XCTest
 @testable import InfinittyKit
 
 final class CodeViewTests: XCTestCase {
+    func testStandaloneFilesPanelKeepsFilesAndChangesOnly() {
+        let controller = CodeViewController(config: AppConfig(), panelKind: .files)
+        controller.loadViewIfNeeded()
+        XCTAssertEqual(controller.pageControlLabelsForTesting, ["FILES", "CHANGES"])
+        XCTAssertTrue(controller.selectPage(named: "changes"))
+        XCTAssertFalse(controller.selectPage(named: "chat"))
+    }
+
+    func testStandaloneChatPanelHasNoFilesMode() {
+        let controller = CodeViewController(config: AppConfig(), panelKind: .chat)
+        controller.loadViewIfNeeded()
+        XCTAssertTrue(controller.chatPageIsVisibleForTesting)
+        XCTAssertFalse(controller.selectPage(named: "files"))
+    }
+
 
     private var tempDir = ""
 

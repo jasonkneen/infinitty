@@ -26,10 +26,15 @@ final class TerminalView: NSView {
         }
         return header
     }()
+    private let paneOutline = PaneOutlineView()
 
     var paneTitle: String {
         get { paneHeader.title }
         set { paneHeader.title = newValue }
+    }
+
+    func setPaneSelected(_ selected: Bool) {
+        paneOutline.isSelected = selected
     }
 
     private var scrollAccumulator: CGFloat = 0
@@ -129,6 +134,7 @@ final class TerminalView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .never
         registerForDraggedTypes([.fileURL, .string])
+        addSubview(paneOutline)
         addSubview(paneHeader)
     }
 
@@ -156,9 +162,14 @@ final class TerminalView: NSView {
 
     override func layout() {
         super.layout()
+        let obstruction = paneTopObstructionPoints()
+        let paneInset = PaneMetrics.inset
+        paneOutline.frame = bounds.insetBy(dx: paneInset, dy: paneInset)
         paneHeader.frame = NSRect(
-            x: 0, y: max(bounds.height - PaneHeaderView.height, 0),
-            width: bounds.width, height: min(PaneHeaderView.height, bounds.height))
+            x: paneInset,
+            y: max(bounds.height - obstruction - PaneHeaderView.height - paneInset, paneInset),
+            width: max(bounds.width - paneInset * 2, 0),
+            height: min(PaneHeaderView.height, bounds.height))
         positionPaneShortcutHint()
         updateGeometry()
         if inLiveResize {
@@ -205,9 +216,7 @@ final class TerminalView: NSView {
         // is obscured by the (transparent) titlebar and any tab bar — this
         // tracks tab-bar appearance automatically.
         if window.styleMask.contains(.fullSizeContentView) {
-            let layoutRect = convert(window.contentLayoutRect, from: nil)
-            renderer.topInsetPoints = max(bounds.height - layoutRect.maxY, 0)
-                + PaneHeaderView.height + 2
+            renderer.topInsetPoints = paneTopObstructionPoints() + PaneHeaderView.height + 2
         } else {
             renderer.topInsetPoints = PaneHeaderView.height
         }

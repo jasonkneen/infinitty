@@ -6,18 +6,29 @@ private enum TerminalWindowRole {
 }
 
 private struct PaneDragState {
-    let source: TerminalSession
+    let sourceView: NSView
+    let title: String
     let badge: PaneDragBadgeView
-    var target: TerminalSession?
+    var targetView: NSView?
     var zone: PaneDropZone?
     var preview: PaneDropPreviewView?
 }
 
 private struct PaneZoomState {
-    let session: TerminalSession
+    let pane: NSView
     let placeholder: NSView
     let overlay: NSView
-    let hiddenViews: [TerminalView]
+    let hiddenViews: [NSView]
+    let dividerPositions: PaneLayoutController.DividerPositions
+}
+
+private final class UtilityPanelRecord {
+    let controller: CodeViewController
+    let pane: UtilityPaneView
+    init(controller: CodeViewController, pane: UtilityPaneView) {
+        self.controller = controller
+        self.pane = pane
+    }
 }
 
 /// Manages windows, native tabs, and split panes. Every pane is a
@@ -27,6 +38,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         super.init()
         installTitlebarDoubleClickMonitor()
         installModifierHintMonitor()
+        installForegroundProcessMonitor()
     }
 
     /// Install a local mouse monitor that turns a native-tab double-click (or
@@ -109,6 +121,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var terminalChromes: [ObjectIdentifier: TerminalChromeView] = [:]
     private var paneDragState: PaneDragState?
     private var paneZoomStates: [ObjectIdentifier: PaneZoomState] = [:]
+    private var pendingSplitContext: (sourceView: NSView, vertical: Bool)?
     private var quickTerminalHotKey: GlobalHotKey?
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController(
@@ -136,6 +149,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var titlebarClickMonitor: Any?
     private var modifierHintMonitor: Any?
     private var paneShortcutKeyMonitor: Any?
+    private var foregroundProcessObserver: NSObjectProtocol?
     private var commandModifierHeld = false
     private var paneModifiersHeld = false
     private var showTabShortcutHints = false
@@ -304,6 +318,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let titlebarClickMonitor { NSEvent.removeMonitor(titlebarClickMonitor) }
         if let modifierHintMonitor { NSEvent.removeMonitor(modifierHintMonitor) }
         if let paneShortcutKeyMonitor { NSEvent.removeMonitor(paneShortcutKeyMonitor) }
+        if let foregroundProcessObserver {
+            NotificationCenter.default.removeObserver(foregroundProcessObserver)
+        }
         appControl.stop()
         for s in sessions { s.shutdown() }
     }
@@ -323,18 +340,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         s.onExited = { [weak self] session in self?.sessionDidExit(session) }
         s.onTitleChanged = { [weak self] session in
             guard let win = session.view.window else { return }
-            session.view.paneTitle = session.title
+            session.view.paneTitle = self?.paneHeaderTitle(for: session) ?? session.title
             self?.quickTerminal.setTitle(session.title, for: session)
             self?.updateTitle(for: win)
             self?.appControl.broadcast(["event": "title", "pane": session.id, "title": session.title])
         }
         s.view.onFocus = { [weak self, weak s] in
             guard let self, let s, let win = s.view.window else { return }
+            self.updatePaneSelection(in: win, focused: s.view)
             self.quickTerminal.setFocusedSession(s)
             self.updateTitle(for: win)
-            if let controller = self.codeViews[ObjectIdentifier(win)] {
-                controller.track(session: s)
-                controller.attachAssistant(self.petAssistant(for: s))
+            if let panels = self.utilityPanels[ObjectIdentifier(win)] {
+                for record in panels.values { record.controller.track(session: s) }
+                panels[.chat]?.controller.attachAssistant(self.petAssistant(for: s))
             }
         }
         s.view.onPetClick = { [weak self, weak s] in
@@ -343,11 +361,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         s.view.onSplitRight = { [weak self, weak s] in
             guard let self, let s else { return }
-            self.split(session: s, vertical: true, newFirst: false)
+            self.showSplitChooser(sourceView: s.view, vertical: true)
         }
         s.view.onSplitDown = { [weak self, weak s] in
             guard let self, let s else { return }
-            self.split(session: s, vertical: false, newFirst: false)
+            self.showSplitChooser(sourceView: s.view, vertical: false)
         }
         s.view.onTogglePaneZoom = { [weak self, weak s] in
             guard let self, let s else { return }
@@ -355,7 +373,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         s.view.onPaneDragBegan = { [weak self, weak s] point in
             guard let self, let s else { return }
-            self.beginPaneDrag(source: s, at: point)
+            self.beginPaneDrag(sourceView: s.view, title: s.title, at: point)
         }
         s.view.onPaneDragMoved = { [weak self] point in
             self?.updatePaneDrag(at: point)
@@ -390,9 +408,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return s
     }
 
+    private func installForegroundProcessMonitor() {
+        foregroundProcessObserver = NotificationCenter.default.addObserver(
+            forName: ForegroundProcessTracker.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let tracker = notification.object as? ForegroundProcessTracker,
+                  let session = self.sessions.first(where: { $0.processTracker === tracker })
+            else { return }
+            session.view.paneTitle = self.paneHeaderTitle(for: session)
+            if let win = session.view.window {
+                self.updateTitle(for: win)
+                self.refreshTabStrips(in: win)
+            }
+        }
+    }
+
+    private func paneHeaderTitle(for session: TerminalSession) -> String {
+        guard let process = session.processTracker?.current,
+              process.pid != session.pty.pid else { return session.title }
+        return "\(session.title) — \(process.displayName)"
+    }
+
     private func focusedSession() -> TerminalSession? {
-        guard let win = NSApp.keyWindow,
-              let view = win.firstResponder as? TerminalView else { return nil }
+        guard let win = NSApp.keyWindow else { return nil }
+        return focusedSession(in: win)
+    }
+
+    private func focusedSession(in win: NSWindow) -> TerminalSession? {
+        guard let view = win.firstResponder as? TerminalView else { return nil }
         return sessions.first { $0.view === view }
     }
 
@@ -402,9 +448,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     /// Bring `session`'s pane to the front within its window and make it first
-    /// responder. Used by the titlebar process-icon accessory to refocus the
-    /// pane the icon is describing after a tab switch.
+    /// responder after tab or pane navigation.
     private func focusPane(for session: TerminalSession) {
+        restorePaneZoom(revealing: session.view)
         guard let win = session.view.window else { return }
         win.makeFirstResponder(session.view)
         win.makeKeyAndOrderFront(nil)
@@ -426,6 +472,40 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let root = terminalRoot(of: win)
         if let root { collect(from: root) }
         return views.compactMap { view in sessions.first { $0.view === view } }
+    }
+
+    private func paneLeafViews(in win: NSWindow) -> [NSView] {
+        var result: [NSView] = []
+        func collect(_ view: NSView) {
+            if view is TerminalView || view is UtilityPaneView {
+                result.append(view)
+                return
+            }
+            if let split = view as? NSSplitView {
+                split.arrangedSubviews.forEach(collect)
+            } else {
+                view.subviews.forEach(collect)
+            }
+        }
+        if let root = terminalRoot(of: win) { collect(root) }
+        return result
+    }
+
+    private func focusedPaneLeaf(in win: NSWindow) -> NSView? {
+        guard let responder = win.firstResponder as? NSView else {
+            return focusedSession(in: win)?.view
+        }
+        return paneLeafViews(in: win).first {
+            responder === $0 || responder.isDescendant(of: $0)
+        }
+    }
+
+    private func updatePaneSelection(in win: NSWindow, focused: NSView?) {
+        for pane in paneLeafViews(in: win) {
+            let selected = pane === focused
+            (pane as? TerminalView)?.setPaneSelected(selected)
+            (pane as? UtilityPaneView)?.setPaneSelected(selected)
+        }
     }
 
     private func setShortcutHintModifiers(_ modifiers: NSEvent.ModifierFlags) {
@@ -644,7 +724,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// Per-window pin metadata (icon + color). Pinned tabs render as compact
     /// colored icon chips. Keyed by window identity like titleOverrides.
     private var tabPins: [ObjectIdentifier: TerminalTabStripView.Pin] = [:]
-    private var tabIconAccessories: [ObjectIdentifier: TabIconAccessory] = [:]
 
     /// Tab/window title: custom name if renamed, else the focused pane's
     /// title, plus the pane count when the tab holds more than one shell.
@@ -681,15 +760,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         win.title = inWindow.count > 1 ? "\(hintedBase) (\(inWindow.count))" : hintedBase
         win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
-        // also poke the accessory if the title changed in a way that affects it
-        tabIconAccessories[ObjectIdentifier(win)]?.refreshFromHost()
         // Keep the custom tab strip's labels/selection in sync.
         if let chrome = terminalChromes[ObjectIdentifier(win)], !chrome.strip.isRenaming {
             let tabs = win.tabbedWindows ?? [win]
             if let index = tabs.firstIndex(where: { $0 === win }) {
-                chrome.showsStrip = tabs.count > 1
+                let presentation = tabPresentation(for: tabs)
+                chrome.showsStrip = true
                 chrome.strip.update(
-                    titles: tabs.map { self.tabTitle(for: $0) }, selectedIndex: index)
+                    titles: tabs.map { self.tabTitle(for: $0) }, selectedIndex: index,
+                    pins: presentation.pins, icons: presentation.icons)
             }
         }
     }
@@ -786,6 +865,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
         guard let win else { return }
+
+        // Files and Chat are companions to terminals, not stand-alone tabs.
+        // Preserve the established lifecycle: the tab closes with its final
+        // terminal even when utility leaves are still mixed into its tree.
+        if !wasQuickTerminal, activeSessions(in: win).isEmpty {
+            win.close()
+            return
+        }
 
         if wasQuickTerminal, quickTabSessions.count == 1 {
             _ = quickTerminal.removeTab(containing: s)
@@ -931,9 +1018,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let chrome = TerminalChromeView(frame: NSRect(origin: .zero, size: contentSize))
             chrome.autoresizingMask = [.width, .height]
             chrome.sideTabs = config.sideTabs
-            chrome.body.addSubview(config.backgroundBlur
-                ? wrapInBackgroundBlur(session.view)
-                : session.view)
+            chrome.body.addSubview(session.view)
             let bg = session.renderer.backgroundColor
             chrome.setBacking(
                 color: NSColor(srgbRed: CGFloat(bg.x), green: CGFloat(bg.y),
@@ -951,28 +1036,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if customLights, let shape = TrafficLightsView.Shape(rawValue: config.trafficLights) {
             let lights = TrafficLightsView(shape: shape)
             var f = lights.frame
-            f.origin = NSPoint(x: 12, y: contentSize.height - f.height - 9)
+            f.origin = NSPoint(x: 12, y: contentSize.height - f.height - 15)
             lights.frame = f
             lights.autoresizingMask = [.minYMargin, .maxXMargin]
             window.contentView?.addSubview(lights)
         }
 
         if role == .standard { window.center() }
-
-        // Native titlebar accessories sit above AppKit's tab strip.
-        if role == .standard {
-            if !customLights {
-                let acc = TabIconAccessory()
-                acc.titlebarShowsTitle = true
-                acc.onClick = { [weak self, weak session] in
-                    guard let self, let session else { return }
-                    self.focusPane(for: session)
-                }
-                acc.attach(to: window)
-                tabIconAccessories[ObjectIdentifier(window)] = acc
-            }
-            installSidebarToggle(in: window)
-        }
 
         return (window, session)
     }
@@ -1098,109 +1168,218 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     // MARK: - splits
 
+    private func showSplitChooser(sourceView: NSView, vertical: Bool) {
+        guard sourceView.window != nil else { return }
+        restorePaneZoom(containing: sourceView, refocus: false)
+        let menu = NSMenu(title: vertical ? "Split Right" : "Split Down")
+        for choice in PaneType.allCases {
+            let item = NSMenuItem(
+                title: choice.title, action: #selector(splitChoiceSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = choice.rawValue
+            item.image = NSImage(
+                systemSymbolName: choice.symbol, accessibilityDescription: choice.title)
+            menu.addItem(item)
+        }
+        pendingSplitContext = (sourceView, vertical)
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: max(sourceView.bounds.maxX - 132, 4),
+                        y: max(sourceView.bounds.maxY - PaneHeaderView.height - 4, 4)),
+            in: sourceView)
+        pendingSplitContext = nil
+    }
+
+    @objc private func splitChoiceSelected(_ sender: NSMenuItem) {
+        guard let context = pendingSplitContext,
+              let win = context.sourceView.window else { return }
+        switch PaneType(rawValue: sender.tag) {
+        case .terminal:
+            let session = createSession(scale: win.backingScaleFactor)
+            session.workingDirectory = focusedSession(in: win)?.currentDirectory()
+                ?? activeSessions(in: win).first?.currentDirectory()
+            guard insertPaneView(
+                session.view, relativeTo: context.sourceView, vertical: context.vertical)
+            else {
+                session.shutdown()
+                sessions.removeAll { $0 === session }
+                return
+            }
+            session.launch()
+            win.makeFirstResponder(session.view)
+            refreshPets()
+            updateTitle(for: win)
+        case .files:
+            _ = openUtilityPanel(
+                .files, in: win, relativeTo: context.sourceView, vertical: context.vertical)
+        case .chat:
+            _ = openUtilityPanel(
+                .chat, in: win, relativeTo: context.sourceView, vertical: context.vertical)
+        case nil:
+            break
+        }
+    }
+
+    @discardableResult
+    private func insertPaneView(
+        _ newView: NSView, relativeTo oldView: NSView,
+        vertical: Bool, newFirst: Bool = false
+    ) -> Bool {
+        let split = NSSplitView(frame: oldView.frame)
+        split.isVertical = vertical
+        split.dividerStyle = .thin
+        split.autoresizingMask = oldView.autoresizingMask
+        if let win = oldView.window, win.contentView === oldView {
+            win.contentView = split
+        } else if let parent = oldView.superview {
+            guard PaneLayoutController.replace(oldView, with: split, in: parent) else { return false }
+        } else {
+            return false
+        }
+        if newFirst {
+            split.addArrangedSubview(newView)
+            split.addArrangedSubview(oldView)
+        } else {
+            split.addArrangedSubview(oldView)
+            split.addArrangedSubview(newView)
+        }
+        DispatchQueue.main.async {
+            let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
+            split.setPosition(mid, ofDividerAt: 0)
+        }
+        return true
+    }
+
     @objc func togglePaneZoom(_ sender: Any?) {
-        guard let session = focusedSession() else { return }
-        togglePaneZoom(for: session)
+        guard let win = NSApp.keyWindow, let pane = focusedPaneLeaf(in: win) else { return }
+        togglePaneZoom(for: pane)
     }
 
     private func togglePaneZoom(for session: TerminalSession) {
-        guard let win = session.view.window, let root = terminalRoot(of: win) else { return }
+        togglePaneZoom(for: session.view)
+    }
+
+    private func togglePaneZoom(for pane: NSView) {
+        guard let win = pane.window, let root = terminalRoot(of: win) else { return }
         let key = ObjectIdentifier(root)
         if paneZoomStates[key] != nil {
             restorePaneZoom(key: key, refocus: true)
             return
         }
 
-        let panes = activeSessions(in: win).filter {
-            $0.view === root || $0.view.isDescendant(of: root)
-        }
-        guard panes.count > 1, session.view !== root,
-              let parent = session.view.superview else { return }
+        let panes = paneLeafViews(in: win)
+        guard panes.count > 1, pane !== root,
+              let parent = pane.superview else { return }
 
-        let placeholder = NSView(frame: session.view.frame)
-        placeholder.autoresizingMask = session.view.autoresizingMask
+        let placeholder = NSView(frame: pane.frame)
+        placeholder.autoresizingMask = pane.autoresizingMask
         placeholder.wantsLayer = true
         placeholder.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.08).cgColor
-        guard replaceNode(session.view, with: placeholder, in: parent) else { return }
+        let dividerPositions = PaneLayoutController.captureDividerPositions(in: root)
+        guard replaceNode(pane, with: placeholder, in: parent) else { return }
 
         let overlay = NSView(frame: root.bounds)
         overlay.autoresizingMask = [.width, .height]
         overlay.wantsLayer = true
-        let bg = session.renderer.backgroundColor
-        overlay.layer?.backgroundColor = NSColor(
-            srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
-            alpha: CGFloat(bg.w)
-        ).cgColor
+        if let session = sessions.first(where: { $0.view === pane }) {
+            let bg = session.renderer.backgroundColor
+            overlay.layer?.backgroundColor = NSColor(
+                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
+                alpha: CGFloat(bg.w)).cgColor
+        } else {
+            overlay.layer?.backgroundColor = pane.layer?.backgroundColor
+                ?? win.backgroundColor.cgColor
+        }
         root.addSubview(overlay, positioned: .above, relativeTo: nil)
-        session.view.frame = overlay.bounds
-        session.view.autoresizingMask = [.width, .height]
-        overlay.addSubview(session.view)
+        pane.frame = overlay.bounds
+        pane.autoresizingMask = [.width, .height]
+        overlay.addSubview(pane)
 
-        let hidden = panes.filter { $0 !== session }.map(\.view)
+        let hidden = panes.filter { $0 !== pane }
         hidden.forEach { $0.isHidden = true }
         paneZoomStates[key] = PaneZoomState(
-            session: session, placeholder: placeholder, overlay: overlay, hiddenViews: hidden)
-        win.makeFirstResponder(session.view)
+            pane: pane, placeholder: placeholder, overlay: overlay,
+            hiddenViews: hidden, dividerPositions: dividerPositions)
+        win.makeFirstResponder(pane)
     }
 
     private func restorePaneZoom(containing session: TerminalSession, refocus: Bool) {
-        guard let entry = paneZoomStates.first(where: { $0.value.session === session }) else { return }
+        restorePaneZoom(containing: session.view, refocus: refocus)
+    }
+
+    private func restorePaneZoom(containing pane: NSView, refocus: Bool) {
+        guard let entry = paneZoomStates.first(where: { $0.value.pane === pane }) else { return }
         restorePaneZoom(key: entry.key, refocus: refocus)
     }
 
+    private func restorePaneZoom(revealing pane: NSView) {
+        guard let entry = paneZoomStates.first(where: { state in
+            state.value.pane !== pane
+                && state.value.hiddenViews.contains(where: { $0 === pane })
+        }) else { return }
+        restorePaneZoom(key: entry.key, refocus: false)
+    }
+
     private func restorePaneZoom(key: ObjectIdentifier, refocus: Bool) {
-        guard let state = paneZoomStates.removeValue(forKey: key),
-              let parent = state.placeholder.superview else { return }
-        state.session.view.removeFromSuperview()
-        _ = replaceNode(state.placeholder, with: state.session.view, in: parent)
+        guard let state = paneZoomStates.removeValue(forKey: key) else { return }
+        state.pane.removeFromSuperview()
+        if let parent = state.placeholder.superview {
+            _ = replaceNode(state.placeholder, with: state.pane, in: parent)
+        } else if let root = state.overlay.superview {
+            state.pane.frame = root.bounds
+            state.pane.autoresizingMask = [.width, .height]
+            root.addSubview(state.pane)
+        }
         state.hiddenViews.forEach { $0.isHidden = false }
         state.overlay.removeFromSuperview()
-        if refocus, let win = state.session.view.window {
-            win.makeFirstResponder(state.session.view)
+        state.pane.window?.layoutIfNeeded()
+        PaneLayoutController.restoreDividerPositions(state.dividerPositions)
+        if refocus, let win = state.pane.window {
+            win.makeFirstResponder(state.pane)
         }
     }
 
-    private func beginPaneDrag(source: TerminalSession, at point: NSPoint) {
-        guard paneZoomStates.values.allSatisfy({ $0.session !== source }),
-              let win = source.view.window,
-              source.view.superview is NSSplitView,
+    private func beginPaneDrag(sourceView: NSView, title: String, at point: NSPoint) {
+        guard paneZoomStates.values.allSatisfy({ $0.pane !== sourceView }),
+              let win = sourceView.window,
+              sourceView.superview is NSSplitView,
               let content = win.contentView else { return }
         endPaneDrag(at: point, cancelled: true)
-        let badge = PaneDragBadgeView(title: source.title)
+        let badge = PaneDragBadgeView(title: title)
         content.addSubview(badge, positioned: .above, relativeTo: nil)
-        paneDragState = PaneDragState(source: source, badge: badge)
+        paneDragState = PaneDragState(sourceView: sourceView, title: title, badge: badge)
         updatePaneDrag(at: point)
     }
 
     private func updatePaneDrag(at point: NSPoint) {
         guard var state = paneDragState,
-              let win = state.source.view.window,
+              let win = state.sourceView.window,
               let content = win.contentView else { return }
         let contentPoint = content.convert(point, from: nil)
         state.badge.frame.origin = NSPoint(
             x: min(max(contentPoint.x + 12, 4), content.bounds.maxX - state.badge.frame.width - 4),
             y: min(max(contentPoint.y - 12, 4), content.bounds.maxY - state.badge.frame.height - 4))
 
-        let target = activeSessions(in: win).first { candidate in
-            guard candidate !== state.source,
-                  !candidate.view.isHiddenOrHasHiddenAncestor else { return false }
-            let local = candidate.view.convert(point, from: nil)
-            return candidate.view.bounds.contains(local)
+        let target = paneLeafViews(in: win).first { candidate in
+            guard candidate !== state.sourceView,
+                  !candidate.isHiddenOrHasHiddenAncestor else { return false }
+            let local = candidate.convert(point, from: nil)
+            return candidate.bounds.contains(local)
         }
         let zone = target.map {
-            PaneDropZone.resolve(point: $0.view.convert(point, from: nil), in: $0.view.bounds)
+            PaneDropZone.resolve(point: $0.convert(point, from: nil), in: $0.bounds)
         }
-        if state.target !== target || state.zone != zone {
+        if state.targetView !== target || state.zone != zone {
             state.preview?.removeFromSuperview()
             state.preview = nil
             if let target, let zone {
                 let preview = PaneDropPreviewView(
-                    frame: zone.previewFrame(in: target.view.bounds).insetBy(dx: 3, dy: 3))
+                    frame: zone.previewFrame(in: target.bounds).insetBy(dx: 3, dy: 3))
                 preview.autoresizingMask = []
-                target.view.addSubview(preview, positioned: .above, relativeTo: nil)
+                target.addSubview(preview, positioned: .above, relativeTo: nil)
                 state.preview = preview
             }
-            state.target = target
+            state.targetView = target
             state.zone = zone
         }
         paneDragState = state
@@ -1211,77 +1390,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         paneDragState = nil
         state.preview?.removeFromSuperview()
         state.badge.removeFromSuperview()
-        guard !cancelled, let target = state.target, let zone = state.zone else { return }
-        movePane(state.source, relativeTo: target, zone: zone)
+        guard !cancelled, let target = state.targetView, let zone = state.zone else { return }
+        movePaneView(state.sourceView, relativeTo: target, zone: zone)
     }
 
-    private func movePane(
-        _ source: TerminalSession, relativeTo target: TerminalSession, zone: PaneDropZone
-    ) {
-        guard source !== target, let win = source.view.window,
-              target.view.window === win else { return }
-        if zone == .center {
-            guard let sourceParent = source.view.superview,
-                  let targetParent = target.view.superview else { return }
-            let sourcePlaceholder = NSView(frame: source.view.frame)
-            let targetPlaceholder = NSView(frame: target.view.frame)
-            guard replaceNode(source.view, with: sourcePlaceholder, in: sourceParent),
-                  replaceNode(target.view, with: targetPlaceholder, in: targetParent),
-                  let sourceSlot = sourcePlaceholder.superview,
-                  let targetSlot = targetPlaceholder.superview,
-                  replaceNode(sourcePlaceholder, with: target.view, in: sourceSlot),
-                  replaceNode(targetPlaceholder, with: source.view, in: targetSlot)
-            else { return }
-            win.makeFirstResponder(source.view)
-            refreshPets()
-            refreshShortcutHints()
-            return
-        }
-
-        guard let sourceSplit = source.view.superview as? NSSplitView else { return }
-        source.view.removeFromSuperview()
-        collapse(sourceSplit, in: win)
-        guard let targetParent = target.view.superview else { return }
-        let targetFrame = target.view.frame
-        let split = NSSplitView(frame: targetFrame)
-        split.isVertical = zone == .left || zone == .right
-        split.dividerStyle = .thin
-        split.autoresizingMask = target.view.autoresizingMask
-        guard replaceNode(target.view, with: split, in: targetParent) else { return }
-        if zone == .left || zone == .bottom {
-            split.addArrangedSubview(source.view)
-            split.addArrangedSubview(target.view)
+    private func movePaneView(_ source: NSView, relativeTo target: NSView, zone: PaneDropZone) {
+        guard source !== target, let win = source.window, target.window === win else { return }
+        let result = PaneLayoutController.move(
+            source: source, target: target, zone: zone)
+        guard result.changed else { return }
+        if let split = result.insertedSplit {
+            DispatchQueue.main.async {
+                let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
+                split.setPosition(mid, ofDividerAt: 0)
+                win.makeFirstResponder(source)
+                self.refreshPets()
+                self.updateTitle(for: win)
+                self.refreshShortcutHints()
+            }
         } else {
-            split.addArrangedSubview(target.view)
-            split.addArrangedSubview(source.view)
-        }
-        DispatchQueue.main.async {
-            let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
-            split.setPosition(mid, ofDividerAt: 0)
-            win.makeFirstResponder(source.view)
-            self.refreshPets()
-            self.updateTitle(for: win)
-            self.refreshShortcutHints()
+            win.makeFirstResponder(source)
+            refreshPets()
+            updateTitle(for: win)
+            refreshShortcutHints()
         }
     }
 
     @discardableResult
     private func replaceNode(_ old: NSView, with new: NSView, in parent: NSView) -> Bool {
-        if let split = parent as? NSSplitView {
-            guard let index = split.arrangedSubviews.firstIndex(of: old) else { return false }
-            old.removeFromSuperview()
-            split.insertArrangedSubview(new, at: index)
-            return true
-        }
-        guard old.superview === parent else { return false }
-        new.frame = old.frame
-        new.autoresizingMask = old.autoresizingMask
-        parent.replaceSubview(old, with: new)
-        return true
+        PaneLayoutController.replace(old, with: new, in: parent)
     }
 
     @objc func splitRight(_ sender: Any?) {
-        split(vertical: true, newFirst: false)
+        if let win = NSApp.keyWindow, let leaf = focusedPaneLeaf(in: win) {
+            showSplitChooser(sourceView: leaf, vertical: true)
+        }
     }
 
     @objc func splitLeft(_ sender: Any?) {
@@ -1289,7 +1432,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func splitDown(_ sender: Any?) {
-        split(vertical: false, newFirst: false)
+        if let win = NSApp.keyWindow, let leaf = focusedPaneLeaf(in: win) {
+            showSplitChooser(sourceView: leaf, vertical: false)
+        }
     }
 
     @objc func splitUp(_ sender: Any?) {
@@ -1351,6 +1496,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc func closePane(_ sender: Any?) {
         if let session = focusedSession() {
             session.terminate() // EOF path handles pane/tab teardown
+        } else if let win = NSApp.keyWindow,
+                  let pane = focusedPaneLeaf(in: win) as? UtilityPaneView,
+                  let record = utilityPanels[ObjectIdentifier(win)]?[pane.kind] {
+            closeUtilityPanel(record, in: win)
         } else {
             NSApp.keyWindow?.performClose(sender)
         }
@@ -1370,9 +1519,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     // MARK: - code view
 
-    /// Per-window code-view sidebars, keyed by window identity.
-    private var codeViews: [ObjectIdentifier: CodeViewController] = [:]
-    private static let codeViewWidth: CGFloat = 280
+    /// Independent Files and Chat leaves mixed into each tab's pane tree.
+    private var utilityPanels: [ObjectIdentifier: [UtilityPanelKind: UtilityPanelRecord]] = [:]
 
     @objc func toggleCodeView(_ sender: Any?) {
         guard let win = NSApp.keyWindow else { return }
@@ -1383,22 +1531,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard win.tabbingIdentifier == "infinitty",
               win !== quickTerminal.window else { return }
         let id = ObjectIdentifier(win)
-        if let controller = codeViews[id] {
-            // Hide: unwrap the outer split and put the terminal content back.
-            if let split = win.contentView as? NSSplitView,
-               let content = split.arrangedSubviews.first(where: { $0 !== controller.view }) {
-                split.removeArrangedSubview(content)
-                content.removeFromSuperview()
-                split.removeArrangedSubview(controller.view)
-                controller.view.removeFromSuperview()
-                win.contentView = content
-            }
-            codeViews.removeValue(forKey: id)
+        if let record = utilityPanels[id]?[.files] {
+            closeUtilityPanel(record, in: win)
             sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(false)
             refocusTerminal(in: win)
             return
         }
-        openCodeView(in: win)
+        _ = openUtilityPanel(.files, in: win)
     }
 
     /// The view that hosts a window's terminal panes/splits. For standard
@@ -1411,23 +1550,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     /// Refresh the custom tab strip in every window of `win`'s tab group so
-    /// each shows the shared title list with its own tab highlighted. Also
-    /// hides the native tab bar and toggles strip visibility (hidden for a
-    /// single tab, like macOS).
+    /// each shows the shared title list with its own tab highlighted. The
+    /// native tab bar stays hidden; reference chrome keeps our strip visible
+    /// even for a single tab.
     private func refreshTabStrips(in win: NSWindow) {
         let tabs = win.tabbedWindows ?? [win]
         let titles = tabs.map { self.tabTitle(for: $0) }
+        let presentation = tabPresentation(for: tabs)
         for (index, tabWin) in tabs.enumerated() {
             tabWin.hideNativeTabBar()
             guard let chrome = terminalChromes[ObjectIdentifier(tabWin)] else { continue }
-            var pins: [Int: TerminalTabStripView.Pin] = [:]
-            for (i, w) in tabs.enumerated() where tabPins[ObjectIdentifier(w)] != nil {
-                pins[i] = tabPins[ObjectIdentifier(w)]
-            }
             chrome.sideTabs = config.sideTabs
-            chrome.showsStrip = tabs.count > 1
-            chrome.strip.update(titles: titles, selectedIndex: index, pins: pins)
+            chrome.showsStrip = true
+            chrome.strip.update(
+                titles: titles, selectedIndex: index,
+                pins: presentation.pins, icons: presentation.icons)
         }
+    }
+
+    private func tabPresentation(
+        for tabs: [NSWindow]
+    ) -> (pins: [Int: TerminalTabStripView.Pin], icons: [Int: NSImage]) {
+        var pins: [Int: TerminalTabStripView.Pin] = [:]
+        var icons: [Int: NSImage] = [:]
+        for (index, window) in tabs.enumerated() {
+            if let pin = tabPins[ObjectIdentifier(window)] { pins[index] = pin }
+            let inWindow = activeSessions(in: window)
+            let focused = inWindow.first { window.firstResponder === $0.view } ?? inWindow.first
+            if let focused,
+               let process = focused.processTracker?.current,
+               process.pid != focused.pty.pid,
+               let icon = process.icon() {
+                icons[index] = icon
+            }
+        }
+        return (pins, icons)
     }
 
     private func tabTitle(for win: NSWindow) -> String {
@@ -1578,41 +1735,109 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         _ = chrome.strip.beginRename(at: index, currentName: tabTitle(for: win))
     }
 
-    /// Open the code-view sidebar in `win` (no-op if already open).
+    /// Compatibility entry point: the former sidebar is now the Files pane,
+    /// whose own compact switch still contains Files and Changes.
     @discardableResult
     private func openCodeView(in win: NSWindow) -> CodeViewController? {
+        openUtilityPanel(.files, in: win)?.controller
+    }
+
+    @discardableResult
+    private func openUtilityPanel(
+        _ kind: UtilityPanelKind,
+        in win: NSWindow,
+        relativeTo requestedSource: NSView? = nil,
+        vertical: Bool = true
+    ) -> UtilityPanelRecord? {
         let id = ObjectIdentifier(win)
-        if let existing = codeViews[id] { return existing }
-        guard let content = win.contentView else { return nil }
-        let controller = CodeViewController(config: config)
-        let split = NSSplitView(frame: NSRect(origin: .zero, size: win.contentLayoutRect.size))
-        split.isVertical = true
-        split.dividerStyle = .thin
-        split.autoresizingMask = [.width, .height]
-        win.contentView = split
-        split.addArrangedSubview(content)
-        split.addArrangedSubview(controller.view)
-        // Terminal flexes on window resize; the sidebar holds its width.
-        split.setHoldingPriority(.defaultLow, forSubviewAt: 0)
-        split.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
-        codeViews[id] = controller
-        sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(true)
-        let source = focusedSession() ?? activeSessions(in: win).first
-        if let source {
-            controller.track(session: source)
-            controller.attachAssistant(petAssistant(for: source))
+        if let existing = utilityPanels[id]?[kind] {
+            restorePaneZoom(revealing: existing.pane)
+            win.makeFirstResponder(existing.pane)
+            return existing
         }
-        DispatchQueue.main.async {
-            split.setPosition(split.bounds.width - Self.codeViewWidth, ofDividerAt: 0)
-            self.refocusTerminal(in: win)
+        guard let anchorView = requestedSource
+                ?? focusedPaneLeaf(in: win)
+                ?? activeSessions(in: win).first?.view
+                ?? terminalRoot(of: win),
+              anchorView.window === win else { return nil }
+
+        let controller = CodeViewController(config: config, panelKind: kind)
+        _ = controller.view
+        let bg = Theme.dark.applying(config).background
+        let pane = UtilityPaneView(
+            kind: kind,
+            contentView: controller.view,
+            background: NSColor(
+                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1),
+            blurred: config.backgroundBlur)
+        let record = UtilityPanelRecord(controller: controller, pane: pane)
+        utilityPanels[id, default: [:]][kind] = record
+
+        pane.onSplitRight = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.showSplitChooser(sourceView: pane, vertical: true)
         }
-        return controller
+        pane.onSplitDown = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.showSplitChooser(sourceView: pane, vertical: false)
+        }
+        pane.paneHeader.onToggleZoom = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.togglePaneZoom(for: pane)
+        }
+        pane.onFocus = { [weak self, weak win, weak pane] in
+            guard let self, let win, let pane else { return }
+            self.updatePaneSelection(in: win, focused: pane)
+        }
+        pane.onClose = { [weak self, weak win, weak record] in
+            guard let self, let win, let record else { return }
+            self.closeUtilityPanel(record, in: win)
+        }
+        pane.onDragBegan = { [weak self, weak pane] point in
+            guard let self, let pane else { return }
+            self.beginPaneDrag(sourceView: pane, title: kind.title, at: point)
+        }
+        pane.onDragMoved = { [weak self] point in self?.updatePaneDrag(at: point) }
+        pane.onDragEnded = { [weak self] point, cancelled in
+            self?.endPaneDrag(at: point, cancelled: cancelled)
+        }
+
+        let sourceSession = focusedSession(in: win) ?? activeSessions(in: win).first
+        if let sourceSession {
+            controller.track(session: sourceSession)
+            if kind == .chat { controller.attachAssistant(petAssistant(for: sourceSession)) }
+        }
+        guard insertPaneView(pane, relativeTo: anchorView, vertical: vertical)
+        else {
+            utilityPanels[id]?.removeValue(forKey: kind)
+            return nil
+        }
+        sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
+            utilityPanels[id]?[.files] != nil)
+        win.makeFirstResponder(pane)
+        return record
+    }
+
+    private func closeUtilityPanel(_ record: UtilityPanelRecord, in win: NSWindow) {
+        let id = ObjectIdentifier(win)
+        restorePaneZoom(containing: record.pane, refocus: false)
+        if let split = record.pane.superview as? NSSplitView {
+            record.pane.removeFromSuperview()
+            collapse(split, in: win)
+        } else {
+            record.pane.removeFromSuperview()
+        }
+        utilityPanels[id]?.removeValue(forKey: record.pane.kind)
+        if utilityPanels[id]?.isEmpty == true { utilityPanels.removeValue(forKey: id) }
+        sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
+            utilityPanels[id]?[.files] != nil)
+        refocusTerminal(in: win)
     }
 
     func installSidebarToggle(in win: NSWindow) {
         let id = ObjectIdentifier(win)
         if let existing = sidebarToggleAccessories[id] {
-            existing.toggleView.setSidebarVisible(codeViews[id] != nil)
+            existing.toggleView.setSidebarVisible(utilityPanels[id]?[.files] != nil)
             return
         }
 
@@ -1621,7 +1846,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let self, let win else { return }
             self.toggleCodeView(in: win)
         }
-        accessory.toggleView.setSidebarVisible(codeViews[id] != nil)
+        accessory.toggleView.setSidebarVisible(utilityPanels[id]?[.files] != nil)
         accessory.attach(to: win)
         sidebarToggleAccessories[id] = accessory
     }
@@ -1629,7 +1854,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// Keep keyboard input in the terminal after sidebar toggles.
     private func refocusTerminal(in win: NSWindow) {
         if win.firstResponder is TerminalView { return }
-        if let target = activeSessions(in: win).first?.view {
+        let activeRoot = terminalRoot(of: win)
+        let zoomed = paneZoomStates.values.first {
+            guard let activeRoot else { return false }
+            return $0.overlay === activeRoot || $0.overlay.isDescendant(of: activeRoot)
+        }?.pane as? TerminalView
+        if let target = zoomed ?? activeSessions(in: win).first?.view {
             win.makeFirstResponder(target)
         }
     }
@@ -1665,7 +1895,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               win !== quickTerminal.window else { return }
         guard let controller = openCodeView(in: win) else { return }
         controller.track(session: session)
-        controller.attachAssistant(petAssistant(for: session))
         controller.showSearchResults(paths, query: query)
     }
 
@@ -1675,7 +1904,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let standard = win.flatMap {
                 $0.tabbingIdentifier == "infinitty" && $0 !== quickTerminal.window ? $0 : nil
             }
-            item.state = standard.flatMap { codeViews[ObjectIdentifier($0)] } != nil ? .on : .off
+            item.state = standard.flatMap {
+                utilityPanels[ObjectIdentifier($0)]?[.files]
+            } != nil ? .on : .off
             return standard != nil
         }
         return true
@@ -1805,11 +2036,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case "focus":
             guard let (s, _) = paneAndText(arg) else { return "error: focus <id>" }
             _ = onMain {
+                self.restorePaneZoom(revealing: s.view)
                 if self.quickTerminal.contains(s) {
                     _ = self.quickTerminal.focus(s)
                 } else {
-                    s.view.window?.makeKeyAndOrderFront(nil)
-                    s.view.window?.makeFirstResponder(s.view)
+                    self.focusPane(for: s)
                     NSApp.activate(ignoringOtherApps: true)
                 }
             }
@@ -1881,8 +2112,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
             return "ok"
         case "sidebar":
-            // sidebar show|hide|toggle — explicit control of the code sidebar
-            // so an agent can drive its own interface, not just flip it.
+            // Compatibility surface: sidebar show|hide|toggle now controls
+            // the Files pane, whose internal switch includes Changes.
             let action = arg.trimmingCharacters(in: .whitespaces).lowercased()
             guard ["show", "hide", "toggle", ""].contains(action) else {
                 return "error: sidebar show|hide|toggle"
@@ -1893,22 +2124,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 let id = ObjectIdentifier(win)
                 switch action {
                 case "show": _ = self.openCodeView(in: win)
-                case "hide": if self.codeViews[id] != nil { self.toggleCodeView(in: win) }
+                case "hide": if self.utilityPanels[id]?[.files] != nil { self.toggleCodeView(in: win) }
                 default: self.toggleCodeView(in: win)
                 }
             }
             return "ok"
         case "sidebar-tab":
-            // sidebar-tab files|changes|chat — switch the sidebar page,
-            // opening the sidebar first if it's closed.
+            // Compatibility command: Files/Changes share one pane; Chat owns
+            // its own independent pane.
             let name = arg.trimmingCharacters(in: .whitespaces).lowercased()
             guard ["files", "changes", "git", "chat"].contains(name) else {
                 return "error: sidebar-tab files|changes|chat"
             }
             let ok = onMain { () -> Bool in
                 guard let win = NSApp.keyWindow
-                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
-                      let controller = self.openCodeView(in: win) else { return false }
+                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" })
+                else { return false }
+                if name == "chat" { return self.openUtilityPanel(.chat, in: win) != nil }
+                guard let controller = self.openCodeView(in: win) else { return false }
                 return controller.selectPage(named: name)
             } ?? false
             return ok ? "ok" : "error: could not switch sidebar tab"
@@ -1921,8 +2154,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let ok = onMain { () -> Bool in
                 guard let win = NSApp.keyWindow
                     ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }),
-                      let controller = self.openCodeView(in: win) else { return false }
-                _ = controller.selectPage(named: "chat")
+                      let controller = self.openUtilityPanel(.chat, in: win)?.controller
+                else { return false }
                 return cmd == "chat-model"
                     ? controller.setChatModel(value)
                     : controller.setChatEffort(value)
@@ -1985,6 +2218,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             if let s = sessions.first(where: { $0.view.window === win }) {
                 applyWindowBacking(to: win, renderer: s.renderer)
                 win.contentResizeIncrements = s.renderer.cellSizePoints
+                let bg = s.renderer.backgroundColor
+                let color = NSColor(
+                    srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1)
+                terminalChromes[ObjectIdentifier(win)]?.setBacking(
+                    color: color, blur: config.backgroundBlur)
+                utilityPanels[ObjectIdentifier(win)]?.values.forEach {
+                    $0.pane.updateSurface(background: color, blurred: config.backgroundBlur)
+                }
             }
         }
         refreshPets()
@@ -2037,18 +2278,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     public func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
-        if paneDragState?.source.view.window === win {
+        if paneDragState?.sourceView.window === win {
             endPaneDrag(at: .zero, cancelled: true)
         }
         let zoomKeys = paneZoomStates.compactMap { key, value in
-            value.session.view.window === win || value.overlay.window === win ? key : nil
+            value.pane.window === win || value.overlay.window === win ? key : nil
         }
         zoomKeys.forEach { restorePaneZoom(key: $0, refocus: false) }
         // Cancel any in-flight tab rename in this window's strip.
         terminalChromes[ObjectIdentifier(win)]?.strip.cancelRename()
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
-        tabIconAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
-        codeViews.removeValue(forKey: ObjectIdentifier(win))
+        utilityPanels.removeValue(forKey: ObjectIdentifier(win))
         sidebarToggleAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
         terminalChromes.removeValue(forKey: ObjectIdentifier(win))
         win.subtitle = ""

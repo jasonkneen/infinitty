@@ -399,6 +399,14 @@ final class NavigationTests: XCTestCase {
         XCTAssertLessThanOrEqual(frames[0].width, 40)
     }
 
+    func testTabStripUsesLiveProcessIconWhenProvided() {
+        let strip = TerminalTabStripView(frame: NSRect(x: 0, y: 0, width: 600, height: 36))
+        let icon = NSImage(size: NSSize(width: 16, height: 16))
+        strip.update(titles: ["shell", "btop"], selectedIndex: 1, icons: [1: icon])
+        XCTAssertTrue(strip.tabButtonImagesForTesting[1] === icon)
+        XCTAssertNotNil(strip.tabButtonImagesForTesting[0])
+    }
+
     /// Side-tabs mode lays the strip out as a left column and the body fills
     /// the remaining width.
     func testChromeSideTabsLeftColumn() {
@@ -433,6 +441,28 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(PaneDropZone.center.previewFrame(in: bounds), bounds)
     }
 
+    func testReferencePaneMetricsKeepTerminalTextInsideCard() {
+        XCTAssertEqual(PaneMetrics.inset, 5)
+        XCTAssertEqual(PaneMetrics.cornerRadius, 10)
+        XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 0), 15)
+        XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 24), 24)
+    }
+
+    func testFocusedPaneOutlineUsesBlueStateOnlyWhenSelected() throws {
+        let outline = PaneOutlineView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        let idle = try XCTUnwrap(outline.layer?.borderColor)
+        let idleColor = try XCTUnwrap(NSColor(cgColor: idle))
+        XCTAssertEqual(idleColor.alphaComponent, 0.12, accuracy: 0.01)
+        XCTAssertEqual(outline.layer?.borderWidth, 1)
+
+        outline.isSelected = true
+        let focused = try XCTUnwrap(outline.layer?.borderColor)
+        let focusedColor = try XCTUnwrap(NSColor(cgColor: focused)?.usingColorSpace(.sRGB))
+        XCTAssertEqual(focusedColor.alphaComponent, 0.62, accuracy: 0.01)
+        XCTAssertGreaterThan(focusedColor.blueComponent, focusedColor.redComponent)
+        XCTAssertEqual(outline.layer?.borderWidth, 1.5)
+    }
+
     func testPaneHeaderExposesSplitZoomAndDragAccessibility() {
         let header = PaneHeaderView(frame: NSRect(x: 0, y: 0, width: 500, height: PaneHeaderView.height))
         header.title = "fish"
@@ -441,6 +471,25 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(header.accessibilityLabel(), "Terminal pane: fish")
         XCTAssertEqual(header.splitRightAccessibilityLabelForTesting, "Split pane right")
         XCTAssertEqual(header.splitDownAccessibilityLabelForTesting, "Split pane down")
+    }
+
+    func testSplitChooserOffersExactlyTerminalFilesAndChat() {
+        XCTAssertEqual(PaneType.allCases.map(\.title), ["Terminal", "Files", "Chat"])
+        XCTAssertEqual(PaneType.allCases.map(\.symbol), [
+            "terminal", "folder", "bubble.left.and.bubble.right",
+        ])
+    }
+
+    func testUtilityPaneUsesInsetHeaderAndContent() {
+        let content = NSView()
+        let pane = UtilityPaneView(
+            kind: .files, contentView: content, background: NSColor.black)
+        pane.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
+        pane.layoutSubtreeIfNeeded()
+        XCTAssertEqual(pane.paneHeader.frame.minX, 5, accuracy: 0.5)
+        XCTAssertEqual(content.frame.minX, 5, accuracy: 0.5)
+        XCTAssertGreaterThan(content.frame.height, 400)
+        XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
     }
 
     func testTerminalViewReservesTopPaneHeader() {
@@ -472,6 +521,74 @@ final class NavigationTests: XCTestCase {
             ]),
         ])
         XCTAssertEqual(snapshot, expected)
+    }
+
+    func testPaneLayoutMoveReparentsLeafAtDirectionalEdge() throws {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let original = NSSplitView(frame: host.bounds)
+        original.isVertical = true
+        let source = NSView(frame: .zero)
+        let target = NSView(frame: .zero)
+        host.addSubview(original)
+        original.addArrangedSubview(source)
+        original.addArrangedSubview(target)
+
+        let result = PaneLayoutController.move(source: source, target: target, zone: .bottom)
+        XCTAssertTrue(result.changed)
+        let replacement = try XCTUnwrap(result.insertedSplit)
+        XCTAssertFalse(replacement.isVertical)
+        XCTAssertTrue(replacement.superview === host)
+        XCTAssertTrue(replacement.arrangedSubviews[0] === source)
+        XCTAssertTrue(replacement.arrangedSubviews[1] === target)
+    }
+
+    func testPaneLayoutCenterDropSwapsLeavesWithoutNewSplit() {
+        let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let first = NSView(frame: .zero)
+        let second = NSView(frame: .zero)
+        split.addArrangedSubview(first)
+        split.addArrangedSubview(second)
+
+        let result = PaneLayoutController.move(source: first, target: second, zone: .center)
+        XCTAssertTrue(result.changed)
+        XCTAssertNil(result.insertedSplit)
+        XCTAssertTrue(split.arrangedSubviews[0] === second)
+        XCTAssertTrue(split.arrangedSubviews[1] === first)
+    }
+
+    func testPaneLayoutReplacementPreservesSplitSlotGeometry() {
+        let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        split.isVertical = true
+        let original = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        let sibling = NSView(frame: NSRect(x: 241, y: 0, width: 359, height: 400))
+        split.addArrangedSubview(original)
+        split.addArrangedSubview(sibling)
+        original.frame = NSRect(x: 0, y: 0, width: 240, height: 400)
+        sibling.frame = NSRect(x: 241, y: 0, width: 359, height: 400)
+        let expected = original.frame
+        let replacement = NSView(frame: .zero)
+
+        XCTAssertTrue(PaneLayoutController.replace(original, with: replacement, in: split))
+        XCTAssertEqual(replacement.frame, expected)
+    }
+
+    func testPaneLayoutDividerSnapshotRestoresAsymmetricRatio() throws {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let split = NSSplitView(frame: host.bounds)
+        split.isVertical = true
+        let first = NSView(frame: .zero)
+        let second = NSView(frame: .zero)
+        host.addSubview(split)
+        split.addArrangedSubview(first)
+        split.addArrangedSubview(second)
+        split.setPosition(240, ofDividerAt: 0)
+        let snapshot = PaneLayoutController.captureDividerPositions(in: host)
+        let saved = try XCTUnwrap(snapshot.first?.positions.first)
+        split.setPosition(100, ofDividerAt: 0)
+
+        PaneLayoutController.restoreDividerPositions(snapshot)
+
+        XCTAssertEqual(first.frame.maxX, saved, accuracy: 0.5)
     }
 
 }

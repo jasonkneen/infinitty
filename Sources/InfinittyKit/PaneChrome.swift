@@ -1,5 +1,25 @@
 import AppKit
 
+enum PaneMetrics {
+    static let inset: CGFloat = 5
+    static let cornerRadius: CGFloat = 10
+    static let minimumTerminalContentInset: CGFloat = 15
+
+    static func terminalContentInset(configured: CGFloat) -> CGFloat {
+        max(configured, minimumTerminalContentInset)
+    }
+}
+
+extension NSView {
+    /// Portion covered by a transparent full-size titlebar. Normally zero
+    /// below horizontal tabs; nonzero when side tabs extend panes to the top.
+    func paneTopObstructionPoints() -> CGFloat {
+        guard let window, window.styleMask.contains(.fullSizeContentView) else { return 0 }
+        let layoutRect = convert(window.contentLayoutRect, from: nil)
+        return max(bounds.height - layoutRect.maxY, 0)
+    }
+}
+
 enum PaneDropZone: CaseIterable, Equatable {
     case left
     case right
@@ -48,9 +68,11 @@ indirect enum PaneLayoutNode: Equatable {
 }
 
 enum PaneLayoutController {
+    typealias DividerPositions = [(split: NSSplitView, positions: [CGFloat])]
+
     static func snapshot(of view: NSView) -> PaneLayoutNode? {
-        if let terminal = view as? TerminalView {
-            return .leaf(ObjectIdentifier(terminal))
+        if view is TerminalView || view is UtilityPaneView {
+            return .leaf(ObjectIdentifier(view))
         }
         if let split = view as? NSSplitView {
             let children = split.arrangedSubviews.compactMap(snapshot)
@@ -62,10 +84,104 @@ enum PaneLayoutController {
         }
         return nil
     }
+
+    @discardableResult
+    static func replace(_ old: NSView, with new: NSView, in parent: NSView) -> Bool {
+        let oldFrame = old.frame
+        let oldAutoresizingMask = old.autoresizingMask
+        if let split = parent as? NSSplitView {
+            guard let index = split.arrangedSubviews.firstIndex(of: old) else { return false }
+            old.removeFromSuperview()
+            new.frame = oldFrame
+            new.autoresizingMask = oldAutoresizingMask
+            split.insertArrangedSubview(new, at: index)
+            return true
+        }
+        guard old.superview === parent else { return false }
+        new.frame = oldFrame
+        new.autoresizingMask = oldAutoresizingMask
+        parent.replaceSubview(old, with: new)
+        return true
+    }
+
+    /// Move an existing leaf without recreating its session. Edge drops nest
+    /// it beside the target; center drops exchange leaf positions.
+    static func move(
+        source: NSView, target: NSView, zone: PaneDropZone
+    ) -> (changed: Bool, insertedSplit: NSSplitView?) {
+        guard source !== target, let sourceParent = source.superview,
+              let targetParent = target.superview else { return (false, nil) }
+        if zone == .center {
+            let sourcePlaceholder = NSView(frame: source.frame)
+            let targetPlaceholder = NSView(frame: target.frame)
+            guard replace(source, with: sourcePlaceholder, in: sourceParent),
+                  replace(target, with: targetPlaceholder, in: targetParent),
+                  let sourceSlot = sourcePlaceholder.superview,
+                  let targetSlot = targetPlaceholder.superview,
+                  replace(sourcePlaceholder, with: target, in: sourceSlot),
+                  replace(targetPlaceholder, with: source, in: targetSlot)
+            else { return (false, nil) }
+            return (true, nil)
+        }
+
+        guard let sourceSplit = sourceParent as? NSSplitView else { return (false, nil) }
+        let split = NSSplitView(frame: target.frame)
+        split.isVertical = zone == .left || zone == .right
+        split.dividerStyle = .thin
+        split.autoresizingMask = target.autoresizingMask
+        // Replace the target before detaching the source. This is the only
+        // fallible topology mutation; once it succeeds, the remaining moves
+        // cannot strand a detached pane if the target slot was invalid.
+        guard replace(target, with: split, in: targetParent) else { return (false, nil) }
+        split.addArrangedSubview(target)
+        source.removeFromSuperview()
+        collapseSingleChildSplit(sourceSplit)
+        if zone == .left || zone == .bottom {
+            split.insertArrangedSubview(source, at: 0)
+        } else {
+            split.addArrangedSubview(source)
+        }
+        return (true, split)
+    }
+
+    private static func collapseSingleChildSplit(_ split: NSSplitView) {
+        guard split.arrangedSubviews.count == 1,
+              let parent = split.superview else { return }
+        let survivor = split.arrangedSubviews[0]
+        survivor.removeFromSuperview()
+        _ = replace(split, with: survivor, in: parent)
+    }
+
+    static func captureDividerPositions(in root: NSView) -> DividerPositions {
+        var result: DividerPositions = []
+        func collect(_ view: NSView) {
+            if let split = view as? NSSplitView {
+                let positions = split.arrangedSubviews.dropLast().map {
+                    split.isVertical ? $0.frame.maxX : $0.frame.maxY
+                }
+                result.append((split, positions))
+                split.arrangedSubviews.forEach(collect)
+            } else {
+                view.subviews.forEach(collect)
+            }
+        }
+        collect(root)
+        return result
+    }
+
+    static func restoreDividerPositions(_ snapshots: DividerPositions) {
+        for snapshot in snapshots
+        where snapshot.split.superview != nil
+            && snapshot.split.arrangedSubviews.count == snapshot.positions.count + 1 {
+            for (index, position) in snapshot.positions.enumerated() {
+                snapshot.split.setPosition(position, ofDividerAt: index)
+            }
+        }
+    }
 }
 
 final class PaneHeaderView: NSView {
-    static let height: CGFloat = 24
+    static let height: CGFloat = 34
 
     var onSplitRight: (() -> Void)?
     var onSplitDown: (() -> Void)?
@@ -80,6 +196,10 @@ final class PaneHeaderView: NSView {
     private let splitRightButton = NSButton()
     private let splitDownButton = NSButton()
     private let bottomHairline = NSView()
+
+    var iconSymbol: String = "terminal" {
+        didSet { updateIcon() }
+    }
 
     var title: String {
         get { titleLabel.stringValue }
@@ -102,14 +222,13 @@ final class PaneHeaderView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.10).cgColor
 
-        iconView.image = NSImage(
-            systemSymbolName: "terminal", accessibilityDescription: "Terminal")
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
+        updateIcon()
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
         iconView.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.9)
         iconView.imageScaling = .scaleProportionallyDown
         addSubview(iconView)
 
-        titleLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
+        titleLabel.font = .monospacedSystemFont(ofSize: 14, weight: .semibold)
         titleLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.92)
         titleLabel.lineBreakMode = .byTruncatingTail
         addSubview(titleLabel)
@@ -131,9 +250,14 @@ final class PaneHeaderView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    private func updateIcon() {
+        iconView.image = NSImage(
+            systemSymbolName: iconSymbol, accessibilityDescription: titleLabel.stringValue)
+    }
+
     private func configure(_ button: NSButton, symbol: String, label: String, action: Selector) {
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
+        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
         button.imagePosition = .imageOnly
         button.isBordered = false
         button.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.8)
@@ -146,16 +270,16 @@ final class PaneHeaderView: NSView {
 
     override func layout() {
         super.layout()
-        let buttonSize: CGFloat = 22
+        let buttonSize: CGFloat = 30
         splitDownButton.frame = NSRect(
-            x: bounds.maxX - buttonSize - 2, y: 1, width: buttonSize, height: buttonSize)
+            x: bounds.maxX - buttonSize - 8, y: 2, width: buttonSize, height: buttonSize)
         splitRightButton.frame = NSRect(
             x: splitDownButton.frame.minX - buttonSize, y: 1,
             width: buttonSize, height: buttonSize)
-        iconView.frame = NSRect(x: 7, y: 6, width: 12, height: 12)
+        iconView.frame = NSRect(x: 14, y: 7, width: 20, height: 20)
         titleLabel.frame = NSRect(
-            x: 23, y: 4,
-            width: max(splitRightButton.frame.minX - 29, 0), height: 16)
+            x: 47, y: 6,
+            width: max(splitRightButton.frame.minX - 54, 0), height: 22)
         bottomHairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
     }
 
@@ -170,9 +294,13 @@ final class PaneHeaderView: NSView {
         guard let window else { return }
         let start = event.locationInWindow
         var dragging = false
-        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .keyDown]) {
             switch next.type {
             case .leftMouseDragged:
+                guard window.isKeyWindow else {
+                    if dragging { onDragEnded?(next.locationInWindow, true) }
+                    return
+                }
                 let point = next.locationInWindow
                 if !dragging, hypot(point.x - start.x, point.y - start.y) > 4 {
                     dragging = true
@@ -180,7 +308,10 @@ final class PaneHeaderView: NSView {
                 }
                 if dragging { onDragMoved?(point) }
             case .leftMouseUp:
-                if dragging { onDragEnded?(next.locationInWindow, false) }
+                if dragging { onDragEnded?(next.locationInWindow, !window.isKeyWindow) }
+                return
+            case .keyDown where next.keyCode == 53: // Escape
+                if dragging { onDragEnded?(next.locationInWindow, true) }
                 return
             default:
                 break
@@ -200,12 +331,37 @@ final class PaneDropPreviewView: NSView {
         layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.22).cgColor
         layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.95).cgColor
         layer?.borderWidth = 1.5
-        layer?.cornerRadius = 7
+        layer?.cornerRadius = PaneMetrics.cornerRadius
         layer?.masksToBounds = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+final class PaneOutlineView: NSView {
+    var isSelected = false {
+        didSet { updateAppearance() }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.borderWidth = 1
+        layer?.cornerRadius = PaneMetrics.cornerRadius
+        updateAppearance()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func updateAppearance() {
+        layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.026).cgColor
+        layer?.borderColor = (isSelected
+            ? NSColor.systemBlue.withAlphaComponent(0.62)
+            : NSColor.white.withAlphaComponent(0.12)).cgColor
+        layer?.borderWidth = isSelected ? 1.5 : 1
+    }
 }
 
 final class PaneDragBadgeView: NSView {
@@ -241,4 +397,3 @@ final class PaneDragBadgeView: NSView {
     required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
-

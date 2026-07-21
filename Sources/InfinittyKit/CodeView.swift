@@ -273,14 +273,12 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private enum DiffMode { case combined, split }
 
     private let config: AppConfig
+    private let panelKind: UtilityPanelKind?
     private weak var session: TerminalSession?
     private var cwdObserver: NSObjectProtocol?
 
     // UI
-    private let pageControl = CodeSegmentedBar(
-        labels: ["FILES", "CHANGES", "CHAT"],
-        icons: ["folder", "arrow.triangle.branch", "bubble.left.and.bubble.right"],
-        fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
+    private let pageControl: CodeSegmentedBar
     private let searchField = NSSearchField()
     private let commitRow = NSView()
     private let commitField = NSTextField()
@@ -348,12 +346,29 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private var diffMode: DiffMode = .combined
     private var diffFontSize: CGFloat
 
-    init(config: AppConfig) {
+    init(config: AppConfig, panelKind: UtilityPanelKind? = nil) {
         let saved = UserDefaults.standard.double(forKey: "codeDiffFontSize")
         // Diffs default to half the terminal font size — dense overview,
         // adjustable with the A−/A+ buttons (persisted).
         self.diffFontSize = saved > 0 ? CGFloat(saved) : config.fontSize * 0.5
         self.config = config
+        self.panelKind = panelKind
+        switch panelKind {
+        case .files:
+            self.pageControl = CodeSegmentedBar(
+                labels: ["FILES", "CHANGES"],
+                icons: ["folder", "arrow.triangle.branch"],
+                fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
+        case .chat:
+            self.pageControl = CodeSegmentedBar(
+                labels: ["CHAT"], icons: ["bubble.left.and.bubble.right"],
+                fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
+        case nil:
+            self.pageControl = CodeSegmentedBar(
+                labels: ["FILES", "CHANGES", "CHAT"],
+                icons: ["folder", "arrow.triangle.branch", "bubble.left.and.bubble.right"],
+                fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
+        }
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -750,6 +765,12 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         ])
         chatHost.isHidden = true
         view = container
+        if panelKind == .chat {
+            pageControl.isHidden = true
+            setPage(.chat)
+        } else {
+            setPage(.files)
+        }
     }
 
     override func viewDidLayout() {
@@ -1024,7 +1045,10 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     /// unrecognized name. Safe to call from the app control socket / MCP.
     @discardableResult
     func selectPage(named name: String) -> Bool {
-        switch name.trimmingCharacters(in: .whitespaces).lowercased() {
+        let normalized = name.trimmingCharacters(in: .whitespaces).lowercased()
+        if panelKind == .chat, normalized != "chat" { return false }
+        if panelKind == .files, normalized == "chat" { return false }
+        switch normalized {
         case "files": setPage(.files)
         case "changes", "git": setPage(.changes)
         case "chat": setPage(.chat)

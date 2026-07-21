@@ -95,9 +95,9 @@ printf 'split 1 right\n'       | nc -U /tmp/infinitty-current.sock
 printf 'toggle-quick-terminal\n' | nc -U /tmp/infinitty-current.sock
 printf 'focus 2\n'             | nc -U /tmp/infinitty-current.sock
 printf 'activity deploying…\n' | nc -U /tmp/infinitty-current.sock  # post to the notch widget
-printf 'toggle-sidebar\n'      | nc -U /tmp/infinitty-current.sock  # show/hide code sidebar
-printf 'sidebar show\n'        | nc -U /tmp/infinitty-current.sock  # show|hide|toggle the sidebar
-printf 'sidebar-tab chat\n'    | nc -U /tmp/infinitty-current.sock  # switch tab: files|changes|chat
+printf 'toggle-sidebar\n'      | nc -U /tmp/infinitty-current.sock  # show/hide the Files pane
+printf 'sidebar show\n'        | nc -U /tmp/infinitty-current.sock  # show|hide|toggle the Files pane
+printf 'sidebar-tab chat\n'    | nc -U /tmp/infinitty-current.sock  # open/focus Files, Changes, or Chat
 printf 'chat-model claude\n'   | nc -U /tmp/infinitty-current.sock  # set chat model (name/substring)
 printf 'chat-effort high\n'    | nc -U /tmp/infinitty-current.sock  # set effort: auto|low|medium|high
 printf 'subscribe\n'           | nc -U /tmp/infinitty-current.sock  # JSON event stream
@@ -217,14 +217,17 @@ Font to use one everywhere.
 - **Tabs**: native macOS tabs — ⌘T new tab, ⇧⌘←/→ previous/next tab,
   ⌘1–8 select by position, ⌘9 selects the last tab, and the tab bar "+" works;
   hold ⌘ to reveal the numbers in tab titles; ⇧⌘T renames the active tab
-- **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
-  the focused pane (tab closes when its last pane exits); ⇧⌥←/→/↑/↓ focuses
+- **Splits**: ⌘D split right, ⇧⌘D split down, then choose Terminal, Files, or
+  Chat. Splits nest arbitrarily; Files contains its own Files/Changes switch,
+  and each main tab can keep one Files pane and one Chat pane alongside any
+  number of terminals. ⌘W closes the focused pane (the tab closes when its last
+  terminal exits); ⇧⌥←/→/↑/↓ focuses
   and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
   pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly.
   Every pane has compact split controls in its header. Drag a pane header onto
   another pane's edge to move it, or onto the center to swap them; the blue
   preview shows the landing region before anything moves. Double-click a pane
-  header or press ⇧⌘Return to zoom it, then repeat to restore the exact split tree
+  header or press ⇧⌘Return to zoom it, then repeat to restore the exact split tree.
 - **Quick terminal**: set `quick-terminal-key = cmd+shift+space` for a persistent,
   global Quake-style terminal that slides down from the top. Its shell,
   scrollback, splits, and internal tabs stay alive while hidden. Its always-visible
@@ -288,21 +291,21 @@ Font to use one everywhere.
 - **Notch live activity**: `notch = true` shows a slim strip beside the
   MacBook notch with the running command and its exit status (OSC 133)
 
-### Sidebar: Files, Changes, and Chat
+### Mixed Files and Chat panes
 
-The side panel (toggle via sidebar button or `toggle-sidebar` socket command) has three tabs:
+Files and Chat are first-class leaves in the same split tree as terminals. The
+legacy `toggle-sidebar` socket command toggles the Files pane for compatibility.
 
-- **Files**: Directory tree with search, syntax-highlighted code preview, and
-  breadcrumb navigation. Quickly explore and open files in your workspace.
-- **Changes**: Git status and diffs when in a repository. See modified files,
-  stage/unstage changes without leaving the terminal.
+- **Files / Changes**: One pane with a compact internal switch. Files provides
+  directory search, syntax-highlighted previews, and breadcrumb navigation;
+  Changes provides Git status, diffs, staging, and unstaging.
 - **Chat**: AI agent for conversation and terminal control. Ask questions about
   your code, execute shell commands, read the screen, or switch between panes.
   Choose your AI model (Claude, Codex, or Apple Intelligence) via the dropdown,
   and enable reasoning/thinking via the effort selector for deeper analysis.
 
-All three tabs are always available in the sidebar and sync with your current
-directory.
+Each main tab owns its Files/Chat panes and nested layout independently. Both
+panes follow the terminal focused in that tab.
 
 ## Terminal feature coverage
 

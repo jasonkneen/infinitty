@@ -25,7 +25,7 @@ final class TerminalTabStripView: NSView {
     /// Tear the tab at `index` out into its own new window (drag out).
     var onTearOut: ((Int) -> Void)?
 
-    static let height: CGFloat = 36
+    static let height: CGFloat = 44
     /// Vertical column layout (side tabs) instead of a horizontal row.
     var vertical = false { didSet { needsLayout = true } }
     private static var accent: NSColor { CodePalette.selectionAccent }
@@ -61,7 +61,7 @@ final class TerminalTabStripView: NSView {
         addSubview(addButton)
 
         hairline.wantsLayer = true
-        hairline.layer?.backgroundColor = CodePalette.hairline.cgColor
+        hairline.layer?.backgroundColor = NSColor.clear.cgColor
         addSubview(hairline)
     }
 
@@ -76,6 +76,7 @@ final class TerminalTabStripView: NSView {
     var titlesForTesting: [String] { titles }
     var selectedIndexForTesting: Int { selectedIndex }
     var tabButtonFramesForTesting: [NSRect] { tabButtons.map { $0.frame } }
+    var tabButtonImagesForTesting: [NSImage?] { tabButtons.map { $0.image } }
     var addButtonFrameForTesting: NSRect { addButton.frame }
 
     /// Pin metadata for a tab: a compact SF-symbol icon + accent color shown
@@ -90,7 +91,10 @@ final class TerminalTabStripView: NSView {
     var onContextMenu: ((Int, NSButton) -> Void)?
 
     /// Rebuild the strip from the tab group's titles + selection + pins.
-    func update(titles: [String], selectedIndex: Int, pins: [Int: Pin] = [:]) {
+    func update(
+        titles: [String], selectedIndex: Int,
+        pins: [Int: Pin] = [:], icons: [Int: NSImage] = [:]
+    ) {
         self.selectedIndex = selectedIndex
         self.pins = pins
         if titles.count != self.titles.count {
@@ -110,11 +114,11 @@ final class TerminalTabStripView: NSView {
                 button.contentTintColor = .white
                 button.layer?.backgroundColor = pin.color.cgColor
             } else {
-                button.image = NSImage(
+                button.image = icons[index] ?? NSImage(
                     systemSymbolName: "terminal.fill", accessibilityDescription: title)
                 button.title = title
                 button.imagePosition = .imageLeading
-                button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
+                button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
                 button.font = .systemFont(ofSize: 11, weight: active ? .semibold : .regular)
                 button.contentTintColor = active ? .labelColor : .secondaryLabelColor
                 button.layer?.backgroundColor = active
@@ -147,7 +151,7 @@ final class TerminalTabStripView: NSView {
             button.alignment = .center
             button.lineBreakMode = .byTruncatingTail
             button.wantsLayer = true
-            button.layer?.cornerRadius = 8
+            button.layer?.cornerRadius = 12
             addSubview(button)
             return button
         }
@@ -157,6 +161,7 @@ final class TerminalTabStripView: NSView {
             close.image = NSImage(
                 systemSymbolName: "xmark", accessibilityDescription: "Close Tab")
             close.imagePosition = .imageOnly
+            close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
             close.isBordered = false
             close.contentTintColor = .secondaryLabelColor
             (close.cell as? NSButtonCell)?.imageScaling = .scaleProportionallyDown
@@ -169,7 +174,9 @@ final class TerminalTabStripView: NSView {
     override func layout() {
         super.layout()
         let pad: CGFloat = 6
-        let leadingInset: CGFloat = 78
+        // Leave a reference-sized titlebar runway for traffic lights and
+        // global controls before the first tab capsule.
+        let leadingInset = min(CGFloat(190), max(CGFloat(78), bounds.width * 0.15))
         let addSize: CGFloat = 28
         if vertical {
             hairline.frame = NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height)
@@ -195,7 +202,7 @@ final class TerminalTabStripView: NSView {
         }
         hairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
         addButton.frame = NSRect(
-            x: bounds.maxX - addSize - pad - 32, y: (bounds.height - addSize) / 2,
+            x: bounds.maxX - addSize - pad, y: (bounds.height - addSize) / 2,
             width: addSize, height: addSize)
         guard !tabButtons.isEmpty else { return }
         let available = max(addButton.frame.minX - pad - leadingInset, 1)
@@ -205,7 +212,7 @@ final class TerminalTabStripView: NSView {
         let usedByPins = CGFloat(pinnedCount) * (pinWidth + pad)
         let remaining = max(available - usedByPins, 1)
         let tabWidth = unpinnedCount > 0
-            ? min(220, max(remaining / CGFloat(unpinnedCount) - pad, 1))
+            ? min(280, max(remaining / CGFloat(unpinnedCount) - pad, 1))
             : 1
         let tabHeight = bounds.height - 8
         var xPos = leadingInset
@@ -383,8 +390,8 @@ final class DraggableTabButton: NSButton {
 final class TerminalChromeView: NSView {
     let strip = TerminalTabStripView()
     let body = NSView()
-    /// When false (single tab), the strip is hidden and the body fills the
-    /// whole chrome — matching macOS's "no tab bar for one tab" behaviour.
+    /// Retained for callers that still report group size. Reference chrome
+    /// deliberately keeps the strip visible even when this is false.
     var showsStrip = true {
         didSet {
             // Reference chrome always retains one visible tab, even for a
@@ -401,11 +408,18 @@ final class TerminalChromeView: NSView {
     static let sideWidth: CGFloat = 150
 
     private let stripBlur = NSVisualEffectView()
+    private let bodyBlur = NSVisualEffectView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        body.wantsLayer = true
         body.autoresizingMask = [.width, .height]
         addSubview(body)
+        bodyBlur.material = .hudWindow
+        bodyBlur.blendingMode = .behindWindow
+        bodyBlur.state = .active
+        bodyBlur.isHidden = true
+        body.addSubview(bodyBlur)
         stripBlur.material = .hudWindow
         stripBlur.blendingMode = .behindWindow
         stripBlur.state = .active
@@ -420,10 +434,13 @@ final class TerminalChromeView: NSView {
     /// backing plus a subtle tint; otherwise a solid theme colour.
     func setBacking(color: NSColor, blur: Bool) {
         stripBlur.isHidden = !blur
+        bodyBlur.isHidden = !blur
         if blur {
             strip.setBackgroundColor(color.withAlphaComponent(0.42))
+            body.layer?.backgroundColor = color.withAlphaComponent(0.28).cgColor
         } else {
             strip.setBackgroundColor(color)
+            body.layer?.backgroundColor = color.cgColor
         }
     }
 
@@ -438,12 +455,13 @@ final class TerminalChromeView: NSView {
             body.frame = NSRect(
                 x: stripW, y: 0, width: bounds.width - stripW, height: bounds.height)
         } else {
-        let stripH = min(TerminalTabStripView.height, bounds.height)
+            let stripH = min(TerminalTabStripView.height, bounds.height)
             strip.frame = NSRect(
                 x: 0, y: bounds.height - stripH, width: bounds.width, height: stripH)
             stripBlur.frame = strip.frame
             body.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripH)
         }
-        for sub in body.subviews { sub.frame = body.bounds }
+        bodyBlur.frame = body.bounds
+        for sub in body.subviews where sub !== bodyBlur { sub.frame = body.bounds }
     }
 }

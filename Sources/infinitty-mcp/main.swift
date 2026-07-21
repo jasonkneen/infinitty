@@ -91,8 +91,8 @@ let tools: [Tool] = [
     ),
     Tool(
         name: "infinitty_sidebar",
-        description: "Show, hide, or toggle infinitty's code sidebar (the Files / "
-            + "Changes / Chat panel). Lets the assistant drive its own interface.",
+        description: "Show, hide, or toggle infinitty's Files pane. The Files pane "
+            + "contains the Files / Changes switch.",
         schema: [
             "type": "object",
             "properties": [
@@ -107,15 +107,14 @@ let tools: [Tool] = [
     ),
     Tool(
         name: "infinitty_sidebar_tab",
-        description: "Switch infinitty's sidebar to a tab: files, changes (git), or "
-            + "chat. Opens the sidebar first if it is closed.",
+        description: "Open or focus a Files/Changes pane or the independent Chat pane.",
         schema: [
             "type": "object",
             "properties": [
                 "tab": [
                     "type": "string",
                     "enum": ["files", "changes", "chat"],
-                    "description": "Which sidebar tab to show",
+                    "description": "Which panel content to show",
                 ] as [String: Any],
             ],
             "required": ["tab"],

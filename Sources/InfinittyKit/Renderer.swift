@@ -90,7 +90,12 @@ final class Renderer: NSObject {
     private let resizeRenderPending = OSAllocatedUnfairLock(initialState: false)
 
     private(set) var config: AppConfig
-    var insetPoints: CGFloat { config.margin }
+    // Pane chrome owns the first few points around the card. Keep terminal
+    // glyphs clear of that border even when a user's legacy config sets
+    // margin to zero.
+    var insetPoints: CGFloat {
+        PaneMetrics.terminalContentInset(configured: config.margin)
+    }
 
     static let sharedDevice: MTLDevice = MTLCreateSystemDefaultDevice()!
 
