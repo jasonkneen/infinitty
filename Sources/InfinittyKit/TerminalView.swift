@@ -661,19 +661,19 @@ final class TerminalView: NSView {
         menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Split Right", action: Selector(("splitRight:")), keyEquivalent: "")
-        menu.addItem(withTitle: "Split Left", action: Selector(("splitLeft:")), keyEquivalent: "")
-        menu.addItem(withTitle: "Split Down", action: Selector(("splitDown:")), keyEquivalent: "")
-        menu.addItem(withTitle: "Split Up", action: Selector(("splitUp:")), keyEquivalent: "")
+        menu.addItem(withTitle: "Split Right", action: #selector(AppDelegate.splitRight(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Split Left", action: #selector(AppDelegate.splitLeft(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Split Down", action: #selector(AppDelegate.splitDown(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Split Up", action: #selector(AppDelegate.splitUp(_:)), keyEquivalent: "")
         menu.addItem(
             withTitle: "Toggle Pane Zoom",
-            action: Selector(("togglePaneZoom:")), keyEquivalent: "")
+            action: #selector(AppDelegate.togglePaneZoom(_:)), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Rename Tab…", action: Selector(("renameTab:")), keyEquivalent: "")
+        menu.addItem(withTitle: "Rename Tab…", action: #selector(AppDelegate.renameTab(_:)), keyEquivalent: "")
         menu.addItem(.separator())
         let reset = menu.addItem(withTitle: "Reset Terminal", action: #selector(resetTerminal(_:)), keyEquivalent: "")
         reset.target = self
-        menu.addItem(withTitle: "Close Pane", action: Selector(("closePane:")), keyEquivalent: "")
+        menu.addItem(withTitle: "Close Pane", action: #selector(AppDelegate.closePane(_:)), keyEquivalent: "")
         return menu
     }
 

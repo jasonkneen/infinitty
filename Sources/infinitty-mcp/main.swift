@@ -42,7 +42,7 @@ func infinittyRequest(_ line: String, timeout: Int32 = 130) -> String {
     var tv = timeval(tv_sec: time_t(timeout), tv_usec: 0)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
-    var out = Array((line + "\n").utf8)
+    let out = Array((line + "\n").utf8)
     _ = out.withUnsafeBufferPointer { write(fd, $0.baseAddress!, $0.count) }
 
     var response = [UInt8]()

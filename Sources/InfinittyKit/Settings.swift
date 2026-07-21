@@ -270,7 +270,7 @@ final class SettingsWindowController: NSWindowController {
             return b
         }
         let updateButton = NSButton(title: "Check for Updates…", target: nil,
-            action: Selector(("checkForUpdates:")))
+            action: #selector(AppDelegate.checkForUpdates(_:)))
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .regular
         updateButton.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
