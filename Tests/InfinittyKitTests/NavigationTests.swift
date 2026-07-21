@@ -506,12 +506,87 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(PaneMetrics.trailingInset, 8)
         XCTAssertEqual(PaneMetrics.internalHorizontalInset, 2)
         XCTAssertEqual(PaneMetrics.topInset, 5)
-        XCTAssertEqual(PaneMetrics.bottomInset, 8)
+        XCTAssertEqual(PaneMetrics.bottomInset, 10)
         XCTAssertEqual(PaneMetrics.internalVerticalInset, 2)
         XCTAssertEqual(PaneMetrics.horizontalCanvasInset, 0)
         XCTAssertEqual(PaneMetrics.cornerRadius, 10)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 0), 15)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 24), 24)
+    }
+
+    func testHorizontalPaneRowGivesWindowGrowthToTheMiddleTerminal() {
+        let split = PaneSplitView(frame: NSRect(x: 0, y: 0, width: 1_000, height: 500))
+        split.isVertical = true
+        split.dividerStyle = .thin
+        let files = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        let terminal = TerminalView(frame: .zero)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        split.addArrangedSubview(files)
+        split.addArrangedSubview(terminal)
+        split.addArrangedSubview(chat)
+        split.adjustSubviews()
+        split.setPosition(200, ofDividerAt: 0)
+        split.setPosition(799, ofDividerAt: 1)
+        let before = [files.frame.width, terminal.frame.width, chat.frame.width]
+
+        split.setFrameSize(NSSize(width: 1_200, height: 500))
+        let after = [files.frame.width, terminal.frame.width, chat.frame.width]
+
+        XCTAssertEqual(after[0], before[0], accuracy: 0.5)
+        XCTAssertEqual(after[1], before[1] + 200, accuracy: 0.5)
+        XCTAssertEqual(after[2], before[2], accuracy: 0.5)
+    }
+
+    func testHorizontalPaneRowUsesGeometricMiddleEvenWhenItIsFiles() {
+        let split = PaneSplitView(frame: NSRect(x: 0, y: 0, width: 1_000, height: 500))
+        split.isVertical = true
+        split.dividerStyle = .thin
+        let terminal = TerminalView(frame: .zero)
+        let files = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        split.addArrangedSubview(terminal)
+        split.addArrangedSubview(files)
+        split.addArrangedSubview(chat)
+        split.adjustSubviews()
+        split.setPosition(200, ofDividerAt: 0)
+        split.setPosition(799, ofDividerAt: 1)
+        let before = [terminal.frame.width, files.frame.width, chat.frame.width]
+
+        split.setFrameSize(NSSize(width: 1_200, height: 500))
+        let after = [terminal.frame.width, files.frame.width, chat.frame.width]
+
+        XCTAssertEqual(after[0], before[0], accuracy: 0.5)
+        XCTAssertEqual(after[1], before[1] + 200, accuracy: 0.5)
+        XCTAssertEqual(after[2], before[2], accuracy: 0.5)
+    }
+
+    func testMaximizedPaneResizeKeepsVisiblePaneInsideSplitBounds() {
+        for hiddenIndex in [0, 1] {
+            let split = PaneSplitView(
+                frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+            split.isVertical = true
+            split.dividerStyle = .thin
+            let panes = [TerminalView(frame: .zero), TerminalView(frame: .zero)]
+            panes.forEach(split.addArrangedSubview)
+            split.adjustSubviews()
+            panes[hiddenIndex].isHidden = true
+            // Maximize/restore animation can leave the hidden pane's model
+            // frame stale while the visible pane already fills the split.
+            panes[hiddenIndex].frame = NSRect(
+                x: hiddenIndex == 0 ? 0 : 250, y: 0, width: 250, height: 400)
+            panes[1 - hiddenIndex].frame = split.bounds
+
+            split.setFrameSize(NSSize(width: 600, height: 400))
+
+            let visible = panes[1 - hiddenIndex]
+            XCTAssertGreaterThan(visible.frame.width, 0)
+            XCTAssertGreaterThanOrEqual(visible.frame.minX, split.bounds.minX - 0.5)
+            XCTAssertLessThanOrEqual(visible.frame.maxX, split.bounds.maxX + 0.5)
+        }
     }
 
     func testEveryPaneUsesSubtleBlueAndFocusBrightensIt() throws {
@@ -572,7 +647,7 @@ final class NavigationTests: XCTestCase {
         pane.layoutSubtreeIfNeeded()
         XCTAssertEqual(pane.paneHeader.frame.minX, 8, accuracy: 0.5)
         XCTAssertEqual(content.frame.minX, 8, accuracy: 0.5)
-        XCTAssertEqual(content.frame.minY, 8, accuracy: 0.5)
+        XCTAssertEqual(content.frame.minY, PaneMetrics.bottomInset, accuracy: 0.5)
         XCTAssertGreaterThan(content.frame.height, 400)
         XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
         XCTAssertTrue(pane.outlineIsAboveContentForTesting)
@@ -693,8 +768,84 @@ final class NavigationTests: XCTestCase {
         let replacement = try XCTUnwrap(result.insertedSplit)
         XCTAssertFalse(replacement.isVertical)
         XCTAssertTrue(replacement.superview === host)
-        XCTAssertTrue(replacement.arrangedSubviews[0] === source)
-        XCTAssertTrue(replacement.arrangedSubviews[1] === target)
+        XCTAssertTrue(replacement.arrangedSubviews[0] === target)
+        XCTAssertTrue(replacement.arrangedSubviews[1] === source)
+    }
+
+    func testMovingChatBelowTerminalKeepsEveryPaneInsideTheRootGeometry() throws {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 1_570, height: 999))
+        let root = PaneSplitView(frame: host.bounds)
+        root.isVertical = true
+        root.autoresizingMask = [.width, .height]
+        let left = PaneSplitView(frame: .zero)
+        left.isVertical = true
+        let files = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        let terminal = TerminalView(frame: .zero)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        // Live panes historically inherited root-style flexible masks before
+        // being nested; exercise that reparenting path explicitly.
+        files.autoresizingMask = [.width, .height]
+        terminal.autoresizingMask = [.width, .height]
+        chat.autoresizingMask = [.width, .height]
+        left.autoresizingMask = [.width, .height]
+        host.addSubview(root)
+        root.addArrangedSubview(left)
+        root.addArrangedSubview(chat)
+        left.addArrangedSubview(files)
+        left.addArrangedSubview(terminal)
+        root.setPosition(1_055, ofDividerAt: 0)
+        left.setPosition(350, ofDividerAt: 0)
+        host.layoutSubtreeIfNeeded()
+
+        let result = PaneLayoutController.move(
+            source: chat, target: terminal, zone: .bottom)
+        XCTAssertTrue(result.changed)
+        if let inserted = result.insertedSplit {
+            inserted.setPosition(inserted.bounds.height / 2, ofDividerAt: 0)
+        }
+        host.layoutSubtreeIfNeeded()
+
+        for pane in [files, terminal, chat] {
+            let frame = pane.convert(pane.bounds, to: host)
+            XCTAssertGreaterThan(frame.width, 0, "pane=\(pane) frame=\(frame)")
+            XCTAssertGreaterThan(frame.height, 0, "pane=\(pane) frame=\(frame)")
+            XCTAssertTrue(host.bounds.contains(frame), "pane=\(pane) frame=\(frame)")
+            XCTAssertFalse(pane.autoresizingMask.contains(.width))
+            XCTAssertFalse(pane.autoresizingMask.contains(.height))
+        }
+    }
+
+    func testBottomDropsAcceptEveryRequestedPanePairing() throws {
+        func verify(source: NSView, target: NSView) throws {
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+            let root = PaneSplitView(frame: host.bounds)
+            root.isVertical = true
+            host.addSubview(root)
+            root.addArrangedSubview(target)
+            root.addArrangedSubview(source)
+            root.adjustSubviews()
+
+            let result = PaneLayoutController.move(
+                source: source, target: target, zone: .bottom)
+            let verticalStack = try XCTUnwrap(result.insertedSplit)
+            XCTAssertTrue(result.changed)
+            XCTAssertFalse(verticalStack.isVertical)
+            XCTAssertTrue(verticalStack.arrangedSubviews[0] === target)
+            XCTAssertTrue(verticalStack.arrangedSubviews[1] === source)
+        }
+
+        try verify(
+            source: UtilityPaneView(kind: .chat, contentView: NSView(), background: .black),
+            target: TerminalView(frame: .zero))
+        try verify(
+            source: UtilityPaneView(kind: .chat, contentView: NSView(), background: .black),
+            target: UtilityPaneView(
+                kind: .files, contentView: NSView(), background: .black))
+        try verify(
+            source: UtilityPaneView(kind: .files, contentView: NSView(), background: .black),
+            target: TerminalView(frame: .zero))
     }
 
     func testRepeatedNestedPaneMovesPreserveEveryLeafIdentity() {

@@ -1011,10 +1011,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let sibling = split.arrangedSubviews[0]
         sibling.removeFromSuperview()
         if win.contentView === split {
+            sibling.autoresizingMask = [.width, .height]
             win.contentView = sibling
         } else if let parent = split.superview as? NSSplitView {
             let idx = parent.arrangedSubviews.firstIndex(of: split) ?? 0
             split.removeFromSuperview()
+            sibling.autoresizingMask = []
             parent.insertArrangedSubview(sibling, at: idx)
         } else if let parent = split.superview {
             // blur wrapper or other plain container
@@ -1347,6 +1349,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else {
             return false
         }
+        // Only the root split follows a plain container. Once views become
+        // arranged children, NSSplitView is their sole geometry owner.
+        oldView.autoresizingMask = []
+        newView.autoresizingMask = []
         if newFirst {
             split.addArrangedSubview(newView)
             split.addArrangedSubview(oldView)
@@ -1787,6 +1793,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else if let parent = container as? NSSplitView {
             let idx = parent.arrangedSubviews.firstIndex(of: old) ?? 0
             old.removeFromSuperview()
+            splitView.autoresizingMask = []
             parent.insertArrangedSubview(splitView, at: idx)
         } else if let parent = container {
             splitView.frame = old.frame
@@ -1794,6 +1801,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else {
             return
         }
+        old.autoresizingMask = []
+        newSession.view.autoresizingMask = []
         if newFirst {
             splitView.addArrangedSubview(newSession.view)
             splitView.addArrangedSubview(old)

@@ -289,7 +289,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private let textView = NSTextView()
     private let previewScroll = NSScrollView()
     private let previewTitle = NSTextField(labelWithString: "")
-    private let markdownToggle = CodeSegmentedBar(labels: ["Rendered", "Raw"], fontSize: 10)
+    private let markdownToggle = CodeSegmentedBar(
+        labels: ["Rendered", "Raw"], fontSize: 10, squared: true)
     private let stageButton = NSButton()
     private let branchFooter = NSView()
     private let branchButton = NSButton()
@@ -582,7 +583,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
 
             markdownToggle.trailingAnchor.constraint(equalTo: previewHeader.trailingAnchor, constant: -6),
             markdownToggle.centerYAnchor.constraint(equalTo: previewHeader.centerYAnchor),
-            markdownToggle.heightAnchor.constraint(equalToConstant: 20),
+            markdownToggle.heightAnchor.constraint(equalToConstant: 24),
 
             stageButton.trailingAnchor.constraint(equalTo: previewHeader.trailingAnchor, constant: -6),
             stageButton.centerYAnchor.constraint(equalTo: previewHeader.centerYAnchor),
@@ -695,7 +696,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             equalTo: commitRow.bottomAnchor, constant: 6)
         headerTopToCommit?.isActive = false
         pageControlTop = pageControl.topAnchor.constraint(
-            equalTo: container.topAnchor, constant: 6)
+            equalTo: container.topAnchor, constant: panelKind == .files ? 2 : 6)
         chatHostTop = panelKind == .chat
             ? chatHost.topAnchor.constraint(equalTo: container.topAnchor)
             : chatHost.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6)
@@ -713,6 +714,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             searchField.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6),
             searchField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             searchField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            searchField.heightAnchor.constraint(equalToConstant: 24),
             commitRow.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6),
             commitRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             commitRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
@@ -782,7 +784,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     override func viewDidLayout() {
         super.viewDidLayout()
         if panelKind != nil {
-            if pageControlTop?.constant != 6 { pageControlTop?.constant = 6 }
+            let target: CGFloat = panelKind == .files ? 2 : 6
+            if pageControlTop?.constant != target { pageControlTop?.constant = target }
             return
         }
         guard let window = view.window else { return }
@@ -1712,7 +1715,12 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     var headerTextForTesting: String { pathLabel.stringValue }
     var previewTitleForTesting: String { previewTitle.stringValue }
     var markdownToggleHiddenForTesting: Bool { markdownToggle.isHidden }
+    var markdownToggleFrameForTesting: NSRect { markdownToggle.frame }
+    var markdownToggleCornerRadiusForTesting: CGFloat {
+        markdownToggle.outerCornerRadiusForTesting
+    }
     var pageControlFrameForTesting: NSRect { pageControl.frame }
+    var searchFieldFrameForTesting: NSRect { searchField.frame }
     var branchFooterTextForTesting: String? {
         branchFooter.isHidden ? nil : branchButton.title
     }

@@ -87,6 +87,7 @@ final class CodeSegmentedBar: NSView {
     var labelsForTesting: [String] { labels }
     var fontSizeForTesting: CGFloat { font.pointSize }
     var fontWeightForTesting: CGFloat { fontWeight.rawValue }
+    var outerCornerRadiusForTesting: CGFloat { squared ? 7 : bounds.height / 2 }
 
     private var iconPointSize: CGFloat { font.pointSize + 2 }
 
@@ -109,7 +110,9 @@ final class CodeSegmentedBar: NSView {
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
         var width: CGFloat = 0
         for (i, label) in labels.enumerated() {
-            var seg = ceil(label.size(withAttributes: attrs).width) + 20
+            // Icon tabs need more breathing room than the compact text-only
+            // preview toggle, especially when the bar is centered in a pane.
+            var seg = ceil(label.size(withAttributes: attrs).width) + (hasIcons ? 36 : 20)
             if icons[i] != nil { seg += iconPointSize + iconGap }
             width += max(seg, 64)
         }

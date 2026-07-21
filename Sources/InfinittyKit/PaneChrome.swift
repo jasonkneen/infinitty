@@ -44,7 +44,7 @@ enum PaneMetrics {
     static let trailingInset: CGFloat = 8
     static let internalHorizontalInset: CGFloat = 2
     static let topInset: CGFloat = 5
-    static let bottomInset: CGFloat = 8
+    static let bottomInset: CGFloat = 10
     static let internalVerticalInset: CGFloat = 2
     static let horizontalCanvasInset: CGFloat = 0
     static let cornerRadius: CGFloat = 10
@@ -59,6 +59,64 @@ enum PaneMetrics {
 /// breaks the window's one continuous tinted surface.
 final class PaneSplitView: NSSplitView {
     override var dividerColor: NSColor { .clear }
+
+    /// Keep edge columns stable as the window width changes. The physical
+    /// middle column absorbs horizontal growth, matching the reference pane
+    /// model; a terminal is only the tie-breaker in a two-column nested row.
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        guard isVertical, arrangedSubviews.count > 1, oldSize.width > 0,
+              !arrangedSubviews.contains(where: \.isHidden) else {
+            super.resizeSubviews(withOldSize: oldSize)
+            return
+        }
+        let delta = bounds.width - oldSize.width
+        guard abs(delta) > 0.001,
+              let flexibleIndex = flexibleColumnIndex() else {
+            super.resizeSubviews(withOldSize: oldSize)
+            return
+        }
+        var widths = arrangedSubviews.map(\.frame.width)
+        let flexibleWidth = widths[flexibleIndex] + delta
+        // Once the flexible column reaches a usable minimum, fall back to
+        // AppKit's proportional shrink rather than crushing it to nothing.
+        guard flexibleWidth >= 120 else {
+            super.resizeSubviews(withOldSize: oldSize)
+            return
+        }
+        widths[flexibleIndex] = flexibleWidth
+        var x: CGFloat = 0
+        for (index, view) in arrangedSubviews.enumerated() {
+            view.frame = NSRect(
+                x: x, y: 0, width: max(widths[index], 0), height: bounds.height)
+            x += widths[index]
+            if index < arrangedSubviews.count - 1 { x += dividerThickness }
+        }
+    }
+
+    private func flexibleColumnIndex() -> Int? {
+        let center = CGFloat(arrangedSubviews.count - 1) / 2
+        let visible = arrangedSubviews.indices.filter {
+            !arrangedSubviews[$0].isHiddenOrHasHiddenAncestor
+        }
+        // In a true row the physical middle is flexible regardless of pane
+        // kind. Pane type is only a tie-breaker for two-column nested rows.
+        if visible.count >= 3, visible.count % 2 == 1 {
+            return visible[visible.count / 2]
+        }
+        let terminals = visible.filter { containsTerminal(arrangedSubviews[$0]) }
+        let candidates = terminals.isEmpty ? visible : terminals
+        return candidates.min {
+            abs(CGFloat($0) - center) < abs(CGFloat($1) - center)
+        }
+    }
+
+    private func containsTerminal(_ view: NSView) -> Bool {
+        if view is TerminalView { return true }
+        if let split = view as? NSSplitView {
+            return split.arrangedSubviews.contains(where: containsTerminal)
+        }
+        return view.subviews.contains(where: containsTerminal)
+    }
 }
 
 extension NSView {
@@ -207,7 +265,10 @@ enum PaneLayoutController {
             }
             old.removeFromSuperview()
             new.frame = oldFrame
-            new.autoresizingMask = oldAutoresizingMask
+            // NSSplitView owns arranged-subview geometry. Carrying a root
+            // `.width/.height` mask into a nested slot lets AppKit resize the
+            // child a second time while a drag is reparenting it.
+            new.autoresizingMask = []
             split.insertArrangedSubview(new, at: index)
             PaneLog.log("replace split=\(ObjectIdentifier(split)) index=\(index) "
                 + "old=\(ObjectIdentifier(old)) new=\(ObjectIdentifier(new))")
@@ -253,6 +314,7 @@ enum PaneLayoutController {
                     + "target=\(ObjectIdentifier(target))")
                 return (false, nil)
             }
+            normalizeArrangedSubviewMasks(around: source)
             return (true, nil)
         }
 
@@ -264,20 +326,38 @@ enum PaneLayoutController {
         let split = PaneSplitView(frame: target.frame)
         split.isVertical = zone == .left || zone == .right
         split.dividerStyle = .thin
-        split.autoresizingMask = target.autoresizingMask
+        split.autoresizingMask = []
         // Replace the target before detaching the source. This is the only
         // fallible topology mutation; once it succeeds, the remaining moves
         // cannot strand a detached pane if the target slot was invalid.
         guard replace(target, with: split, in: targetParent) else { return (false, nil) }
+        target.autoresizingMask = []
         split.addArrangedSubview(target)
         source.removeFromSuperview()
         collapseSingleChildSplit(sourceSplit)
-        if zone == .left || zone == .bottom {
+        source.autoresizingMask = []
+        // Horizontal NSSplitView order is visual top-to-bottom, so a bottom
+        // drop appends after the target while a top drop inserts before it.
+        if zone == .left || zone == .top {
             split.insertArrangedSubview(source, at: 0)
         } else {
             split.addArrangedSubview(source)
         }
+        normalizeArrangedSubviewMasks(around: source)
         return (true, split)
+    }
+
+    private static func normalizeArrangedSubviewMasks(around view: NSView) {
+        var root = view
+        while let parent = root.superview as? NSSplitView { root = parent }
+        guard let split = root as? NSSplitView else { return }
+        func normalize(_ current: NSSplitView) {
+            for child in current.arrangedSubviews {
+                child.autoresizingMask = []
+                if let nested = child as? NSSplitView { normalize(nested) }
+            }
+        }
+        normalize(split)
     }
 
     private static func collapseSingleChildSplit(_ split: NSSplitView) {

@@ -8,7 +8,7 @@ final class CodeViewTests: XCTestCase {
         controller.loadViewIfNeeded()
         XCTAssertEqual(controller.pageControlLabelsForTesting, ["FILES", "CHANGES"])
         XCTAssertEqual(controller.backgroundAlphaForTesting, 0, accuracy: 0.01)
-        XCTAssertEqual(controller.panelTopInsetForTesting, 6, accuracy: 0.5)
+        XCTAssertEqual(controller.panelTopInsetForTesting, 2, accuracy: 0.5)
         XCTAssertTrue(controller.selectPage(named: "changes"))
         XCTAssertFalse(controller.selectPage(named: "chat"))
     }
@@ -129,6 +129,30 @@ final class CodeViewTests: XCTestCase {
         XCTAssertLessThanOrEqual(frame.height, 40, "frame=\(frame)")
     }
 
+    func testFilesSearchFieldIsOneAndHalfTimesRegularHeight() {
+        let controller = CodeViewController(config: AppConfig(), panelKind: .files)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 500),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = controller.view
+        window.layoutIfNeeded()
+        controller.view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(controller.searchFieldFrameForTesting.height, 24, accuracy: 0.5)
+    }
+
+    func testFilesPageControlUsesWiderSegments() {
+        let controller = CodeViewController(config: AppConfig(), panelKind: .files)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 500),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = controller.view
+        window.layoutIfNeeded()
+        controller.view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(controller.pageControlFrameForTesting.width, 185, accuracy: 0.5)
+    }
+
     func testSidebarUsesDefaultTypographyAndLargerFileIcons() {
         let (controller, window) = mountedController()
         controller.reRootForTesting(tempDir)
@@ -210,6 +234,8 @@ final class CodeViewTests: XCTestCase {
         XCTAssertFalse(controller.previewTextForTesting.contains("# Title"))
         XCTAssertTrue(controller.previewTextForTesting.contains("Title"))
         XCTAssertFalse(controller.markdownToggleHiddenForTesting)
+        XCTAssertEqual(controller.markdownToggleFrameForTesting.height, 24, accuracy: 0.5)
+        XCTAssertEqual(controller.markdownToggleCornerRadiusForTesting, 7, accuracy: 0.5)
         // Raw: original source comes back verbatim.
         controller.setMarkdownRenderedForTesting(false)
         XCTAssertTrue(controller.previewTextForTesting.contains("# Title"))
