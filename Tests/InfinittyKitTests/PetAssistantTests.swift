@@ -3,6 +3,16 @@ import XCTest
 
 final class PetAssistantTests: XCTestCase {
 
+    func testChatMarkdownRendersStructureInsteadOfRawMarkers() {
+        let rendered = MarkdownRender.attributed(
+            "## Root\n\n**Directories:**\n- `Sources` — main code",
+            style: .chat)
+        XCTAssertFalse(rendered.string.contains("**"))
+        XCTAssertFalse(rendered.string.contains("`"))
+        XCTAssertTrue(rendered.string.contains("Root"))
+        XCTAssertTrue(rendered.string.contains("•  Sources"))
+    }
+
     func testParseSearchDirective() {
         XCTAssertEqual(PetAssistant.parseSearchDirective("SEARCH: markdown render"),
                        "markdown render")
@@ -68,6 +78,20 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertTrue(panel.inputIsFirstResponderForTesting)
     }
 
+    func testDedicatedChatPaneRemovesInternalTopChromeGap() {
+        let controller = CodeViewController(config: AppConfig(), panelKind: .chat)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 600),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = controller.view
+        window.layoutIfNeeded()
+        controller.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(
+            controller.chatPageFrameForTesting.maxY,
+            controller.view.bounds.maxY,
+            accuracy: 0.5)
+    }
+
     func testChatComposerHasEffortAndTransparentSurface() {
         let assistant = PetAssistant(config: AppConfig())
         let panel = assistant.makeSidebarPanelView()
@@ -79,6 +103,8 @@ final class PetAssistantTests: XCTestCase {
         // (d) an effort/thinking control sits beside the model picker.
         XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "None", "Low", "Medium", "High"])
         XCTAssertEqual(panel.effortValueForTesting, "Auto")
+        XCTAssertTrue(panel.effortUsesBrainButtonForTesting)
+        XCTAssertEqual(panel.modelPickerHeightForTesting, 24, accuracy: 0.5)
 
         // (c) user turns render as bubbles; assistant turns do not.
         panel.setMessages([(role: "You", text: "hi"), (role: "Assistant", text: "hello")])

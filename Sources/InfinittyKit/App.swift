@@ -18,6 +18,76 @@ private struct PaneZoomState {
     let pane: NSView
     let root: NSView
     let dividerPositions: PaneLayoutController.DividerPositions
+    let maximizedPositions: PaneLayoutController.DividerPositions
+    let collapsedViews: [NSView]
+}
+
+struct PaneDividerKeyframe {
+    let split: NSSplitView
+    let start: [CGFloat]
+    let end: [CGFloat]
+}
+
+/// `NSSplitView.setPosition` is not implicitly animatable. Drive the divider
+/// model values directly so panes physically displace one another every frame.
+final class PaneDividerAnimation {
+    private let keyframes: [PaneDividerKeyframe]
+    private let duration: TimeInterval
+    private let completion: () -> Void
+    private var timer: Timer?
+    private var startedAt: TimeInterval = 0
+
+    init(
+        keyframes: [PaneDividerKeyframe], duration: TimeInterval,
+        completion: @escaping () -> Void
+    ) {
+        self.keyframes = keyframes
+        self.duration = duration
+        self.completion = completion
+    }
+
+    func start() {
+        cancel()
+        startedAt = ProcessInfo.processInfo.systemUptime
+        apply(progress: 0)
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func cancel() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func tick() {
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+        let linear = min(max(elapsed / duration, 0), 1)
+        let eased = linear < 0.5
+            ? 4 * linear * linear * linear
+            : 1 - pow(-2 * linear + 2, 3) / 2
+        apply(progress: CGFloat(eased))
+        if linear >= 1 {
+            cancel()
+            completion()
+        }
+    }
+
+    private func apply(progress: CGFloat) {
+        for keyframe in keyframes
+        where keyframe.split.superview != nil
+            && keyframe.start.count == keyframe.end.count {
+            for index in keyframe.start.indices {
+                let start = keyframe.start[index]
+                let position = start + (keyframe.end[index] - start) * progress
+                keyframe.split.setPosition(position, ofDividerAt: index)
+            }
+        }
+    }
+
+    deinit { cancel() }
 }
 
 private final class UtilityPanelRecord {
@@ -120,6 +190,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var lastSelectedTabIndex: [ObjectIdentifier: Int] = [:]
     private var paneDragState: PaneDragState?
     private var paneZoomStates: [ObjectIdentifier: PaneZoomState] = [:]
+    private var paneDividerAnimations: [ObjectIdentifier: PaneDividerAnimation] = [:]
     private var pendingSplitContext: (sourceView: NSView, vertical: Bool)?
     private var quickTerminalHotKey: GlobalHotKey?
     private lazy var quickTerminal: QuickTerminalController = {
@@ -1319,12 +1390,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // one coherent final geometry before restoring the starting layout.
         for (split, selectedIndex) in splitPath.reversed() {
             let length = split.isVertical ? split.bounds.width : split.bounds.height
-            let collapsed: CGFloat = split.isVertical ? 72 : 48
             let positions = PaneLayoutController.maximizedDividerPositions(
                 length: length,
                 childCount: split.arrangedSubviews.count,
                 selectedIndex: selectedIndex,
-                collapsedExtent: collapsed,
+                collapsedExtent: 0,
                 dividerThickness: split.dividerThickness)
             for (index, position) in positions.enumerated() {
                 split.setPosition(position, ofDividerAt: index)
@@ -1342,21 +1412,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         PaneLayoutController.restoreDividerPositions(dividerPositions)
         root.layoutSubtreeIfNeeded()
 
-        paneZoomStates[key] = PaneZoomState(
-            pane: pane, root: root, dividerPositions: dividerPositions)
-        win.makeFirstResponder(pane)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.24
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            // Apply ancestors first so AppKit lays descendants out at their
-            // expanded model size before validating their divider positions.
-            for (split, positions) in targets.reversed() {
-                for (index, position) in positions.enumerated() {
-                    split.animator().setPosition(position, ofDividerAt: index)
-                }
+        let orderedTargets = Array(targets.reversed())
+        let collapsedViews = splitPath.flatMap { split, selectedIndex in
+            split.arrangedSubviews.enumerated().compactMap { index, view in
+                index == selectedIndex ? nil : view
             }
-        } completionHandler: { [weak self] in
-            guard self?.paneZoomStates[key]?.pane === pane else { return }
+        }
+
+        paneZoomStates[key] = PaneZoomState(
+            pane: pane, root: root, dividerPositions: dividerPositions,
+            maximizedPositions: orderedTargets, collapsedViews: collapsedViews)
+        win.makeFirstResponder(pane)
+        let keyframes = orderedTargets.map { split, positions in
+            PaneDividerKeyframe(
+                split: split,
+                start: currentDividerPositions(in: split),
+                end: positions)
+        }
+        animatePaneDividers(key: key, keyframes: keyframes, duration: 0.18) { [weak self] in
+            guard let self, let state = self.paneZoomStates[key], state.pane === pane else { return }
+            state.collapsedViews.forEach { $0.isHidden = true }
+            state.root.layoutSubtreeIfNeeded()
             pane.layoutSubtreeIfNeeded()
         }
     }
@@ -1401,22 +1477,55 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         key: ObjectIdentifier, refocus: Bool, animated: Bool
     ) {
         guard let state = paneZoomStates.removeValue(forKey: key) else { return }
+        paneDividerAnimations.removeValue(forKey: key)?.cancel()
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.22
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                for snapshot in state.dividerPositions
-                where snapshot.split.superview != nil
-                    && snapshot.split.arrangedSubviews.count == snapshot.positions.count + 1 {
-                    for (index, position) in snapshot.positions.enumerated() {
-                        snapshot.split.animator().setPosition(position, ofDividerAt: index)
-                    }
-                }
+            let wasFullyMaximized = state.collapsedViews.contains(where: \.isHidden)
+            state.collapsedViews.forEach { $0.isHidden = false }
+            if wasFullyMaximized {
+                PaneLayoutController.restoreDividerPositions(state.maximizedPositions)
+                state.root.layoutSubtreeIfNeeded()
             }
+            let keyframes: [PaneDividerKeyframe] = state.dividerPositions.compactMap { snapshot in
+                guard snapshot.split.superview != nil,
+                      snapshot.split.arrangedSubviews.count == snapshot.positions.count + 1
+                else { return nil }
+                return PaneDividerKeyframe(
+                    split: snapshot.split,
+                    start: currentDividerPositions(in: snapshot.split),
+                    end: snapshot.positions)
+            }
+            animatePaneDividers(key: key, keyframes: keyframes, duration: 0.18)
         } else {
+            state.collapsedViews.forEach { $0.isHidden = false }
             PaneLayoutController.restoreDividerPositions(state.dividerPositions)
         }
         if refocus, let win = state.pane.window { win.makeFirstResponder(state.pane) }
+    }
+
+    private func currentDividerPositions(in split: NSSplitView) -> [CGFloat] {
+        split.arrangedSubviews.dropLast().map {
+            split.isVertical ? $0.frame.maxX : $0.frame.maxY
+        }
+    }
+
+    private func animatePaneDividers(
+        key: ObjectIdentifier, keyframes: [PaneDividerKeyframe],
+        duration: TimeInterval, completion: @escaping () -> Void = {}
+    ) {
+        paneDividerAnimations.removeValue(forKey: key)?.cancel()
+        guard !keyframes.isEmpty else {
+            completion()
+            return
+        }
+        let animation = PaneDividerAnimation(
+            keyframes: keyframes, duration: duration
+        ) { [weak self] in
+            guard let self else { return }
+            self.paneDividerAnimations.removeValue(forKey: key)
+            completion()
+        }
+        paneDividerAnimations[key] = animation
+        animation.start()
     }
 
     private func beginPaneDrag(sourceView: NSView, title: String, at point: NSPoint) {
@@ -1971,7 +2080,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let sourceSession = focusedSession(in: win) ?? activeSessions(in: win).first
         if let sourceSession {
             controller.track(session: sourceSession)
-            if kind == .chat { controller.attachAssistant(petAssistant(for: sourceSession)) }
+            if kind == .chat {
+                let assistant = petAssistant(for: sourceSession)
+                controller.attachAssistant(assistant)
+                pane.onNewChat = { [weak assistant] in assistant?.startNewChat() }
+            }
         }
         guard insertPaneView(pane, relativeTo: anchorView, vertical: vertical)
         else {

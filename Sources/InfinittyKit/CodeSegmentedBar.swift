@@ -12,7 +12,7 @@ enum CodePalette {
     /// accent can be intentionally muted for text controls, but pane focus must
     /// retain the crisp blue contrast shown in the window layout.
     static let paneFocusAccent = NSColor(
-        srgbRed: 0.04, green: 0.48, blue: 0.70, alpha: 1)
+        srgbRed: 0.00, green: 0.36, blue: 0.76, alpha: 1)
 
     /// Apply the app config's accent-color (call before building chrome).
     static func apply(_ config: AppConfig) {

@@ -37,8 +37,10 @@ final class FlippedClipDocument: NSView {
 /// layout convention.
 final class ChatMessageView: NSView {
     static var accent: NSColor { CodePalette.selectionAccent }
+    private let messageText: String
 
-    init(role: String, text: String) {
+    init(role: String, text: String, timestamp: Date = Date(), tokenCount: Int? = nil) {
+        messageText = text
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         let isUser = role.caseInsensitiveCompare("You") == .orderedSame
@@ -71,18 +73,58 @@ final class ChatMessageView: NSView {
                 bubble.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.78),
             ])
         } else {
-            label.textColor = NSColor(white: 0.92, alpha: 1)
+            label.attributedStringValue = MarkdownRender.attributed(text, style: .chat)
+            label.allowsEditingTextAttributes = true
+            let timeLabel = NSTextField(labelWithString: Self.relativeTime(since: timestamp))
+            timeLabel.font = .systemFont(ofSize: 10)
+            timeLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.55)
+            let estimatedTokens = tokenCount ?? max(1, Int(ceil(Double(text.utf8.count) / 4.0)))
+            let tokenLabel = NSTextField(labelWithString: "~\(estimatedTokens) tokens")
+            tokenLabel.font = .systemFont(ofSize: 10)
+            tokenLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.55)
+            let copyButton = NSButton()
+            copyButton.image = NSImage(
+                systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy reply")
+            copyButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
+            copyButton.imagePosition = .imageOnly
+            copyButton.isBordered = false
+            copyButton.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.55)
+            copyButton.target = self
+            copyButton.action = #selector(copyReply)
+            let metadata = NSStackView(views: [timeLabel, tokenLabel, copyButton])
+            metadata.orientation = .horizontal
+            metadata.alignment = .centerY
+            metadata.spacing = 7
+            metadata.translatesAutoresizingMaskIntoConstraints = false
             addSubview(label)
+            addSubview(metadata)
             NSLayoutConstraint.activate([
                 label.topAnchor.constraint(equalTo: topAnchor),
-                label.bottomAnchor.constraint(equalTo: bottomAnchor),
                 label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
                 label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+                metadata.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 5),
+                metadata.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+                metadata.bottomAnchor.constraint(equalTo: bottomAnchor),
+                copyButton.widthAnchor.constraint(equalToConstant: 18),
+                copyButton.heightAnchor.constraint(equalToConstant: 16),
             ])
         }
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private static func relativeTime(since date: Date, now: Date = Date()) -> String {
+        let seconds = max(Int(now.timeIntervalSince(date)), 0)
+        if seconds < 60 { return "now" }
+        if seconds < 3_600 { return "\(seconds / 60)m" }
+        if seconds < 86_400 { return "\(seconds / 3_600)h" }
+        return "\(seconds / 86_400)d"
+    }
+
+    @objc private func copyReply() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([messageText as NSString])
+    }
 }
 
 /// Animated "Thinking" row shown while the assistant generates — three pulsing
@@ -159,6 +201,7 @@ final class PetAssistantPanelView: NSView {
         labelWithString: "Choose an agent, ask a question, and keep chatting here.")
     private let modelPicker = NSPopUpButton()
     private let effortPicker = NSPopUpButton()
+    private let effortButton = NSButton()
     private let inputContainer = NSView()
     private let inputScroll = NSScrollView()
     private let input = TabRenameTextView()
@@ -214,6 +257,7 @@ final class PetAssistantPanelView: NSView {
         newChatButton.contentTintColor = .labelColor
         newChatButton.target = self
         newChatButton.action = #selector(newChatTapped)
+        newChatButton.isHidden = presentation == .sidebar
 
         closeButton.image = NSImage(
             systemSymbolName: "xmark", accessibilityDescription: "Close")
@@ -225,6 +269,7 @@ final class PetAssistantPanelView: NSView {
 
         separator.wantsLayer = true
         separator.layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
+        separator.isHidden = presentation == .sidebar
     }
 
     private func configureMessages() {
@@ -234,7 +279,7 @@ final class PetAssistantPanelView: NSView {
         transcriptStack.orientation = .vertical
         transcriptStack.alignment = .width
         transcriptStack.spacing = 14
-        transcriptStack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        transcriptStack.edgeInsets = NSEdgeInsets(top: 2, left: 0, bottom: 10, right: 0)
         transcriptStack.translatesAutoresizingMaskIntoConstraints = false
         let flipped = FlippedClipDocument()
         flipped.translatesAutoresizingMaskIntoConstraints = false
@@ -270,8 +315,8 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func configureComposer() {
-        modelPicker.controlSize = .regular
-        modelPicker.font = .systemFont(ofSize: NSFont.systemFontSize)
+        modelPicker.controlSize = .small
+        modelPicker.font = .systemFont(ofSize: 11, weight: .medium)
         modelPicker.menu?.removeAllItems()
         for choice in choices {
             let item = NSMenuItem(title: choice.displayName, action: nil, keyEquivalent: "")
@@ -288,6 +333,17 @@ final class PetAssistantPanelView: NSView {
                 NSMenuItem(title: level, action: nil, keyEquivalent: ""))
         }
         effortPicker.selectItem(at: 0)
+        effortPicker.isHidden = true
+
+        effortButton.image = NSImage(
+            systemSymbolName: "brain.head.profile", accessibilityDescription: "Thinking effort")
+        effortButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        effortButton.imagePosition = .imageOnly
+        effortButton.isBordered = false
+        effortButton.contentTintColor = .secondaryLabelColor
+        effortButton.target = self
+        effortButton.action = #selector(showEffortMenu)
+        effortButton.toolTip = "Thinking: Auto"
 
         inputContainer.wantsLayer = true
         inputContainer.layer?.backgroundColor = NSColor(white: 0.055, alpha: 0.72).cgColor
@@ -380,6 +436,7 @@ final class PetAssistantPanelView: NSView {
         guard !q.isEmpty, let items = effortPicker.menu?.items else { return false }
         if let item = items.first(where: { $0.title.lowercased() == q }) {
             effortPicker.select(item)
+            effortButton.toolTip = "Thinking: \(item.title)"
             return true
         }
         return false
@@ -453,20 +510,21 @@ final class PetAssistantPanelView: NSView {
         let views = [
             newChatButton, closeButton,
             separator, transcriptScroll, emptyStateLabel, showFilesButton,
-            modelPicker, effortPicker, inputContainer, attachmentButton,
+            modelPicker, effortButton, inputContainer, attachmentButton,
             inputScroll, sendButton, sendWrap,
         ]
         for view in views { view.translatesAutoresizingMaskIntoConstraints = false }
         for view in [
             newChatButton, closeButton, separator,
             transcriptScroll, emptyStateLabel, showFilesButton,
-            modelPicker, effortPicker, inputContainer,
+            modelPicker, effortButton, inputContainer,
         ] { addSubview(view) }
 
         NSLayoutConstraint.activate(headerConstraints() + bodyConstraints() + composerConstraints())
     }
 
     private func headerConstraints() -> [NSLayoutConstraint] {
+        if presentation == .sidebar { return [] }
         let newChatTrailing = presentation == .popover
             ? newChatButton.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -8)
             : newChatButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -13)
@@ -485,12 +543,18 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func bodyConstraints() -> [NSLayoutConstraint] {
-        [
-            transcriptScroll.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 4),
+        let transcriptTop = presentation == .sidebar
+            ? transcriptScroll.topAnchor.constraint(equalTo: topAnchor)
+            : transcriptScroll.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 4)
+        let emptyTop = presentation == .sidebar
+            ? emptyStateLabel.topAnchor.constraint(equalTo: topAnchor, constant: 12)
+            : emptyStateLabel.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 18)
+        return [
+            transcriptTop,
             transcriptScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
             transcriptScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             transcriptScroll.bottomAnchor.constraint(equalTo: modelPicker.topAnchor, constant: -12),
-            emptyStateLabel.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 18),
+            emptyTop,
             emptyStateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
             emptyStateLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -18),
             showFilesButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -505,13 +569,14 @@ final class PetAssistantPanelView: NSView {
             inputContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
             inputContainer.heightAnchor.constraint(equalToConstant: 44),
             modelPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            modelPicker.trailingAnchor.constraint(equalTo: effortPicker.leadingAnchor, constant: -6),
-            modelPicker.bottomAnchor.constraint(equalTo: inputContainer.topAnchor, constant: -10),
-            modelPicker.heightAnchor.constraint(equalToConstant: 30),
-            effortPicker.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            effortPicker.centerYAnchor.constraint(equalTo: modelPicker.centerYAnchor),
-            effortPicker.heightAnchor.constraint(equalToConstant: 30),
-            effortPicker.widthAnchor.constraint(equalToConstant: 96),
+            modelPicker.bottomAnchor.constraint(equalTo: inputContainer.topAnchor, constant: -7),
+            modelPicker.heightAnchor.constraint(equalToConstant: 24),
+            modelPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+            effortButton.leadingAnchor.constraint(equalTo: modelPicker.trailingAnchor, constant: 5),
+            effortButton.centerYAnchor.constraint(equalTo: modelPicker.centerYAnchor),
+            effortButton.widthAnchor.constraint(equalToConstant: 26),
+            effortButton.heightAnchor.constraint(equalToConstant: 24),
+            effortButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             attachmentButton.leadingAnchor.constraint(equalTo: inputContainer.leadingAnchor, constant: 8),
             attachmentButton.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
             attachmentButton.widthAnchor.constraint(equalToConstant: 24),
@@ -531,9 +596,14 @@ final class PetAssistantPanelView: NSView {
     }
 
     private var lastMessages: [(role: String, text: String)] = []
+    private var messageTimestamps: [Date] = []
     private var typingIndicator: ChatTypingIndicator?
 
     func setMessages(_ messages: [(role: String, text: String)]) {
+        if messages.count < messageTimestamps.count {
+            messageTimestamps.removeLast(messageTimestamps.count - messages.count)
+        }
+        while messageTimestamps.count < messages.count { messageTimestamps.append(Date()) }
         lastMessages = messages
         rebuildTranscript()
     }
@@ -543,9 +613,11 @@ final class PetAssistantPanelView: NSView {
             transcriptStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
-        for message in lastMessages {
+        for (index, message) in lastMessages.enumerated() {
             transcriptStack.addArrangedSubview(
-                ChatMessageView(role: message.role, text: message.text))
+                ChatMessageView(
+                    role: message.role, text: message.text,
+                    timestamp: messageTimestamps[index]))
         }
         if let typingIndicator {
             transcriptStack.addArrangedSubview(typingIndicator)
@@ -589,6 +661,23 @@ final class PetAssistantPanelView: NSView {
     @objc private func newChatTapped(_ sender: Any?) { onNewChat?() }
     @objc private func closeTapped(_ sender: Any?) { onClose?() }
 
+    @objc private func showEffortMenu(_ sender: NSButton) {
+        let menu = NSMenu(title: "Thinking")
+        for level in effortPicker.itemTitles {
+            let item = NSMenuItem(
+                title: level, action: #selector(effortSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = level == selectedEffort ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 2), in: sender)
+    }
+
+    @objc private func effortSelected(_ sender: NSMenuItem) {
+        effortPicker.selectItem(withTitle: sender.title)
+        effortButton.toolTip = "Thinking: \(sender.title)"
+    }
+
     @objc private func attachmentTapped(_ sender: Any?) {
         guard let window else { return }
         let picker = NSOpenPanel()
@@ -611,6 +700,8 @@ final class PetAssistantPanelView: NSView {
     var modelItemTitlesForTesting: [String] { modelPicker.itemTitles }
     var effortTitlesForTesting: [String] { effortPicker.itemTitles }
     var effortValueForTesting: String { effortPicker.titleOfSelectedItem ?? "" }
+    var effortUsesBrainButtonForTesting: Bool { effortButton.image != nil }
+    var modelPickerHeightForTesting: CGFloat { modelPicker.frame.height }
     /// The sidebar chat surface is transparent (sits on the black host); the
     /// popover keeps its glass. nil layer color reads as clear.
     var surfaceIsClearForTesting: Bool {
@@ -758,6 +849,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         lastQuery = nil
         updatePanels()
     }
+
+    func startNewChat() { resetConversation() }
 
     private func updatePanels() {
         for panel in [sidebarPanel, popoverPanel].compactMap({ $0 }) {

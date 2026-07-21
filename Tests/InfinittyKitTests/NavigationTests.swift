@@ -520,7 +520,7 @@ final class NavigationTests: XCTestCase {
         outline.isSelected = true
         let focused = try XCTUnwrap(outline.layer?.borderColor)
         let focusedColor = try XCTUnwrap(NSColor(cgColor: focused)?.usingColorSpace(.sRGB))
-        XCTAssertEqual(focusedColor.alphaComponent, 0.88, accuracy: 0.01)
+        XCTAssertEqual(focusedColor.alphaComponent, 0.68, accuracy: 0.01)
         XCTAssertGreaterThan(focusedColor.blueComponent, focusedColor.redComponent)
         XCTAssertEqual(outline.layer?.borderWidth, 1.5)
         XCTAssertGreaterThan(outline.backgroundAlphaForTesting, 0)
@@ -557,6 +557,12 @@ final class NavigationTests: XCTestCase {
         XCTAssertGreaterThan(content.frame.height, 400)
         XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
         XCTAssertTrue(pane.outlineIsAboveContentForTesting)
+    }
+
+    func testChatPanePlacesNewChatActionInPaneHeader() {
+        let pane = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: NSColor.black)
+        XCTAssertTrue(pane.showsNewChatInHeaderForTesting)
     }
 
     func testUtilityPaneStaysTransparentOverSharedWindowSurface() {
@@ -665,17 +671,45 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(first.frame.maxX, saved, accuracy: 0.5)
     }
 
-    func testMaximizedPaneDividerPositionsLeaveSiblingEdgeStrips() {
+    func testMaximizedPaneDividerPositionsPushSiblingsOffCanvas() {
         XCTAssertEqual(
             PaneLayoutController.maximizedDividerPositions(
                 length: 600, childCount: 2, selectedIndex: 0,
-                collapsedExtent: 72, dividerThickness: 1),
-            [527])
+                collapsedExtent: 0, dividerThickness: 1),
+            [599])
         XCTAssertEqual(
             PaneLayoutController.maximizedDividerPositions(
                 length: 600, childCount: 2, selectedIndex: 1,
-                collapsedExtent: 72, dividerThickness: 1),
-            [72])
+                collapsedExtent: 0, dividerThickness: 1),
+            [0])
+    }
+
+    func testPaneDividerAnimationMovesThroughIntermediateGeometry() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        split.isVertical = true
+        host.addSubview(split)
+        let first = NSView()
+        let second = NSView()
+        split.addArrangedSubview(first)
+        split.addArrangedSubview(second)
+        split.adjustSubviews()
+        split.setPosition(300, ofDividerAt: 0)
+        XCTAssertEqual(first.frame.maxX, 300, accuracy: 0.5)
+
+        let completed = expectation(description: "divider animation completes")
+        let animation = PaneDividerAnimation(
+            keyframes: [PaneDividerKeyframe(split: split, start: [300], end: [599])],
+            duration: 0.12
+        ) {
+            completed.fulfill()
+        }
+        animation.start()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        XCTAssertGreaterThan(first.frame.maxX, 300)
+        XCTAssertLessThan(first.frame.maxX, 599)
+        wait(for: [completed], timeout: 0.5)
+        XCTAssertLessThanOrEqual(second.frame.width, 8.5)
     }
 
 }

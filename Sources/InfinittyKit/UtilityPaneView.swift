@@ -51,6 +51,7 @@ final class UtilityPaneView: NSView {
     let paneHeader = PaneHeaderView()
     private let paneOutline = PaneOutlineView()
     private let closeButton = NSButton()
+    private let newChatButton = NSButton()
     private lazy var focusClickRecognizer: NSClickGestureRecognizer = {
         let recognizer = NSClickGestureRecognizer(target: self, action: #selector(focusedWithinPane))
         recognizer.delaysPrimaryMouseButtonEvents = false
@@ -66,6 +67,7 @@ final class UtilityPaneView: NSView {
         didSet { paneHeader.onChooseSplitDown = onChooseSplitDown }
     }
     var onClose: (() -> Void)?
+    var onNewChat: (() -> Void)?
     var onFocus: (() -> Void)?
     var onDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onDragBegan } }
     var onDragMoved: ((NSPoint) -> Void)? { didSet { paneHeader.onDragMoved = onDragMoved } }
@@ -106,6 +108,20 @@ final class UtilityPaneView: NSView {
         closeButton.frame = NSRect(x: 0, y: 0, width: 30, height: 30)
         paneHeader.addSubview(closeButton)
         closeButton.autoresizingMask = [.minXMargin]
+        if kind == .chat {
+            newChatButton.image = NSImage(
+                systemSymbolName: "plus", accessibilityDescription: "New chat")
+            newChatButton.symbolConfiguration = NSImage.SymbolConfiguration(
+                pointSize: 13, weight: .medium)
+            newChatButton.imagePosition = .imageOnly
+            newChatButton.isBordered = false
+            newChatButton.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.72)
+            newChatButton.target = self
+            newChatButton.action = #selector(newChatPressed)
+            newChatButton.toolTip = "New chat"
+            paneHeader.addSubview(newChatButton)
+            newChatButton.autoresizingMask = [.minXMargin]
+        }
         addGestureRecognizer(focusClickRecognizer)
 
         setAccessibilityRole(.group)
@@ -162,8 +178,15 @@ final class UtilityPaneView: NSView {
             width: max(bounds.width - horizontal * 2, 0),
             height: max(headerY - top - bottom, 0))
         closeButton.frame.origin = NSPoint(x: max(paneHeader.bounds.width - 98, 0), y: 2)
+        newChatButton.frame = NSRect(
+            x: 70, y: 2, width: 30, height: 30)
     }
 
     @objc private func closePressed() { onClose?() }
+    @objc private func newChatPressed() { onNewChat?() }
     @objc private func focusedWithinPane() { onFocus?() }
+
+    var showsNewChatInHeaderForTesting: Bool {
+        kind == .chat && newChatButton.superview === paneHeader
+    }
 }

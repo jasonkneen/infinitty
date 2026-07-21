@@ -304,6 +304,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     private var headerTopToSearch: NSLayoutConstraint?
     private var headerTopToCommit: NSLayoutConstraint?
     private var pageControlTop: NSLayoutConstraint?
+    private var chatHostTop: NSLayoutConstraint?
     private var splitBottomToFooter: NSLayoutConstraint?
     private var splitBottomToContainer: NSLayoutConstraint?
 
@@ -695,6 +696,9 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         headerTopToCommit?.isActive = false
         pageControlTop = pageControl.topAnchor.constraint(
             equalTo: container.topAnchor, constant: 6)
+        chatHostTop = panelKind == .chat
+            ? chatHost.topAnchor.constraint(equalTo: container.topAnchor)
+            : chatHost.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6)
         splitBottomToFooter = split.bottomAnchor.constraint(equalTo: branchFooter.topAnchor)
         splitBottomToContainer = split.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         splitBottomToFooter?.isActive = false
@@ -747,7 +751,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             split.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             splitBottomToContainer!,
 
-            chatHost.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 6),
+            chatHostTop!,
             chatHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             chatHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             chatHost.bottomAnchor.constraint(equalTo: container.bottomAnchor),

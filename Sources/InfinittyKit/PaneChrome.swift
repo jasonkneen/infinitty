@@ -422,10 +422,10 @@ final class PaneOutlineView: NSView {
         let oldBackground = layer?.presentation()?.backgroundColor ?? layer?.backgroundColor
         let oldBorder = layer?.presentation()?.borderColor ?? layer?.borderColor
         let background = (isSelected
-            ? CodePalette.paneFocusAccent.withAlphaComponent(0.13)
+            ? CodePalette.paneFocusAccent.withAlphaComponent(0.09)
             : NSColor.clear).cgColor
         let border = (isSelected
-            ? CodePalette.paneFocusAccent.withAlphaComponent(0.88)
+            ? CodePalette.paneFocusAccent.withAlphaComponent(0.68)
             : NSColor.white.withAlphaComponent(0.12)).cgColor
         layer?.backgroundColor = background
         layer?.borderColor = border
