@@ -39,22 +39,78 @@ func infinittyRequest(_ line: String, timeout: Int32 = 130) -> String {
     guard connected == 0 else {
         return "error: infinitty is not running (no socket at \(path))"
     }
-    var tv = timeval(tv_sec: time_t(timeout), tv_usec: 0)
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    var readTimeout = timeval(tv_sec: time_t(timeout), tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &readTimeout, socklen_t(MemoryLayout<timeval>.size))
+    var writeTimeout = timeval(tv_sec: time_t(timeout), tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &writeTimeout, socklen_t(MemoryLayout<timeval>.size))
 
     let out = Array((line + "\n").utf8)
-    _ = out.withUnsafeBufferPointer { write(fd, $0.baseAddress!, $0.count) }
+    let didWrite = out.withUnsafeBufferPointer { buffer -> Bool in
+        guard let base = buffer.baseAddress else { return true }
+        var offset = 0
+        while offset < buffer.count {
+            let written = write(fd, base.advanced(by: offset), buffer.count - offset)
+            if written > 0 {
+                offset += written
+                continue
+            }
+            if written < 0, errno == EINTR { continue }
+            return false
+        }
+        return true
+    }
+    guard didWrite else {
+        return "error: could not write request: \(String(cString: strerror(errno)))"
+    }
 
     var response = [UInt8]()
     var buf = [UInt8](repeating: 0, count: 65536)
     while true {
         let n = read(fd, &buf, buf.count)
-        guard n > 0 else { break }
-        response.append(contentsOf: buf[0..<n])
+        if n > 0 {
+            response.append(contentsOf: buf[0..<n])
+            continue
+        }
+        if n < 0, errno == EINTR { continue }
+        if n < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+            return "error: timed out waiting for infinitty response"
+        }
+        if n < 0 { return "error: could not read response: \(String(cString: strerror(errno)))" }
+        break
     }
     var text = String(decoding: response, as: UTF8.self)
     if text.hasSuffix("\n") { text.removeLast() }
     return text
+}
+
+// MARK: - browser bridge
+
+/// Browser commands travel as a base64url-encoded JSON object rather than as
+/// space-delimited arguments. URLs, selectors, comments, and typed text can
+/// therefore contain whitespace and arbitrary punctuation without changing the
+/// app-control protocol's framing.
+private let maximumBrowserRequestBytes = 48_000
+
+func browserCall(
+    _ operation: String,
+    arguments: [String: Any] = [:],
+    timeout: Int32 = 55
+) -> String {
+    var payload = arguments
+    payload["v"] = 1
+    payload["op"] = operation
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload) else {
+        return "error: could not encode browser request"
+    }
+    guard data.count <= maximumBrowserRequestBytes else {
+        return "error: browser request exceeds \(maximumBrowserRequestBytes) bytes"
+    }
+    let encoded = data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return infinittyRequest("browser \(encoded)", timeout: timeout)
 }
 
 // MARK: - tool definitions
@@ -75,6 +131,20 @@ func paneArg(_ args: [String: Any]) -> String {
 let paneProperty: [String: Any] = [
     "pane": ["type": "integer", "description": "Pane id from infinitty_list_panes"],
 ]
+
+let browserIDProperty: [String: Any] = [
+    "browserId": [
+        "type": "string",
+        "description": "Browser id returned by infinitty_browser_open or infinitty_browser_list",
+    ],
+]
+
+let browserSnapshotProperty = browserIDProperty.merging([
+    "snapshotId": [
+        "type": "string",
+        "description": "Fresh snapshot id returned by infinitty_browser_snapshot",
+    ],
+] as [String: Any]) { a, _ in a }
 
 let tools: [Tool] = [
     Tool(
@@ -285,6 +355,120 @@ let tools: [Tool] = [
         ],
         invoke: { args in infinittyRequest("activity \(args["text"] as? String ?? "")") }
     ),
+    Tool(
+        name: "infinitty_browser_open",
+        description: "Open or focus a native browser panel. Optionally navigate it to a URL. "
+            + "Use its browserId with the other infinitty_browser_* tools.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "url": ["type": "string", "description": "Optional URL to load"],
+                "anchorPane": [
+                    "type": "integer",
+                    "description": "Terminal pane whose tab should host the browser (default: key tab)",
+                ],
+            ],
+        ],
+        invoke: { args in browserCall("open", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_browser_list",
+        description: "List browser panels and their current URL, title, loading state, and viewport mode.",
+        schema: ["type": "object", "properties": [:]],
+        invoke: { _ in browserCall("list") }
+    ),
+    Tool(
+        name: "infinitty_browser_navigate",
+        description: "Navigate a browser panel to a URL and wait for the navigation result.",
+        schema: [
+            "type": "object",
+            "properties": browserIDProperty.merging([
+                "url": ["type": "string", "description": "Absolute URL, or a host/search-like URL"],
+            ]) { a, _ in a },
+            "required": ["browserId", "url"],
+        ],
+        invoke: { args in browserCall("navigate", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_browser_snapshot",
+        description: "Return a compact DOM-first snapshot of visible interactive elements. "
+            + "Use the returned ref values for click, type, or press; take a new snapshot after navigation.",
+        schema: [
+            "type": "object",
+            "properties": browserIDProperty.merging([
+                "maxNodes": [
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 250,
+                    "description": "Maximum interactive elements to return (default 80)",
+                ],
+            ]) { a, _ in a },
+            "required": ["browserId"],
+        ],
+        invoke: { args in browserCall("snapshot", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_browser_click",
+        description: "Click an interactive element identified by a fresh browser snapshot ref.",
+        schema: [
+            "type": "object",
+            "properties": browserSnapshotProperty.merging([
+                "ref": ["type": "string", "description": "Element ref from infinitty_browser_snapshot"],
+            ]) { a, _ in a },
+            "required": ["browserId", "snapshotId", "ref"],
+        ],
+        invoke: { args in browserCall("click", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_browser_type",
+        description: "Set or append text in an input, textarea, or contenteditable element from a fresh snapshot.",
+        schema: [
+            "type": "object",
+            "properties": browserSnapshotProperty.merging([
+                "ref": ["type": "string", "description": "Element ref from infinitty_browser_snapshot"],
+                "text": ["type": "string", "description": "Text to enter"],
+                "mode": [
+                    "type": "string",
+                    "enum": ["replace", "append"],
+                    "description": "Replace existing text (default) or append",
+                ],
+            ]) { a, _ in a },
+            "required": ["browserId", "snapshotId", "ref", "text"],
+        ],
+        invoke: { args in browserCall("type", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_browser_press",
+        description: "Dispatch a key to the focused page element, or to an optional fresh snapshot ref and snapshotId.",
+        schema: [
+            "type": "object",
+            "properties": browserSnapshotProperty.merging([
+                "key": ["type": "string", "description": "Key name, e.g. Enter, Escape, ArrowDown"],
+                "ref": ["type": "string", "description": "Optional focused-element ref from a fresh snapshot"],
+            ]) { a, _ in a },
+            "required": ["browserId", "key"],
+        ],
+        invoke: { args in browserCall("press", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_browser_scroll",
+        description: "Scroll a browser panel by CSS pixels; positive deltaY scrolls down.",
+        schema: [
+            "type": "object",
+            "properties": browserIDProperty.merging([
+                "deltaX": ["type": "number", "description": "Horizontal pixels (default 0)"],
+                "deltaY": ["type": "number", "description": "Vertical pixels (default 500)"],
+            ]) { a, _ in a },
+            "required": ["browserId"],
+        ],
+        invoke: { args in browserCall("scroll", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_browser_screenshot",
+        description: "Capture the visible browser panel and return the local artifact path.",
+        schema: ["type": "object", "properties": browserIDProperty, "required": ["browserId"]],
+        invoke: { args in browserCall("screenshot", arguments: args) }
+    ),
 ]
 
 // MARK: - JSON-RPC over stdio (newline-delimited)
@@ -301,6 +485,19 @@ func reply(id: Any, result: [String: Any]) {
 
 func replyError(id: Any, code: Int, message: String) {
     send(["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]])
+}
+
+/// Browser operations return structured `{ "ok": false, "error": … }`
+/// replies from the app. Surface those as MCP tool errors just like the
+/// established line-protocol `error:` responses.
+func isToolError(_ text: String) -> Bool {
+    guard !text.hasPrefix("error:") else { return true }
+    guard let data = text.data(using: .utf8),
+          let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let ok = response["ok"] as? Bool else {
+        return false
+    }
+    return !ok
 }
 
 while let line = readLine(strippingNewline: true) {
@@ -342,7 +539,7 @@ while let line = readLine(strippingNewline: true) {
         let text = tool.invoke(args)
         reply(id: id, result: [
             "content": [["type": "text", "text": text]],
-            "isError": text.hasPrefix("error:"),
+            "isError": isToolError(text),
         ])
     default:
         if let id { replyError(id: id, code: -32601, message: "method not found: \(method)") }

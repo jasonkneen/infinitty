@@ -4,12 +4,14 @@ enum PaneType: Int, CaseIterable {
     case terminal
     case files
     case chat
+    case browser
 
     var title: String {
         switch self {
         case .terminal: return "Terminal"
         case .files: return "Files"
         case .chat: return "Chat"
+        case .browser: return "Browser"
         }
     }
 
@@ -18,6 +20,7 @@ enum PaneType: Int, CaseIterable {
         case .terminal: return "terminal"
         case .files: return "folder"
         case .chat: return "bubble.left.and.bubble.right"
+        case .browser: return "globe"
         }
     }
 }
@@ -25,11 +28,13 @@ enum PaneType: Int, CaseIterable {
 enum UtilityPanelKind: String, CaseIterable {
     case files
     case chat
+    case browser
 
     var title: String {
         switch self {
         case .files: return "Files"
         case .chat: return "Chat"
+        case .browser: return "Browser"
         }
     }
 
@@ -37,6 +42,7 @@ enum UtilityPanelKind: String, CaseIterable {
         switch self {
         case .files: return "folder"
         case .chat: return "bubble.left.and.bubble.right"
+        case .browser: return "globe"
         }
     }
 
@@ -122,7 +128,12 @@ final class UtilityPaneView: NSView {
             paneHeader.addSubview(newChatButton)
             newChatButton.autoresizingMask = [.minXMargin]
         }
-        addGestureRecognizer(focusClickRecognizer)
+        // A recognizer attached to a parent sees events aimed at every
+        // descendant. On a Browser pane that includes the address toolbar and
+        // the WKWebView, so it can steal a gear/cursor click before AppKit or
+        // WebKit handles it. Browser controls manage their own first-responder
+        // state; keep this focus helper only on the inert Files/Chat surfaces.
+        if kind != .browser { addGestureRecognizer(focusClickRecognizer) }
 
         setAccessibilityRole(.group)
         setAccessibilityLabel("\(kind.title) panel")

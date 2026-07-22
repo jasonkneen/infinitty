@@ -177,6 +177,15 @@ indirect enum PaneLayoutNode: Equatable {
     case split(vertical: Bool, children: [PaneLayoutNode])
 }
 
+/// A main tab stays open while any terminal or smart-pane leaf remains.
+/// Terminal sessions are only one kind of leaf, so using their count here
+/// would incorrectly close a Chat, Files, or Browser-only tab.
+enum PaneLifecyclePolicy {
+    static func shouldCloseTab(remainingPaneCount: Int) -> Bool {
+        remainingPaneCount == 0
+    }
+}
+
 enum PaneLayoutController {
     typealias DividerPositions = [(split: NSSplitView, positions: [CGFloat])]
     typealias DividerRatios = [(split: NSSplitView, ratios: [CGFloat])]
@@ -325,16 +334,42 @@ enum PaneLayoutController {
         normalize(split)
     }
 
-    private static func collapseSingleChildSplit(_ split: NSSplitView) {
+    /// Dissolve a one-child split without exposing an empty plain container.
+    /// `TerminalChromeView.body` lays out all of its direct children together;
+    /// briefly removing its only child can make AppKit retain a zero-sized
+    /// layout result through the next display pass. A placeholder preserves
+    /// the root slot while the survivor changes parents.
+    @discardableResult
+    static func collapseSingleChildSplit(_ split: NSSplitView) -> Bool {
         guard split.arrangedSubviews.count == 1,
-              let parent = split.superview else { return }
+              let parent = split.superview else { return false }
         let survivor = split.arrangedSubviews[0]
         PaneLog.log("collapse split=\(ObjectIdentifier(split)) "
             + "survivor=\(ObjectIdentifier(survivor)) parent=\(ObjectIdentifier(parent))")
-        survivor.removeFromSuperview()
-        if !replace(split, with: survivor, in: parent) {
-            PaneLog.log("ERROR collapse replace failed split=\(ObjectIdentifier(split))")
+
+        if parent is NSSplitView {
+            survivor.removeFromSuperview()
+            if !replace(split, with: survivor, in: parent) {
+                PaneLog.log("ERROR collapse replace failed split=\(ObjectIdentifier(split))")
+                return false
+            }
+            return true
         }
+
+        // Keep a layout child in a plain root container at every point in the
+        // reparenting sequence. This is especially important for chrome.body.
+        let placeholder = NSView(frame: split.frame)
+        placeholder.autoresizingMask = split.autoresizingMask
+        guard replace(split, with: placeholder, in: parent) else {
+            PaneLog.log("ERROR collapse placeholder failed split=\(ObjectIdentifier(split))")
+            return false
+        }
+        survivor.removeFromSuperview()
+        if !replace(placeholder, with: survivor, in: parent) {
+            PaneLog.log("ERROR collapse survivor failed split=\(ObjectIdentifier(split))")
+            return false
+        }
+        return true
     }
 
     static func captureDividerPositions(in root: NSView) -> DividerPositions {

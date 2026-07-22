@@ -91,11 +91,54 @@ final class PaneDividerAnimation {
 }
 
 private final class UtilityPanelRecord {
-    let controller: CodeViewController
+    /// Files and Chat use the shared code/chat controller. Browser is a
+    /// native WebKit surface with its own controller, but both remain pane
+    /// leaves governed by the same lifecycle and ledger.
+    let controller: CodeViewController?
+    let browser: BrowserPaneController?
     let pane: UtilityPaneView
+    /// Chat is a tab-level surface. Keep its assistant alive if the terminal
+    /// it started from exits while the Chat leaf remains visible.
+    var assistant: PetAssistant?
+
     init(controller: CodeViewController, pane: UtilityPaneView) {
         self.controller = controller
+        self.browser = nil
         self.pane = pane
+    }
+
+    init(browser: BrowserPaneController, pane: UtilityPaneView) {
+        self.controller = nil
+        self.browser = browser
+        self.pane = pane
+    }
+}
+
+/// A socket request can outlive its caller while WebKit waits on a consent
+/// sheet. This token makes completion/cancellation one-way, so a late Allow
+/// cannot execute an abandoned browser operation.
+private final class BrowserControlOperation {
+    private let lock = NSLock()
+    private var ended = false
+
+    func claimCompletion() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !ended else { return false }
+        ended = true
+        return true
+    }
+
+    func cancel() {
+        lock.lock()
+        ended = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ended
     }
 }
 
@@ -445,10 +488,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.updatePaneSelection(in: win, focused: s.view)
             self.quickTerminal.setFocusedSession(s)
             self.updateTitle(for: win)
-            if let panels = self.utilityPanels[ObjectIdentifier(win)] {
-                for record in panels.values { record.controller.track(session: s) }
-                panels[.chat]?.controller.attachAssistant(self.petAssistant(for: s))
-            }
+            self.rebindUtilityPanels(to: s, in: win)
         }
         s.view.onPetClick = { [weak self, weak s] in
             guard let self, let s else { return }
@@ -778,6 +818,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         if let root = terminalRoot(of: win) { collect(root) }
         return result
+    }
+
+    /// A surviving Chat owns its conversation at the main-tab level. If its
+    /// source terminal exits, preserve the assistant through the close; a
+    /// remaining or newly-created terminal rebinds it below.
+    private func retainChatAssistantAfterTerminalExit(
+        _ assistant: PetAssistant?, in win: NSWindow
+    ) {
+        guard let assistant else { return }
+        guard let chat = utilityPanels[ObjectIdentifier(win)]?[.chat],
+              chat.assistant === assistant
+        else {
+            assistant.detach()
+            return
+        }
+        assistant.detach()
+    }
+
+    /// Utility panes follow the terminal that remains in their native tab.
+    /// This keeps file tracking current and reconnects the retained Chat
+    /// assistant after a sibling terminal closes.
+    private func rebindUtilityPanels(to session: TerminalSession, in win: NSWindow) {
+        guard let panels = utilityPanels[ObjectIdentifier(win)] else { return }
+        for record in panels.values { record.controller?.track(session: session) }
+        guard let chat = panels[.chat] else { return }
+        let assistant = chat.assistant ?? petAssistant(for: session)
+        rehomeAssistant(assistant, to: session)
+        chat.assistant = assistant
+        chat.controller?.attachAssistant(assistant)
     }
 
     private func focusedPaneLeaf(in win: NSWindow) -> NSView? {
@@ -1171,27 +1240,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         s.shutdown()
         pendingLaunchCommands.removeValue(forKey: s.id)
         sessions.removeAll { $0 === s }
-        petAssistants.removeValue(forKey: s.id)?.detach()
+        let exitingAssistant = petAssistants.removeValue(forKey: s.id)
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
         guard let win else {
+            exitingAssistant?.detach()
             recordPaneLedgerTerminalRemoved(
                 s, in: nil, reason: "terminal-exit", origin: "pty-eof")
             return
         }
 
-        // Files and Chat are companions to terminals, not stand-alone tabs.
-        // Preserve the established lifecycle: the tab closes with its final
-        // terminal even when utility leaves are still mixed into its tree.
-        if !wasQuickTerminal, activeSessions(in: win).isEmpty {
-            recordPaneLedgerTerminalRemoved(
-                s, in: win, reason: "terminal-exit", origin: "pty-eof")
-            win.close()
-            return
-        }
-
         if wasQuickTerminal, quickTabSessions.count == 1 {
+            exitingAssistant?.detach()
             _ = quickTerminal.removeTab(containing: s)
             refreshPets()
             refreshShortcutHints()
@@ -1201,52 +1262,67 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let split = v.superview as? NSSplitView {
             v.removeFromSuperview()
             collapse(split, in: win)
-            if !wasQuickTerminal {
-                recordPaneLedgerTerminalRemoved(
-                    s, in: win, reason: "terminal-exit", origin: "pty-eof")
-            }
-            let next: TerminalSession?
-            if wasQuickTerminal {
-                next = quickTabWasActive
-                    ? quickTabSessions.first { $0 !== s }
-                    : nil
-            } else {
-                next = activeSessions(in: win).first
-            }
-            if let next {
-                win.makeFirstResponder(next.view)
-            }
-            updateTitle(for: win)
-            refreshPets()
-            refreshShortcutHints()
         } else {
-            if !wasQuickTerminal {
-                recordPaneLedgerTerminalRemoved(
-                    s, in: win, reason: "terminal-exit", origin: "pty-eof")
-            }
-            win.close() // last pane: closes this window/tab
+            v.removeFromSuperview()
         }
+
+        if !wasQuickTerminal {
+            recordPaneLedgerTerminalRemoved(
+                s, in: win, reason: "terminal-exit", origin: "pty-eof")
+        }
+
+        let next: TerminalSession?
+        if wasQuickTerminal {
+            next = quickTabWasActive ? quickTabSessions.first { $0 !== s } : nil
+        } else {
+            next = activeSessions(in: win).first
+        }
+        retainChatAssistantAfterTerminalExit(exitingAssistant, in: win)
+        if let next {
+            rebindUtilityPanels(to: next, in: win)
+            win.makeFirstResponder(next.view)
+        } else {
+            if let remainingPane = paneLeafViews(in: win).first {
+                win.makeFirstResponder(remainingPane)
+                updatePaneSelection(in: win, focused: remainingPane)
+            }
+        }
+
+        // A terminal is not the lifetime owner of a tab. Keep any Files,
+        // Chat, Browser, or future smart pane alive; only the final pane leaf
+        // closes this native main tab.
+        if !wasQuickTerminal,
+           PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: paneLeafViews(in: win).count) {
+            win.close()
+            return
+        }
+
+        updateTitle(for: win)
+        refreshPets()
+        refreshShortcutHints()
     }
 
     /// A split with a single child left dissolves into its parent.
     private func collapse(_ split: NSSplitView, in win: NSWindow) {
         guard split.arrangedSubviews.count == 1 else { return }
         let sibling = split.arrangedSubviews[0]
-        sibling.removeFromSuperview()
         if win.contentView === split {
-            sibling.autoresizingMask = [.width, .height]
+            // Keep a real content view in place while the survivor leaves the
+            // old split. This mirrors PaneLayoutController's root safeguard.
+            let placeholder = NSView(frame: split.frame)
+            placeholder.autoresizingMask = split.autoresizingMask
+            win.contentView = placeholder
+            sibling.removeFromSuperview()
+            sibling.frame = placeholder.frame
+            sibling.autoresizingMask = placeholder.autoresizingMask
             win.contentView = sibling
-        } else if let parent = split.superview as? NSSplitView {
-            let idx = parent.arrangedSubviews.firstIndex(of: split) ?? 0
-            split.removeFromSuperview()
-            sibling.autoresizingMask = []
-            parent.insertArrangedSubview(sibling, at: idx)
-        } else if let parent = split.superview {
-            // blur wrapper or other plain container
-            sibling.frame = split.frame
-            sibling.autoresizingMask = [.width, .height]
-            parent.replaceSubview(split, with: sibling)
+        } else {
+            // The helper installs a placeholder first when this is the root
+            // chrome body, so it never exposes an empty layout container.
+            _ = PaneLayoutController.collapseSingleChildSplit(split)
         }
+        win.contentView?.needsLayout = true
+        win.contentView?.layoutSubtreeIfNeeded()
     }
 
     // MARK: - windows & tabs
@@ -1541,6 +1617,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case .chat:
             _ = openUtilityPanel(
                 .chat, in: win, relativeTo: context.sourceView, vertical: context.vertical)
+        case .browser:
+            _ = openUtilityPanel(
+                .browser, in: win, relativeTo: context.sourceView, vertical: context.vertical)
         case nil:
             break
         }
@@ -1566,6 +1645,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             session, in: win, reason: vertical ? "split-right" : "split-down",
             origin: "pane-header", sourceView: sourceView, vertical: vertical)
         session.launch()
+        rebindUtilityPanels(to: session, in: win)
         win.makeFirstResponder(session.view)
         refreshPets()
         updateTitle(for: win)
@@ -2438,7 +2518,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// whose own compact switch still contains Files and Changes.
     @discardableResult
     private func openCodeView(in win: NSWindow) -> CodeViewController? {
-        openUtilityPanel(.files, in: win)?.controller
+        openUtilityPanel(.files, in: win)?.controller ?? nil
     }
 
     @discardableResult
@@ -2462,23 +2542,61 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 ?? terminalRoot(of: win),
               anchorView.window === win else { return nil }
 
-        let controller = CodeViewController(config: config, panelKind: kind)
         let bg = Theme.dark.applying(config).background
+        let background = NSColor(
+            srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
+            alpha: CGFloat(bg.w))
+        let codeController: CodeViewController?
+        let browserController: BrowserPaneController?
+        let contentView: NSView
+        switch kind {
+        case .files, .chat:
+            let controller = CodeViewController(config: config, panelKind: kind)
+            codeController = controller
+            browserController = nil
+            contentView = controller.view
+        case .browser:
+            let controller = BrowserPaneController()
+            codeController = nil
+            browserController = controller
+            contentView = controller.view
+        }
         let pane = UtilityPaneView(
             kind: kind,
-            contentView: controller.view,
-            background: NSColor(
-                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
-                alpha: CGFloat(bg.w)),
+            contentView: contentView,
+            background: background,
             blurred: config.backgroundBlur)
-        let record = UtilityPanelRecord(controller: controller, pane: pane)
+        let record: UtilityPanelRecord
+        if let controller = codeController {
+            record = UtilityPanelRecord(controller: controller, pane: pane)
+        } else if let controller = browserController {
+            record = UtilityPanelRecord(browser: controller, pane: pane)
+        } else {
+            return nil
+        }
         utilityPanels[id, default: [:]][kind] = record
-        controller.onPageChanged = { [weak self, weak win, weak controller] page in
-            guard let self, let win, let controller,
-                  self.utilityPanels[ObjectIdentifier(win)]?[kind]?.controller === controller
-            else { return }
-            self.recordPaneLedgerNote(
-                in: win, paneID: kind.rawValue, reason: "page-\(page)", origin: "sidebar")
+        if let controller = codeController {
+            controller.onPageChanged = { [weak self, weak win, weak controller] page in
+                guard let self, let win, let controller,
+                      self.utilityPanels[ObjectIdentifier(win)]?[kind]?.controller === controller
+                else { return }
+                self.recordPaneLedgerNote(
+                    in: win, paneID: kind.rawValue, reason: "page-\(page)", origin: "sidebar")
+            }
+        }
+        if let browser = browserController {
+            browser.onEvent = { [weak self, weak win] event in
+                guard let self, let win else { return }
+                self.appControl.broadcast(event)
+                if let name = event["event"] as? String {
+                    self.recordPaneLedgerNote(
+                        in: win, paneID: "browser", reason: name, origin: "browser-pane")
+                }
+            }
+            browser.onAnnotationsSubmitted = { [weak self, weak win] annotations in
+                guard let self, let win else { return }
+                self.submitBrowserAnnotations(annotations, in: win)
+            }
         }
 
         pane.onSplitRight = { [weak self, weak pane] in
@@ -2519,10 +2637,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         let sourceSession = focusedSession(in: win) ?? activeSessions(in: win).first
-        if let sourceSession {
-            controller.track(session: sourceSession)
+        if let controller = codeController {
+            if let sourceSession { controller.track(session: sourceSession) }
             if kind == .chat {
-                let assistant = petAssistant(for: sourceSession)
+                // A Chat pane can be opened from a Browser-only tab after its
+                // last terminal has closed. Keep that conversation usable;
+                // it will rebind to the next terminal that appears in this
+                // native tab without creating a second assistant.
+                let assistant = sourceSession.map { petAssistant(for: $0) }
+                    ?? PetAssistant(config: config)
+                record.assistant = assistant
                 controller.attachAssistant(assistant)
                 pane.onNewChat = { [weak self, weak win, weak assistant] in
                     if let self, let win {
@@ -2546,6 +2670,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             reason: requestedSource == nil ? "utility-open" : "split-insert",
             origin: requestedSource == nil ? "utility-open" : "split-chooser",
             sourceView: anchorView, vertical: vertical)
+        if let browser = record.browser {
+            DispatchQueue.main.async { [weak browser] in browser?.paneDidBecomeVisible() }
+        }
         sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
             utilityPanels[id]?[.files] != nil)
         win.makeFirstResponder(pane)
@@ -2561,10 +2688,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else {
             record.pane.removeFromSuperview()
         }
+        if let browser = record.browser {
+            browser.cancelPendingAutomation()
+            appControl.broadcast(["event": "browser-closed", "browserId": browser.browserID])
+        }
         utilityPanels[id]?.removeValue(forKey: record.pane.kind)
         if utilityPanels[id]?.isEmpty == true { utilityPanels.removeValue(forKey: id) }
         recordPaneLedgerUtilityRemoved(
             record.pane.kind, in: win, reason: "utility-close", origin: "utility-pane")
+        if PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: paneLeafViews(in: win).count) {
+            win.close()
+            return
+        }
         sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
             utilityPanels[id]?[.files] != nil)
         refocusTerminal(in: win)
@@ -2700,20 +2835,97 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             context: detected.recoveryContext,
             provider: detected.kind == .claude ? .claude : .codex,
             transcriptPath: detected.id)
-        record.controller.track(session: source)
-        record.controller.attachAssistant(assistant)
-        record.controller.focusChatInput()
+        record.assistant = assistant
+        record.controller?.track(session: source)
+        record.controller?.attachAssistant(assistant)
+        record.controller?.focusChatInput()
+    }
+
+    /// Legacy single-selection entry point. Browser feedback normally arrives
+    /// through the batch callback so one Send becomes one normal chat request.
+    private func submitBrowserAnnotation(_ annotation: BrowserAnnotation, in win: NSWindow) {
+        submitBrowserAnnotations([annotation], in: win)
+    }
+
+    /// Browser feedback becomes a normal chat turn, rather than an opaque
+    /// side channel. BrowserAnnotation.aiContext(for:) explicitly marks page
+    /// content as untrusted before it reaches a model.
+    private func submitBrowserAnnotations(_ annotations: [BrowserAnnotation], in win: NSWindow) {
+        guard !annotations.isEmpty else { return }
+        recordPaneLedgerNote(
+            in: win, paneID: "browser", reason: "browser-annotations", origin: "browser-inspector")
+        guard let source = focusedSession(in: win) ?? activeSessions(in: win).first else {
+            // A Browser-only tab is still valid after its last terminal exits.
+            // Create or reuse a detached assistant: it can answer via the
+            // app-level browser tools without pretending terminal context is
+            // present, and will rebind if a terminal is later added.
+            guard let record = openUtilityPanel(.chat, in: win) else { return }
+            let assistant = record.assistant ?? PetAssistant(config: config)
+            record.assistant = assistant
+            record.controller?.attachAssistant(assistant)
+            record.pane.onNewChat = { [weak self, weak win, weak assistant] in
+                if let self, let win {
+                    self.recordPaneLedgerNote(
+                        in: win, paneID: "chat", reason: "chat-new", origin: "chat-header")
+                }
+                assistant?.startNewChat()
+            }
+            assistant.submitBrowserAnnotations(annotations)
+            win.makeFirstResponder(record.pane)
+            broadcastBrowserAnnotationSubmission(annotations)
+            return
+        }
+        guard let record = openUtilityPanel(.chat, in: win) else { return }
+        let assistant = record.assistant ?? petAssistant(for: source)
+        rehomeAssistant(assistant, to: source)
+        record.assistant = assistant
+        record.controller?.track(session: source)
+        record.controller?.attachAssistant(assistant)
+        assistant.submitBrowserAnnotations(annotations)
+        win.makeFirstResponder(record.pane)
+        broadcastBrowserAnnotationSubmission(annotations)
+    }
+
+    private func broadcastBrowserAnnotationSubmission(_ annotations: [BrowserAnnotation]) {
+        guard let first = annotations.first else { return }
+        appControl.broadcast([
+            "event": "browser-annotation-submitted",
+            "origin": URL(string: first.url)?.host ?? "",
+            "documentId": first.documentID,
+            "annotationCount": annotations.count,
+        ])
     }
 
     private func petAssistant(for session: TerminalSession) -> PetAssistant {
         if let existing = petAssistants[session.id] { return existing }
         let created = PetAssistant(config: config)
-        created.attach(to: session)
-        created.onShowInSidePanel = { [weak self] paths, query in
-            self?.showAssistantResults(paths, query: query, for: session)
-        }
+        bindAssistant(created, to: session)
         petAssistants[session.id] = created
         return created
+    }
+
+    private func bindAssistant(_ assistant: PetAssistant, to session: TerminalSession) {
+        assistant.attach(to: session)
+        assistant.onShowInSidePanel = { [weak self, weak session] paths, query in
+            guard let self, let session else { return }
+            self.showAssistantResults(paths, query: query, for: session)
+        }
+    }
+
+    /// The pet bubble and the Chat pane must share one assistant instance.
+    /// When focus moves between terminal leaves, move that ownership as well;
+    /// otherwise the next pet click would create a second conversation for the
+    /// same visible Chat surface.
+    private func rehomeAssistant(_ assistant: PetAssistant, to session: TerminalSession) {
+        if let displaced = petAssistants[session.id], displaced !== assistant {
+            displaced.detach()
+        }
+        let staleIDs = petAssistants.compactMap { id, candidate in
+            candidate === assistant && id != session.id ? id : nil
+        }
+        for id in staleIDs { petAssistants.removeValue(forKey: id) }
+        petAssistants[session.id] = assistant
+        bindAssistant(assistant, to: session)
     }
 
     private func presentPetAssistant(for session: TerminalSession) {
@@ -2766,6 +2978,121 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         onMain { self.sessions.first { $0.id == id } } ?? nil
     }
 
+    /// Browser actions are asynchronous WebKit work.  The app-control socket
+    /// runs on a worker thread, schedules the UI mutation on AppKit's main
+    /// thread, then waits only on that worker for the browser completion.
+    /// This deliberately avoids blocking the main run loop during navigation.
+    private func handleBrowserControl(_ encoded: String) -> String {
+        let request: [String: Any]
+        switch BrowserControlCodec.decode(encoded) {
+        case let .success(value): request = value
+        case let .failure(error):
+            return BrowserControlCodec.response(
+                error: "invalid_request", message: error.localizedDescription)
+        }
+        if let version = request["v"] as? Int, version != 1 {
+            return BrowserControlCodec.response(
+                error: "unsupported_version", message: "Browser request version \(version) is unsupported.")
+        }
+
+        let done = DispatchSemaphore(value: 0)
+        let operationState = BrowserControlOperation()
+        var response = BrowserControlCodec.response(
+            error: "browser_unavailable", message: "Browser control did not start.")
+        let started = onMain { () -> Bool in
+            guard !operationState.isCancelled else { return false }
+            let operation = request["op"] as? String ?? ""
+            let finish: (String) -> Void = { value in
+                guard operationState.claimCompletion() else { return }
+                response = value
+                done.signal()
+            }
+
+            if operation == "list" {
+                let browsers = self.utilityPanels.values
+                    .flatMap { $0.values }
+                    .compactMap(\.browser)
+                    .map { $0.controlState() }
+                finish(BrowserControlCodec.response(result: ["browsers": browsers]))
+                return true
+            }
+
+            if operation == "open" {
+                let host: NSWindow?
+                if let anchor = request["anchorPane"] as? Int,
+                   let session = self.sessions.first(where: { $0.id == anchor }) {
+                    host = session.view.window
+                } else {
+                    host = NSApp.keyWindow.flatMap {
+                        $0.tabbingIdentifier == "infinitty" && $0 !== self.quickTerminal.window ? $0 : nil
+                    } ?? NSApp.windows.first(where: {
+                        $0.tabbingIdentifier == "infinitty" && $0 !== self.quickTerminal.window
+                    })
+                }
+
+                let window: NSWindow
+                if let host {
+                    window = host
+                } else {
+                    // A browser needs a real native main-tab host.  Keep the
+                    // initial terminal visible instead of creating a hidden
+                    // process; it also supplies the local AI/chat context.
+                    let created = self.makeTerminalWindow()
+                    window = created.0
+                    window.orderFront(nil)
+                    created.1.launch()
+                }
+                guard let record = self.openUtilityPanel(.browser, in: window),
+                      let browser = record.browser else {
+                    finish(BrowserControlCodec.response(
+                        error: "open_failed", message: "Could not create a browser pane."))
+                    return true
+                }
+                var browserRequest = request
+                if let url = request["url"] as? String, !url.isEmpty {
+                    browserRequest["op"] = "navigate"
+                } else {
+                    browserRequest["op"] = "state"
+                }
+                browser.performAutomation(
+                    browserRequest, isCancelled: { operationState.isCancelled }, completion: finish)
+                self.appControl.broadcast([
+                    "event": "browser-opened", "browserId": browser.browserID,
+                ])
+                return true
+            }
+
+            guard let browserID = request["browserId"] as? String, !browserID.isEmpty else {
+                finish(BrowserControlCodec.response(
+                    error: "missing_browser", message: "browserId is required."))
+                return true
+            }
+            guard let browser = self.utilityPanels.values
+                .flatMap({ $0.values })
+                .compactMap(\.browser)
+                .first(where: { $0.browserID == browserID }) else {
+                finish(BrowserControlCodec.response(
+                    error: "unknown_browser", message: "No live browser has id \(browserID)."))
+                return true
+            }
+            browser.performAutomation(
+                request, isCancelled: { operationState.isCancelled }, completion: finish)
+            return true
+        } ?? false
+
+        guard started else {
+            operationState.cancel()
+            return BrowserControlCodec.response(
+                error: "main_thread_timeout", message: "Could not schedule browser control on the main thread.")
+        }
+        guard done.wait(timeout: .now() + 40) == .success else {
+            operationState.cancel()
+            return BrowserControlCodec.response(
+                error: "timeout", message: "Browser operation timed out.")
+        }
+        return response
+    }
+
     private func handleAppRequest(_ request: String) -> String {
         let parts = request.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
         let cmd = parts.first.map(String.init) ?? ""
@@ -2783,6 +3110,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return "pong"
         case "version":
             return "infinitty 0.1"
+        case "browser":
+            return handleBrowserControl(arg)
         case "list":
             let panes = onMain { () -> [[String: Any]] in
                 let key = NSApp.keyWindow
@@ -3006,7 +3335,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return "error: unknown command '\(cmd)' (ping | version | list | new-window | new-tab | "
                 + "split | focus | close | send | send-line | screen | history | last-output | "
                 + "last-command | exit-code | run | activity | toggle-quick-terminal | toggle-sidebar | "
-                + "sidebar | sidebar-tab | chat-model | chat-effort | subscribe)"
+                + "sidebar | sidebar-tab | chat-model | chat-effort | browser | subscribe)"
         }
     }
 

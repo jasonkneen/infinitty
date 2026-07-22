@@ -25,6 +25,9 @@ import Foundation
 ///   exit-code <id>           -> last exit code (OSC 133)
 ///   activity <text>          -> show text in the notch live-activity widget
 ///   toggle-quick-terminal    -> show or hide the persistent quick terminal
+///   browser <base64url-json> -> native browser automation request/reply JSON
+///                               (use the infinitty_browser MCP tools rather
+///                               than constructing this framing by hand)
 ///   subscribe                -> connection stays open; JSON events stream in:
 ///                               pane-opened, pane-closed, title, marker
 final class AppControlServer {

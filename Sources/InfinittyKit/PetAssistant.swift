@@ -1072,6 +1072,23 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     func startNewChat() { resetConversation() }
 
+    /// Browser inspector hand-off. This intentionally uses the same queued
+    /// request path as a typed chat turn so it appears in the transcript and
+    /// respects the currently attached terminal/session context.
+    func submitBrowserAnnotation(_ annotation: BrowserAnnotation) {
+        submitBrowserAnnotations([annotation])
+    }
+
+    /// Send a single, ordered feedback pass to the agent. A batch is one
+    /// normal chat request (rather than one request per marker), preserving
+    /// the user's priority and letting the agent reason across related notes.
+    func submitBrowserAnnotations(_ annotations: [BrowserAnnotation]) {
+        guard !annotations.isEmpty else { return }
+        submitFromPanel(
+            BrowserAnnotation.aiContext(for: annotations),
+            model: "Auto · Best available")
+    }
+
     func prepareRecovery(
         context: String, provider: AgentChoice.Kind, transcriptPath: String? = nil
     ) {
@@ -1343,11 +1360,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         effort: String = "Auto",
         completion: AskCompletion? = nil
     ) {
-        guard let session else {
-            completion?("No terminal session is available.", [], nil)
-            return
-        }
-        session.petAnimator?.startThinking()
+        // A Chat/Browser tab is allowed to outlive its final terminal pane.
+        // In that state an assistant can still use the app-level browser MCP
+        // tools and answer about the selected page; it simply receives no
+        // terminal transcript or project-root search context.
+        let activeSession = session
+        activeSession?.petAnimator?.startThinking()
         let backend = resolveBackend(forSelectedTitle: model)
         // Keep the system prompt CONSTANT: the CLI bridges pin --system-prompt
         // at process launch, so folding effort in here forced a full cold
@@ -1359,13 +1377,23 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let cwd = session.currentDirectory()
-            let context = """
-            cwd: \(cwd ?? NSHomeDirectory())
-            last command: \(session.terminal.lastCommandLine() ?? "(unknown)")
-            --- recent terminal output ---
-            \(session.terminal.historyText(lines: 60))
-            """
+            let cwd = activeSession?.currentDirectory()
+            let context: String
+            if let activeSession {
+                context = """
+                cwd: \(cwd ?? NSHomeDirectory())
+                last command: \(activeSession.terminal.lastCommandLine() ?? "(unknown)")
+                --- recent terminal output ---
+                \(activeSession.terminal.historyText(lines: 60))
+                """
+            } else {
+                context = """
+                cwd: \(NSHomeDirectory())
+                last command: (no active terminal)
+                --- browser-only session ---
+                There is no attached terminal pane. Use browser tools for page work and do not claim terminal output.
+                """
+            }
             let user = context + "\n--- user request ---\n" + request
                 + (effortNote.isEmpty ? "" : "\n" + effortNote)
             let runCwd = cwd ?? NSHomeDirectory()

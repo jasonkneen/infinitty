@@ -723,10 +723,10 @@ final class NavigationTests: XCTestCase {
             accuracy: 1)
     }
 
-    func testSplitChooserOffersExactlyTerminalFilesAndChat() {
-        XCTAssertEqual(PaneType.allCases.map(\.title), ["Terminal", "Files", "Chat"])
+    func testSplitChooserOffersTerminalFilesChatAndBrowser() {
+        XCTAssertEqual(PaneType.allCases.map(\.title), ["Terminal", "Files", "Chat", "Browser"])
         XCTAssertEqual(PaneType.allCases.map(\.symbol), [
-            "terminal", "folder", "bubble.left.and.bubble.right",
+            "terminal", "folder", "bubble.left.and.bubble.right", "globe",
         ])
     }
 
@@ -970,6 +970,79 @@ final class NavigationTests: XCTestCase {
                 XCTAssertGreaterThan(frame.height, 0, "zone=\(zone) frame=\(frame)")
                 XCTAssertTrue(chrome.body.bounds.contains(frame), "zone=\(zone) frame=\(frame)")
             }
+        }
+    }
+
+    func testPaneLifecycleKeepsTabOpenUntilFinalPaneLeafCloses() {
+        XCTAssertFalse(PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: 2))
+        XCTAssertFalse(PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: 1))
+        XCTAssertTrue(PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: 0))
+    }
+
+    func testRootCollapseKeepsRemainingSmartPaneVisible() throws {
+        let chrome = TerminalChromeView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 646))
+        let root = PaneSplitView(frame: chrome.body.bounds)
+        root.isVertical = true
+        root.autoresizingMask = [.width, .height]
+        let terminal = TerminalView(frame: .zero)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        chrome.body.addSubview(root)
+        root.addArrangedSubview(terminal)
+        root.addArrangedSubview(chat)
+        chrome.layoutSubtreeIfNeeded()
+        root.adjustSubviews()
+
+        terminal.removeFromSuperview()
+        XCTAssertTrue(PaneLayoutController.collapseSingleChildSplit(root))
+        chrome.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(chat.superview === chrome.body)
+        XCTAssertGreaterThan(chat.frame.width, 0)
+        XCTAssertGreaterThan(chat.frame.height, 0)
+        XCTAssertTrue(chrome.body.bounds.contains(chat.frame))
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: chrome.body),
+            .leaf(ObjectIdentifier(chat)))
+    }
+
+    func testNestedTerminalCloseKeepsTerminalAndChatGeometry() throws {
+        let chrome = TerminalChromeView(
+            frame: NSRect(x: 0, y: 0, width: 1_050, height: 646))
+        let root = PaneSplitView(frame: chrome.body.bounds)
+        root.isVertical = true
+        root.autoresizingMask = [.width, .height]
+        let terminals = PaneSplitView(frame: .zero)
+        terminals.isVertical = false
+        let firstTerminal = TerminalView(frame: .zero)
+        let closingTerminal = TerminalView(frame: .zero)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        chrome.body.addSubview(root)
+        root.addArrangedSubview(terminals)
+        root.addArrangedSubview(chat)
+        terminals.addArrangedSubview(firstTerminal)
+        terminals.addArrangedSubview(closingTerminal)
+        chrome.layoutSubtreeIfNeeded()
+        root.adjustSubviews()
+        terminals.adjustSubviews()
+
+        closingTerminal.removeFromSuperview()
+        XCTAssertTrue(PaneLayoutController.collapseSingleChildSplit(terminals))
+        chrome.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: chrome.body),
+            .split(vertical: true, children: [
+                .leaf(ObjectIdentifier(firstTerminal)),
+                .leaf(ObjectIdentifier(chat)),
+            ]))
+        for pane in [firstTerminal, chat] {
+            let frame = pane.convert(pane.bounds, to: chrome.body)
+            XCTAssertGreaterThan(frame.width, 0, "pane=\(pane) frame=\(frame)")
+            XCTAssertGreaterThan(frame.height, 0, "pane=\(pane) frame=\(frame)")
+            XCTAssertTrue(chrome.body.bounds.contains(frame), "pane=\(pane) frame=\(frame)")
         }
     }
 
