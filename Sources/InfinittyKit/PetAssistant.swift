@@ -974,8 +974,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private var conversationGeneration = 0
     private var recoveryContext: String?
     private weak var sidebarPanel: PetAssistantPanelView?
-    /// AI provider choices available in the composer's MODEL picker,
-    /// gated by which CLIs/models this Mac actually has.
+    /// Interactive provider choices available in the composer's MODEL picker,
+    /// gated by which CLIs/models this Mac actually has. Apple Foundation
+    /// Models remain a background capability and are intentionally excluded.
     let availableChoices: [AgentChoice]
 
     /// Hand-off: file results the user wants to see in the code-view sidebar.
@@ -988,18 +989,24 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     ) {
         self.config = config
         self.requestRunner = requestRunner
-        self.availableChoices = availableChoices ?? PetAssistant.resolveChoices(config: config)
+        self.availableChoices = PetAssistant.interactiveChoices(
+            availableChoices ?? PetAssistant.resolveChoices(config: config))
         super.init()
     }
 
+    private static func interactiveChoices(_ choices: [AgentChoice]) -> [AgentChoice] {
+        let visible = choices.filter { $0.kind != .apple }
+        return visible.contains(where: { $0.kind == .auto }) ? visible : [.auto] + visible
+    }
+
     /// Build the ordered picker choices: always Auto, plus each provider
-    /// whose backend is actually available on this machine.
+    /// whose interactive model backend is actually available on this machine.
     static func resolveChoices(
         config: AppConfig,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> [AgentChoice] {
         var choices: [AgentChoice] = [.auto]
-        for provider in [InfinittyAIProvider.claude, .codex, .apple]
+        for provider in [InfinittyAIProvider.claude, .codex]
         where ProviderDiscovery.isAvailable(provider, environment: environment) {
             switch provider {
             case .claude:
@@ -1015,9 +1022,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                         displayName: model.name, symbolName: "o.circle"))
                 }
             case .apple:
-                choices.append(AgentChoice(
-                    kind: .apple, modelID: nil,
-                    displayName: "Apple On-device", symbolName: "apple.logo"))
+                break
             }
         }
         return choices

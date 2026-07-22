@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import InfinittyKit
 
 final class PetAssistantTests: XCTestCase {
@@ -11,6 +12,77 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertFalse(rendered.string.contains("`"))
         XCTAssertTrue(rendered.string.contains("Root"))
         XCTAssertTrue(rendered.string.contains("•  Sources"))
+    }
+
+    func testChatMarkdownRendersPipeTableAsNativeTable() {
+        let rendered = MarkdownRender.attributed(
+            """
+            | Files | Directories |
+            |---|---|
+            | Certificates dev.p12 | assets |
+            | README.md | Tests |
+            """,
+            style: .chat)
+
+        XCTAssertFalse(rendered.string.contains("|"))
+        XCTAssertFalse(rendered.string.contains("---"))
+        XCTAssertTrue(rendered.string.contains("Files"))
+        XCTAssertTrue(rendered.string.contains("Certificates dev.p12"))
+        XCTAssertTrue(rendered.string.contains("assets"))
+        XCTAssertTrue(rendered.string.contains("README.md"))
+        XCTAssertTrue(rendered.string.contains("Tests"))
+
+        let tableBlock = (0..<rendered.length).compactMap { index in
+            (rendered.attribute(.paragraphStyle, at: index, effectiveRange: nil)
+                as? NSParagraphStyle)?
+                .textBlocks
+                .first { $0 is NSTextTableBlock } as? NSTextTableBlock
+        }.first
+        XCTAssertEqual(tableBlock?.table.numberOfColumns, 2)
+    }
+
+    func testChatMarkdownRendersOneColumnPipeTable() {
+        let rendered = MarkdownRender.attributed(
+            """
+            | File |
+            | --- |
+            | README.md |
+            """,
+            style: .chat)
+
+        XCTAssertFalse(rendered.string.contains("|"))
+        let tableBlock = (0..<rendered.length).compactMap { index in
+            (rendered.attribute(.paragraphStyle, at: index, effectiveRange: nil)
+                as? NSParagraphStyle)?
+                .textBlocks
+                .first { $0 is NSTextTableBlock } as? NSTextTableBlock
+        }.first
+        XCTAssertEqual(tableBlock?.table.numberOfColumns, 1)
+    }
+
+    func testChatMarkdownKeepsShortRowInTableButStopsAtFollowingHeading() {
+        let rendered = MarkdownRender.attributed(
+            """
+            | File |
+            | --- |
+            README.md
+            # Later | Stuff
+            """,
+            style: .chat)
+
+        XCTAssertFalse(rendered.string.contains("# Later"))
+        let source = rendered.string as NSString
+        let readmeIndex = source.range(of: "README.md").location
+        let headingIndex = source.range(of: "Later | Stuff").location
+        guard readmeIndex != NSNotFound, headingIndex != NSNotFound else {
+            return XCTFail("Expected table row and following heading to render")
+        }
+        let readmeBlocks = (rendered.attribute(
+            .paragraphStyle, at: readmeIndex, effectiveRange: nil) as? NSParagraphStyle)?.textBlocks ?? []
+        let headingBlocks = (rendered.attribute(
+            .paragraphStyle, at: headingIndex, effectiveRange: nil) as? NSParagraphStyle)?.textBlocks ?? []
+        XCTAssertTrue(readmeBlocks.contains { $0 is NSTextTableBlock })
+        XCTAssertFalse(headingBlocks.contains { $0 is NSTextTableBlock })
     }
 
     func testParseSearchDirective() {
@@ -262,6 +334,22 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(
             PetAssistant.resolveBackend(choice: panel.selectedChoiceForTesting, config: AppConfig()),
             .claude(model: "claude-sonnet-5"))
+    }
+
+    func testComposerHidesAppleChoiceButKeepsInteractiveModels() {
+        let apple = PetAssistant.AgentChoice(
+            kind: .apple, modelID: nil,
+            displayName: "Apple On-device", symbolName: "apple.logo")
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-5.6",
+            displayName: "GPT-5.6", symbolName: "o.circle")
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, apple, codex])
+        let panel = assistant.makeSidebarPanelView()
+
+        XCTAssertEqual(panel.modelItemTitlesForTesting, ["Auto", "GPT-5.6"])
+        XCTAssertFalse(panel.selectProvider(.apple))
+        XCTAssertTrue(panel.selectProvider(.codex))
     }
     func testPetClickPresentsIndependentAssistantPanel() throws {
         let assistant = PetAssistant(config: AppConfig())

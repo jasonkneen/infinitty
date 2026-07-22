@@ -1,8 +1,9 @@
 import AppKit
 
 /// Lightweight markdown → NSAttributedString for UI (release notes, dialogs).
-/// Handles headers, bold/italic, inline code, fenced code blocks, and bullets
-/// — enough for release notes, styled to look native in a dark panel.
+/// Handles headers, bold/italic, inline code, fenced code blocks, bullets, and
+/// GitHub-style pipe tables — enough for release notes, styled to look native
+/// in a dark panel.
 enum MarkdownRender {
     enum Style { case preview, chat }
 
@@ -46,17 +47,46 @@ enum MarkdownRender {
             fenceLines.removeAll()
         }
 
-        for rawLine in markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var lineIndex = 0
+        while lineIndex < lines.count {
+            let rawLine = lines[lineIndex]
             if rawLine.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                 if inFence { flushFence() }
                 inFence.toggle()
+                lineIndex += 1
                 continue
             }
-            if inFence { fenceLines.append(rawLine); continue }
+            if inFence {
+                fenceLines.append(rawLine)
+                lineIndex += 1
+                continue
+            }
+
+            if let header = tableCells(in: rawLine), lineIndex + 1 < lines.count,
+               let delimiter = tableCells(in: lines[lineIndex + 1]),
+               header.count == delimiter.count,
+               let alignments = tableAlignments(in: delimiter) {
+                var rows: [[String]] = []
+                lineIndex += 2
+                while lineIndex < lines.count,
+                      let cells = tableRowCells(in: lines[lineIndex]) {
+                    let visibleCells = Array(cells.prefix(header.count))
+                    rows.append(visibleCells + Array(
+                        repeating: "", count: max(0, header.count - visibleCells.count)))
+                    lineIndex += 1
+                }
+                appendTable(
+                    header: header, rows: rows, alignments: alignments,
+                    to: out, body: body, mono: mono, text: text, dim: dim,
+                    codeBG: codeBG, style: style, paragraph: para)
+                continue
+            }
 
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty {
                 out.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 4)]))
+                lineIndex += 1
                 continue
             }
 
@@ -68,6 +98,7 @@ enum MarkdownRender {
                 out.append(inline(content, base: NSFont.boldSystemFont(ofSize: size),
                     color: text, mono: mono, codeBG: codeBG, paragraph: para(6)))
                 out.append(NSAttributedString(string: "\n"))
+                lineIndex += 1
                 continue
             }
             // Bullets
@@ -76,6 +107,7 @@ enum MarkdownRender {
                 out.append(inline(content, base: body, color: text, mono: mono,
                     codeBG: codeBG, paragraph: para(3, head: 14)))
                 out.append(NSAttributedString(string: "\n"))
+                lineIndex += 1
                 continue
             }
             // Numbered lists.
@@ -84,6 +116,7 @@ enum MarkdownRender {
                 out.append(inline(content, base: body, color: text, mono: mono,
                     codeBG: codeBG, paragraph: para(3, head: 18)))
                 out.append(NSAttributedString(string: "\n"))
+                lineIndex += 1
                 continue
             }
             // Blockquotes.
@@ -93,6 +126,7 @@ enum MarkdownRender {
                     body, toHaveTrait: .italicFontMask), color: dim, mono: mono,
                     codeBG: codeBG, paragraph: para(5, head: 12)))
                 out.append(NSAttributedString(string: "\n"))
+                lineIndex += 1
                 continue
             }
             if line == "---" || line == "***" {
@@ -101,18 +135,153 @@ enum MarkdownRender {
                     .foregroundColor: NSColor.separatorColor,
                     .paragraphStyle: para(6),
                 ]))
+                lineIndex += 1
                 continue
             }
             // Paragraph
             out.append(inline(line, base: body, color: dim, mono: mono,
                 codeBG: codeBG, paragraph: para(6)))
             out.append(NSAttributedString(string: "\n"))
+            lineIndex += 1
         }
         if inFence { flushFence() }
         if out.string.hasSuffix("\n") {
             out.deleteCharacters(in: NSRange(location: out.length - 1, length: 1))
         }
         return out
+    }
+
+    /// GFM table cell parser: optional outer pipes are stripped and escaped
+    /// pipes remain literal cell content.
+    private static func tableCells(in rawLine: String) -> [String]? {
+        var contents = rawLine.trimmingCharacters(in: .whitespaces)
+        guard contents.contains("|") else { return nil }
+        if contents.hasPrefix("|") { contents.removeFirst() }
+        if hasUnescapedTrailingPipe(in: contents) { contents.removeLast() }
+
+        var cells: [String] = []
+        var cell = ""
+        var escaping = false
+        for character in contents {
+            if escaping {
+                if character == "|" {
+                    cell.append(character)
+                } else {
+                    cell.append("\\")
+                    cell.append(character)
+                }
+                escaping = false
+            } else if character == "\\" {
+                escaping = true
+            } else if character == "|" {
+                cells.append(cell.trimmingCharacters(in: .whitespaces))
+                cell = ""
+            } else {
+                cell.append(character)
+            }
+        }
+        if escaping { cell.append("\\") }
+        cells.append(cell.trimmingCharacters(in: .whitespaces))
+        return cells
+    }
+
+    /// A body row may omit trailing cells, including every pipe for a one-cell
+    /// row. Block-level Markdown always ends the table instead of becoming a
+    /// cell, even when its content happens to contain a pipe.
+    private static func tableRowCells(in rawLine: String) -> [String]? {
+        let line = rawLine.trimmingCharacters(in: .whitespaces)
+        guard !startsTableTerminatingBlock(line) else { return nil }
+        return tableCells(in: rawLine) ?? [line]
+    }
+
+    private static func startsTableTerminatingBlock(_ line: String) -> Bool {
+        guard !line.isEmpty else { return true }
+        if line.hasPrefix("```") || line.hasPrefix("> ") ||
+            line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") ||
+            line == "---" || line == "***" {
+            return true
+        }
+        return line.range(of: "^#{1,6}(?:\\s|$)|^\\d+\\.\\s", options: .regularExpression) != nil
+    }
+
+    private static func hasUnescapedTrailingPipe(in contents: String) -> Bool {
+        guard contents.last == "|" else { return false }
+        var backslashCount = 0
+        var index = contents.index(before: contents.endIndex)
+        while index > contents.startIndex {
+            index = contents.index(before: index)
+            guard contents[index] == "\\" else { break }
+            backslashCount += 1
+        }
+        return backslashCount.isMultiple(of: 2)
+    }
+
+    /// Validate a GFM delimiter row and derive the requested column alignment.
+    private static func tableAlignments(in cells: [String]) -> [NSTextAlignment]? {
+        var alignments: [NSTextAlignment] = []
+        for cell in cells {
+            let marker = cell.trimmingCharacters(in: .whitespaces)
+            guard marker.range(of: "^:?-{3,}:?$", options: .regularExpression) != nil
+            else { return nil }
+            if marker.hasPrefix(":") && marker.hasSuffix(":") {
+                alignments.append(.center)
+            } else if marker.hasSuffix(":") {
+                alignments.append(.right)
+            } else {
+                alignments.append(.left)
+            }
+        }
+        return alignments
+    }
+
+    private static func appendTable(
+        header: [String], rows: [[String]], alignments: [NSTextAlignment],
+        to output: NSMutableAttributedString, body: NSFont, mono: NSFont,
+        text: NSColor, dim: NSColor, codeBG: NSColor, style: Style,
+        paragraph: (CGFloat, CGFloat) -> NSParagraphStyle
+    ) {
+        let table = NSTextTable()
+        table.numberOfColumns = header.count
+        table.layoutAlgorithm = .automaticLayoutAlgorithm
+        let borderColor = style == .chat
+            ? NSColor(white: 1, alpha: 0.16)
+            : NSColor.separatorColor
+        let allRows = [header] + rows
+
+        for (rowIndex, row) in allRows.enumerated() {
+            for column in 0..<header.count {
+                let block = NSTextTableBlock(
+                    table: table, startingRow: rowIndex, rowSpan: 1,
+                    startingColumn: column, columnSpan: 1)
+                block.setWidth(1, type: .absoluteValueType, for: .border)
+                block.setWidth(5, type: .absoluteValueType, for: .padding)
+                for edge in [NSRectEdge.minX, .maxX, .minY, .maxY] {
+                    block.setBorderColor(borderColor, for: edge)
+                }
+
+                let cellParagraph = NSMutableParagraphStyle()
+                cellParagraph.paragraphSpacing = rowIndex == allRows.count - 1 ? 5 : 1
+                cellParagraph.lineSpacing = style == .chat ? 2 : 1.5
+                cellParagraph.alignment = alignments[column]
+                cellParagraph.textBlocks = [block]
+                let isHeader = rowIndex == 0
+                let cellText = row[column]
+                let base = isHeader
+                    ? NSFont.monospacedSystemFont(ofSize: body.pointSize - 1, weight: .bold)
+                    : mono
+                let color = isHeader ? text : dim
+                let attributedCell = NSMutableAttributedString(attributedString: inline(
+                    cellText, base: base, color: color, mono: mono,
+                    codeBG: codeBG, paragraph: cellParagraph))
+                attributedCell.append(NSAttributedString(string: "\n", attributes: [
+                    .font: body, .paragraphStyle: cellParagraph,
+                ]))
+                output.append(attributedCell)
+            }
+        }
+        output.append(NSAttributedString(string: "\n", attributes: [
+            .font: body, .paragraphStyle: paragraph(6, 0),
+        ]))
     }
 
     /// Inline **bold**, *italic*, `code`, and [links](https://example.com).
