@@ -174,6 +174,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private var config = AppConfig.load()
     private var sessions: [TerminalSession] = []
+    /// Durable, per-main-tab history for tracking pane structural changes
+    /// across a crash. IDs are intentionally app-assigned rather than raw
+    /// object pointers so successive records can be correlated.
+    private let paneLifecycleLedger = PaneLifecycleLedger()
+    private var paneLedgerTabIDs: [ObjectIdentifier: String] = [:]
+    private var paneLedgerSessionTabs: [Int: String] = [:]
+    private var nextPaneLedgerTabID = 1
     private var configWatcher: DispatchSourceFileSystemObject?
     private var reloadPending = false
     private var settings: SettingsWindowController?
@@ -236,6 +243,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
+        paneLifecycleLedger.start()
         appControl.handler = { [weak self] request in
             self?.handleAppRequest(request) ?? "error: shutting down"
         }
@@ -395,7 +403,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             NotificationCenter.default.removeObserver(foregroundProcessObserver)
         }
         appControl.stop()
+        // `shutdown()` stops PTYs without necessarily calling `onExited`, so
+        // close registered main tabs explicitly before emitting the clean end
+        // marker. Otherwise a normal quit would resemble a crash in the log.
+        for win in NSApp.windows where paneLedgerTabIDs[ObjectIdentifier(win)] != nil {
+            closePaneLedgerTab(
+                for: win, reason: "application-terminate", origin: "application-terminate")
+        }
         for s in sessions { s.shutdown() }
+        paneLifecycleLedger.finish()
     }
 
     public func applicationWillResignActive(_ notification: Notification) {
@@ -535,6 +551,178 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func activeSessions(in win: NSWindow) -> [TerminalSession] {
         if win === quickTerminal.window { return quickTerminal.activeSessions }
         return sessions.filter { $0.view.window === win }
+    }
+
+    // MARK: - pane lifecycle ledger
+
+    /// Each standard NSWindow is one native main tab. Keep an app-assigned ID
+    /// for its whole lifetime so the structural log is not tied to a reused
+    /// memory address or window number.
+    private func paneLedgerTabID(
+        for win: NSWindow, createIfNeeded: Bool = false
+    ) -> String? {
+        let key = ObjectIdentifier(win)
+        if let id = paneLedgerTabIDs[key] { return id }
+        guard createIfNeeded, win.tabbingIdentifier == "infinitty" else { return nil }
+        let id = "tab-\(nextPaneLedgerTabID)"
+        nextPaneLedgerTabID += 1
+        paneLedgerTabIDs[key] = id
+        return id
+    }
+
+    private func paneLedgerTerminalID(_ session: TerminalSession) -> String {
+        "terminal:\(session.id)"
+    }
+
+    private func paneLedgerPaneID(
+        for view: NSView,
+        exitingSession: TerminalSession? = nil
+    ) -> String {
+        if let terminal = view as? TerminalView {
+            if let exitingSession, terminal === exitingSession.view {
+                return paneLedgerTerminalID(exitingSession)
+            }
+            if let session = sessions.first(where: { $0.view === terminal }) {
+                return paneLedgerTerminalID(session)
+            }
+        }
+        if let utility = view as? UtilityPaneView { return utility.kind.rawValue }
+        return "unknown"
+    }
+
+    private func paneLedgerTopology(
+        in win: NSWindow,
+        exitingSession: TerminalSession? = nil
+    ) -> String {
+        guard let root = terminalRoot(of: win) else { return "-" }
+        func describe(_ view: NSView) -> String {
+            if let split = view as? NSSplitView {
+                let axis = split.isVertical ? "V" : "H"
+                return "\(axis)[\(split.arrangedSubviews.map(describe).joined(separator: ","))]"
+            }
+            if view is TerminalView || view is UtilityPaneView {
+                return paneLedgerPaneID(for: view, exitingSession: exitingSession)
+            }
+            let children = view.subviews
+            if children.count == 1 { return describe(children[0]) }
+            return children.isEmpty
+                ? "container"
+                : "container[\(children.map(describe).joined(separator: ","))]"
+        }
+        return describe(root)
+    }
+
+    private func registerPaneLedgerTab(for win: NSWindow, session: TerminalSession) {
+        let key = ObjectIdentifier(win)
+        let hadTabID = paneLedgerTabIDs[key] != nil
+        guard let tabID = paneLedgerTabID(for: win, createIfNeeded: true) else { return }
+        if !hadTabID {
+            paneLifecycleLedger.openTab(
+                tabID, reason: "main-tab-created", origin: "window-factory",
+                topology: paneLedgerTopology(in: win))
+        }
+        paneLedgerSessionTabs[session.id] = tabID
+        paneLifecycleLedger.addPane(
+            tabID: tabID, paneID: paneLedgerTerminalID(session), reason: "initial-pane",
+            origin: "window-factory", topology: paneLedgerTopology(in: win))
+    }
+
+    private func recordPaneLedgerTerminalAdded(
+        _ session: TerminalSession,
+        in win: NSWindow,
+        reason: String,
+        origin: String,
+        sourceView: NSView,
+        vertical: Bool
+    ) {
+        guard let tabID = paneLedgerTabID(for: win) else { return }
+        paneLedgerSessionTabs[session.id] = tabID
+        paneLifecycleLedger.addPane(
+            tabID: tabID, paneID: paneLedgerTerminalID(session), reason: reason, origin: origin,
+            sourcePaneID: paneLedgerPaneID(for: sourceView),
+            axis: vertical ? "vertical" : "horizontal", topology: paneLedgerTopology(in: win))
+    }
+
+    private func recordPaneLedgerTerminalRemoved(
+        _ session: TerminalSession,
+        in win: NSWindow?,
+        reason: String,
+        origin: String
+    ) {
+        guard let tabID = paneLedgerSessionTabs.removeValue(forKey: session.id) else { return }
+        paneLifecycleLedger.removePane(
+            tabID: tabID, paneID: paneLedgerTerminalID(session), reason: reason, origin: origin,
+            topology: win.map { paneLedgerTopology(in: $0, exitingSession: session) } ?? "-")
+    }
+
+    private func recordPaneLedgerUtilityAdded(
+        _ kind: UtilityPanelKind,
+        in win: NSWindow,
+        reason: String,
+        origin: String,
+        sourceView: NSView?,
+        vertical: Bool
+    ) {
+        guard let tabID = paneLedgerTabID(for: win) else { return }
+        paneLifecycleLedger.addPane(
+            tabID: tabID, paneID: kind.rawValue, reason: reason, origin: origin,
+            sourcePaneID: sourceView.map { paneLedgerPaneID(for: $0) },
+            axis: sourceView == nil ? nil : (vertical ? "vertical" : "horizontal"),
+            topology: paneLedgerTopology(in: win))
+    }
+
+    private func recordPaneLedgerUtilityRemoved(
+        _ kind: UtilityPanelKind,
+        in win: NSWindow,
+        reason: String,
+        origin: String
+    ) {
+        guard let tabID = paneLedgerTabID(for: win) else { return }
+        paneLifecycleLedger.removePane(
+            tabID: tabID, paneID: kind.rawValue, reason: reason, origin: origin,
+            topology: paneLedgerTopology(in: win))
+    }
+
+    private func recordPaneLedgerNote(
+        in win: NSWindow,
+        paneID: String? = nil,
+        reason: String,
+        origin: String,
+        sourcePaneID: String? = nil,
+        axis: String? = nil
+    ) {
+        guard let tabID = paneLedgerTabID(for: win) else { return }
+        paneLifecycleLedger.note(
+            tabID: tabID, paneID: paneID, reason: reason, origin: origin,
+            sourcePaneID: sourcePaneID, axis: axis, topology: paneLedgerTopology(in: win))
+    }
+
+    private func recordPaneLedgerFailure(
+        in win: NSWindow,
+        paneID: String? = nil,
+        reason: String,
+        origin: String
+    ) {
+        guard let tabID = paneLedgerTabID(for: win) else { return }
+        paneLifecycleLedger.failure(
+            tabID: tabID, paneID: paneID, reason: reason, origin: origin,
+            topology: paneLedgerTopology(in: win))
+    }
+
+    private func closePaneLedgerTab(
+        for win: NSWindow,
+        reason: String,
+        origin: String
+    ) {
+        let key = ObjectIdentifier(win)
+        guard let tabID = paneLedgerTabIDs[key] else { return }
+        paneLifecycleLedger.closeTab(
+            tabID, reason: reason, origin: origin, topology: paneLedgerTopology(in: win))
+        paneLedgerTabIDs.removeValue(forKey: key)
+        let sessionIDs = paneLedgerSessionTabs.compactMap { id, mappedTabID in
+            mappedTabID == tabID ? id : nil
+        }
+        for sessionID in sessionIDs { paneLedgerSessionTabs.removeValue(forKey: sessionID) }
     }
 
     /// Bring `session`'s pane to the front within its window and make it first
@@ -987,12 +1175,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
-        guard let win else { return }
+        guard let win else {
+            recordPaneLedgerTerminalRemoved(
+                s, in: nil, reason: "terminal-exit", origin: "pty-eof")
+            return
+        }
 
         // Files and Chat are companions to terminals, not stand-alone tabs.
         // Preserve the established lifecycle: the tab closes with its final
         // terminal even when utility leaves are still mixed into its tree.
         if !wasQuickTerminal, activeSessions(in: win).isEmpty {
+            recordPaneLedgerTerminalRemoved(
+                s, in: win, reason: "terminal-exit", origin: "pty-eof")
             win.close()
             return
         }
@@ -1007,6 +1201,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let split = v.superview as? NSSplitView {
             v.removeFromSuperview()
             collapse(split, in: win)
+            if !wasQuickTerminal {
+                recordPaneLedgerTerminalRemoved(
+                    s, in: win, reason: "terminal-exit", origin: "pty-eof")
+            }
             let next: TerminalSession?
             if wasQuickTerminal {
                 next = quickTabWasActive
@@ -1022,6 +1220,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             refreshPets()
             refreshShortcutHints()
         } else {
+            if !wasQuickTerminal {
+                recordPaneLedgerTerminalRemoved(
+                    s, in: win, reason: "terminal-exit", origin: "pty-eof")
+            }
             win.close() // last pane: closes this window/tab
         }
     }
@@ -1170,6 +1372,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         if role == .standard { window.center() }
+        if role == .standard { registerPaneLedgerTab(for: window, session: session) }
 
         return (window, session)
     }
@@ -1231,6 +1434,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         cwd: String?, launchCommand: String? = nil
     ) -> TerminalSession {
         let (window, session) = makeTerminalWindow(cwd: cwd)
+        recordPaneLedgerNote(in: window, reason: "tab-presented", origin: "new-window")
         window.makeKeyAndOrderFront(nil)
         if let launchCommand { queueLaunchCommand(launchCommand, for: session) }
         session.launch()
@@ -1256,6 +1460,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         let (window, session) = makeTerminalWindow(cwd: cwd)
         host.addTabbedWindow(window, ordered: .above)
+        recordPaneLedgerNote(in: window, reason: "tab-joined", origin: "open-folder")
         window.makeKeyAndOrderFront(nil)
         if let launchCommand { queueLaunchCommand(launchCommand, for: session) }
         session.launch()
@@ -1284,6 +1489,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let source = focusedSession() ?? activeSessions(in: key).first
         let (window, session) = makeTerminalWindow(cwd: source?.currentDirectory())
         key.addTabbedWindow(window, ordered: .above)
+        recordPaneLedgerNote(in: window, reason: "tab-joined", origin: "menu-new-tab")
         window.makeKeyAndOrderFront(nil)
         session.launch()
         DispatchQueue.main.async {
@@ -1349,10 +1555,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         session.workingDirectory = focusedSession(in: win)?.currentDirectory()
             ?? activeSessions(in: win).first?.currentDirectory()
         guard insertPaneView(session.view, relativeTo: sourceView, vertical: vertical) else {
+            recordPaneLedgerFailure(
+                in: win, paneID: paneLedgerTerminalID(session), reason: "split-insert-failed",
+                origin: "pane-header")
             session.shutdown()
             sessions.removeAll { $0 === session }
             return
         }
+        recordPaneLedgerTerminalAdded(
+            session, in: win, reason: vertical ? "split-right" : "split-down",
+            origin: "pane-header", sourceView: sourceView, vertical: vertical)
         session.launch()
         win.makeFirstResponder(session.view)
         refreshPets()
@@ -1709,6 +1921,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard result.changed else {
             PaneLog.log("ERROR move returned unchanged zone=\(zone) "
                 + "source=\(ObjectIdentifier(source)) target=\(ObjectIdentifier(target))")
+            recordPaneLedgerFailure(
+                in: win, paneID: paneLedgerPaneID(for: source), reason: "pane-move-unchanged",
+                origin: "pane-drag")
             return
         }
         if let split = result.insertedSplit {
@@ -1724,6 +1939,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let summary = "move end count=\(afterPanes.count) missing=\(missing) added=\(added) "
             + "tree=\(root.map(PaneLog.describe) ?? "nil")"
         PaneLog.log(beforeIDs == afterIDs ? summary : "ERROR \(summary)")
+        recordPaneLedgerNote(
+            in: win, paneID: paneLedgerPaneID(for: source), reason: "pane-moved", origin: "pane-drag",
+            sourcePaneID: paneLedgerPaneID(for: target), axis: String(describing: zone))
         animatePaneReflow(from: oldGeometry)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self, weak win] in
             guard let self, let win else { return }
@@ -1735,6 +1953,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 + "added=\(settledIDs.subtracting(beforeIDs)) "
                 + "tree=\(settledRoot.map(PaneLog.describe) ?? "nil")"
             PaneLog.log(beforeIDs == settledIDs ? settledSummary : "ERROR \(settledSummary)")
+            self.recordPaneLedgerNote(
+                in: win, reason: "pane-move-settled", origin: "pane-drag")
         }
         win.makeFirstResponder(source)
         refreshPets()
@@ -1829,6 +2049,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             splitView.frame = old.frame
             parent.replaceSubview(old, with: splitView)
         } else {
+            recordPaneLedgerFailure(
+                in: win, paneID: paneLedgerTerminalID(newSession), reason: "split-insert-failed",
+                origin: "split-command")
+            newSession.shutdown()
+            sessions.removeAll { $0 === newSession }
             return
         }
         old.autoresizingMask = []
@@ -1841,6 +2066,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             splitView.addArrangedSubview(newSession.view)
         }
         applyTabTint(to: win)
+        recordPaneLedgerTerminalAdded(
+            newSession, in: win,
+            reason: vertical
+                ? (newFirst ? "split-left" : "split-right")
+                : (newFirst ? "split-up" : "split-down"),
+            origin: "split-command", sourceView: old, vertical: vertical)
 
         DispatchQueue.main.async {
             let mid = vertical ? splitView.bounds.width / 2 : splitView.bounds.height / 2
@@ -1855,6 +2086,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func closePane(_ sender: Any?) {
         if let session = focusedSession() {
+            if let win = session.view.window {
+                recordPaneLedgerNote(
+                    in: win, paneID: paneLedgerTerminalID(session), reason: "close-requested",
+                    origin: "pane-command")
+            }
             session.terminate() // EOF path handles pane/tab teardown
         } else if let win = NSApp.keyWindow,
                   let pane = focusedPaneLeaf(in: win) as? UtilityPaneView,
@@ -2216,6 +2452,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let existing = utilityPanels[id]?[kind] {
             restorePaneZoom(revealing: existing.pane)
             win.makeFirstResponder(existing.pane)
+            recordPaneLedgerNote(
+                in: win, paneID: kind.rawValue, reason: "pane-focused", origin: "utility-open")
             return existing
         }
         guard let anchorView = requestedSource
@@ -2225,7 +2463,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               anchorView.window === win else { return nil }
 
         let controller = CodeViewController(config: config, panelKind: kind)
-        _ = controller.view
         let bg = Theme.dark.applying(config).background
         let pane = UtilityPaneView(
             kind: kind,
@@ -2236,6 +2473,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             blurred: config.backgroundBlur)
         let record = UtilityPanelRecord(controller: controller, pane: pane)
         utilityPanels[id, default: [:]][kind] = record
+        controller.onPageChanged = { [weak self, weak win, weak controller] page in
+            guard let self, let win, let controller,
+                  self.utilityPanels[ObjectIdentifier(win)]?[kind]?.controller === controller
+            else { return }
+            self.recordPaneLedgerNote(
+                in: win, paneID: kind.rawValue, reason: "page-\(page)", origin: "sidebar")
+        }
 
         pane.onSplitRight = { [weak self, weak pane] in
             guard let self, let pane else { return }
@@ -2280,14 +2524,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             if kind == .chat {
                 let assistant = petAssistant(for: sourceSession)
                 controller.attachAssistant(assistant)
-                pane.onNewChat = { [weak assistant] in assistant?.startNewChat() }
+                pane.onNewChat = { [weak self, weak win, weak assistant] in
+                    if let self, let win {
+                        self.recordPaneLedgerNote(
+                            in: win, paneID: "chat", reason: "chat-new", origin: "chat-header")
+                    }
+                    assistant?.startNewChat()
+                }
             }
         }
         guard insertPaneView(pane, relativeTo: anchorView, vertical: vertical)
         else {
+            recordPaneLedgerFailure(
+                in: win, paneID: kind.rawValue, reason: "utility-insert-failed",
+                origin: requestedSource == nil ? "utility-open" : "split-chooser")
             utilityPanels[id]?.removeValue(forKey: kind)
             return nil
         }
+        recordPaneLedgerUtilityAdded(
+            kind, in: win,
+            reason: requestedSource == nil ? "utility-open" : "split-insert",
+            origin: requestedSource == nil ? "utility-open" : "split-chooser",
+            sourceView: anchorView, vertical: vertical)
         sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
             utilityPanels[id]?[.files] != nil)
         win.makeFirstResponder(pane)
@@ -2305,6 +2563,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         utilityPanels[id]?.removeValue(forKey: record.pane.kind)
         if utilityPanels[id]?.isEmpty == true { utilityPanels.removeValue(forKey: id) }
+        recordPaneLedgerUtilityRemoved(
+            record.pane.kind, in: win, reason: "utility-close", origin: "utility-pane")
         sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
             utilityPanels[id]?[.files] != nil)
         refocusTerminal(in: win)
@@ -2554,6 +2814,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 // orderFront, NOT makeKey: an agent creating a pane must never
                 // steal keyboard focus from whatever the user is typing in.
                 window.orderFront(nil)
+                self.recordPaneLedgerNote(
+                    in: window, reason: "tab-presented", origin: "app-control-new-window")
                 session.launch()
                 DispatchQueue.main.async {
                     self.refreshPets()
@@ -2581,6 +2843,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
                 let (window, session) = self.makeTerminalWindow(cwd: cwd)
                 host.addTabbedWindow(window, ordered: .above)
+                self.recordPaneLedgerNote(
+                    in: window, reason: "tab-joined", origin: "app-control-new-tab")
                 // Do not select/key the new tab — keep the user's focus put.
                 session.launch()
                 DispatchQueue.main.async {
@@ -2617,7 +2881,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return "ok"
         case "close":
             guard let (s, _) = paneAndText(arg) else { return "error: close <id>" }
-            s.terminate()
+            _ = onMain {
+                if let win = s.view.window {
+                    self.recordPaneLedgerNote(
+                        in: win, paneID: self.paneLedgerTerminalID(s), reason: "close-requested",
+                        origin: "app-control-close")
+                }
+                s.terminate()
+            }
             return "ok"
         case "send", "send-line":
             guard let (s, text) = paneAndText(arg) else { return "error: \(cmd) <id> <text>" }
@@ -2846,10 +3117,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
               sender !== quickTerminal.window else { return true }
         let running = ForegroundProcessTracker.runningProcesses(
             in: activeSessions(in: sender))
-        guard !running.isEmpty else { return true }
+        guard !running.isEmpty else {
+            recordPaneLedgerNote(
+                in: sender, reason: "tab-close-approved", origin: "window-close")
+            return true
+        }
         let alert = ForegroundProcessTracker.closeConfirmationAlert(
             for: running.map(\.info))
-        return alert.runModal() == .alertSecondButtonReturn
+        let approved = alert.runModal() == .alertSecondButtonReturn
+        recordPaneLedgerNote(
+            in: sender,
+            reason: approved ? "tab-close-approved" : "tab-close-vetoed",
+            origin: "window-close")
+        return approved
     }
 
     public func windowWillClose(_ notification: Notification) {
@@ -2865,6 +3145,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             value.pane.window === win || value.root.window === win ? key : nil
         }
         restoringKeys.forEach { finishPaneZoomRestore(key: $0, refocus: false) }
+        // Do this before clearing the window's utility/session maps so the
+        // final `-` records include Files and Chat in the tab's state.
+        closePaneLedgerTab(for: win, reason: "window-closed", origin: "window-close")
         // Cancel any in-flight tab rename in this window's strip.
         terminalChromes[ObjectIdentifier(win)]?.strip.cancelRename()
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))

@@ -314,6 +314,21 @@ legacy `toggle-sidebar` socket command toggles the Files pane for compatibility.
 Each main tab owns its Files/Chat panes and nested layout independently. Both
 panes follow the terminal focused in that tab.
 
+### Pane lifecycle ledger
+
+For crash investigation, each run writes a synchronous structural ledger to
+`~/Library/Logs/Infinitty/pane-ledger/`. Lines use a stable `tab-<n>` main-tab
+ID and a literal `+` / `-` history for terminal, Files, and Chat leaves, along
+with the split source, axis, and resulting pane tree. For example:
+
+```
+uptime=42.381 seq=18 tab=tab-2 + pane=chat reason=split-insert origin=split-chooser panes=[terminal:4,chat] tree=V[terminal:4,chat]
+```
+
+`Changes` is recorded as a page transition inside the Files pane, rather than
+as a separate leaf. The ledger intentionally excludes terminal output, shell
+commands, chat text, current directories, and file paths.
+
 ## Terminal feature coverage
 
 Full xterm-256color core: CSI cursor/erase/insert/delete/scroll-region ops,

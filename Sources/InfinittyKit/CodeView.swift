@@ -301,6 +301,9 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     /// The embedded sidebar-chat composer, so agent self-control commands can
     /// switch its model / effort. Set whenever an assistant is attached.
     private weak var chatPanel: PetAssistantPanelView?
+    /// Structural observers use this to distinguish Files from Changes
+    /// without treating Changes as a separate split pane.
+    var onPageChanged: ((String) -> Void)?
     private var selectedChange: CodeChange?
     private var headerTopToSearch: NSLayoutConstraint?
     private var headerTopToCommit: NSLayoutConstraint?
@@ -1028,6 +1031,7 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     // MARK: - pages
 
     private func setPage(_ newPage: Page) {
+        let changed = page != newPage
         page = newPage
         pageControl.setSelectedIndex(newPage.rawValue)
         searchField.isHidden = newPage != .files
@@ -1048,6 +1052,14 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         updateHeader()
         if newPage == .changes { refreshChanges() }
         outlineView.reloadData()
+        guard changed else { return }
+        let pageName: String
+        switch newPage {
+        case .files: pageName = "files"
+        case .changes: pageName = "changes"
+        case .chat: pageName = "chat"
+        }
+        onPageChanged?(pageName)
     }
 
     /// Agent/self-control: set the embedded chat composer's model / effort.
