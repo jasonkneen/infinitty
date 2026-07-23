@@ -31,6 +31,7 @@ cp "$BIN/infinitty-mcp" dist/
 
 echo "Signing…"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-mcp
+codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
 codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
 codesign -vvv --strict dist/Infinitty.app
 
