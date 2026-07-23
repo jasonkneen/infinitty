@@ -1,8 +1,13 @@
 name: Release
 
+# Manual backup for scripts/release.sh (the primary release path).
+# Run from the Actions tab with the tag to build, e.g. v0.1.9.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.9)"
+        required: true
 
 permissions:
   contents: write
@@ -11,8 +16,12 @@ jobs:
   release:
     name: Build & Release
     runs-on: macos-14
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Run tests
         run: swift test
@@ -22,8 +31,9 @@ jobs:
 
       - name: Assemble app bundle
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           BIN=.build/apple/Products/Release
+          if [ -x .build/out/Products/Release/infinitty ]; then BIN=.build/out/Products/Release; fi
           scripts/make-app.sh "$BIN" "$VERSION" dist
           cp "$BIN/infinitty-mcp" dist/
 
@@ -47,6 +57,7 @@ jobs:
           rm cert.p12
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" build.keychain > /dev/null
           codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-mcp
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
           codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
           codesign -vvv --strict dist/Infinitty.app
 
@@ -72,7 +83,7 @@ jobs:
 
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           STAGE="infinitty-$VERSION"
           mkdir -p "pkg/$STAGE"
           cp -R dist/Infinitty.app "pkg/$STAGE/"
@@ -82,27 +93,39 @@ jobs:
           tar -czf "infinitty-$VERSION-macos.tar.gz" -C pkg "$STAGE"
           shasum -a 256 "infinitty-$VERSION-macos.tar.gz" > "infinitty-$VERSION-macos.tar.gz.sha256"
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            infinitty-*-macos.tar.gz \
-            infinitty-*-macos.tar.gz.sha256 \
-            --title "infinitty $GITHUB_REF_NAME" \
-            --generate-notes
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              infinitty-*-macos.tar.gz \
+              infinitty-*-macos.tar.gz.sha256 \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              infinitty-*-macos.tar.gz \
+              infinitty-*-macos.tar.gz.sha256 \
+              --title "infinitty $RELEASE_TAG" \
+              --generate-notes
+          fi
 
   npm:
     name: Publish npm package
     needs: release
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
-      - name: Publish @jasonkneen/infinitty (skipped if no NPM_TOKEN)
+      - name: Publish @jasonkneen/infinitty (skipped if no NPM_TOKEN or already published)
+        working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -110,6 +133,10 @@ jobs:
             echo "No NPM_TOKEN configured — skipping npm publish."
             exit 0
           fi
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
+          if npm view "@jasonkneen/infinitty@$VERSION" version >/dev/null 2>&1; then
+            echo "@jasonkneen/infinitty@$VERSION already published — skipping."
+            exit 0
+          fi
           npm version "$VERSION" --no-git-tag-version
           npm publish --access public

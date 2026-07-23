@@ -25,7 +25,9 @@ if ! xcrun notarytool history --keychain-profile infinitty >/dev/null 2>&1; then
     --apple-id "$APPLEID" --team-id SW75ZJJ5R6 --password "$APPPASS"
 fi
 
+# Newer SwiftPM puts universal products in .build/out, older in .build/apple.
 BIN=.build/apple/Products/Release
+if [ -x .build/out/Products/Release/infinitty ]; then BIN=.build/out/Products/Release; fi
 scripts/make-app.sh "$BIN" "$VERSION" dist >/dev/null
 cp "$BIN/infinitty-mcp" dist/
 
