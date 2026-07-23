@@ -157,18 +157,34 @@ final class AppControlServer {
     func broadcast(_ object: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
         let line = Array(data) + [0x0A]
-        subscriberLock.lock()
-        var dead: [Int32] = []
-        for fd in subscribers {
-            let n = line.withUnsafeBufferPointer { write(fd, $0.baseAddress!, $0.count) }
-            // Short write = corrupt event line for that client: prune it.
-            if n != line.count { dead.append(fd) }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            self.subscriberLock.lock()
+            let targets = self.subscribers
+            self.subscriberLock.unlock()
+            guard !targets.isEmpty else { return }
+
+            var dead: [Int32] = []
+            for fd in targets {
+                self.subscriberLock.lock()
+                let isStillSubscriber = self.subscribers.contains(fd)
+                self.subscriberLock.unlock()
+                guard isStillSubscriber else { continue }
+
+                let n = line.withUnsafeBufferPointer { write(fd, $0.baseAddress!, $0.count) }
+                if n != line.count { dead.append(fd) }
+            }
+            if !dead.isEmpty {
+                self.subscriberLock.lock()
+                for fd in dead {
+                    if let i = self.subscribers.firstIndex(of: fd) {
+                        self.subscribers.remove(at: i)
+                        close(fd)
+                    }
+                }
+                self.subscriberLock.unlock()
+            }
         }
-        if !dead.isEmpty {
-            for fd in dead { close(fd) }
-            subscribers.removeAll { dead.contains($0) }
-        }
-        subscriberLock.unlock()
     }
 
     /// Cap on concurrent client threads (includes long-lived `subscribe`

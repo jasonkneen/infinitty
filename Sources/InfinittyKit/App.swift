@@ -229,7 +229,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var settings: SettingsWindowController?
     private let notch = NotchActivityController()
     private let appControl = AppControlServer()
-    private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
+    private struct RunItem {
+        let id: UUID
+        let command: String
+        let completion: (Int) -> Void
+    }
+    private var runQueues: [Int: [RunItem]] = [:] // session id -> request queue
     private var pendingLaunchCommands: [Int: String] = [:]
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
@@ -538,8 +543,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
                 if kind == UInt8(ascii: "D") {
                     s.petAnimator?.commandEnded(exitCode: exit)
-                    for waiter in self.runWaiters.removeValue(forKey: s.id) ?? [] {
-                        waiter(exit)
+                    if var queue = self.runQueues[s.id], !queue.isEmpty {
+                        let finishedItem = queue.removeFirst()
+                        self.runQueues[s.id] = queue.isEmpty ? nil : queue
+                        finishedItem.completion(exit)
+                        if let nextItem = queue.first {
+                            s.view.showAgentGlow()
+                            s.pty.write(Array(nextItem.command.utf8) + [0x0D])
+                        }
                     }
                     s.processTracker?.poke()
                 }
@@ -1242,7 +1253,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         sessions.removeAll { $0 === s }
         let exitingAssistant = petAssistants.removeValue(forKey: s.id)
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
-        runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
+        runQueues.removeValue(forKey: s.id)?.forEach { $0.completion(-1) }
         let v = s.view
         guard let win else {
             exitingAssistant?.detach()
@@ -2967,10 +2978,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if Thread.isMainThread { return work() }
         var result: T?
         let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
             result = work()
             sem.signal()
         }
+        CFRunLoopWakeUp(CFRunLoopGetMain())
         return sem.wait(timeout: .now() + 3) == .success ? result : nil
     }
 
@@ -3247,18 +3259,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let (s, text) = paneAndText(arg), !text.isEmpty else {
                 return "error: run <id> <command>"
             }
+            let itemID = UUID()
             let sem = DispatchSemaphore(value: 0)
             var exitCode = -1
             _ = onMain {
-                self.runWaiters[s.id, default: []].append { code in
+                let item = RunItem(id: itemID, command: text) { code in
                     exitCode = code
                     sem.signal()
                 }
-                s.view.showAgentGlow()
-                s.pty.write(Array(text.utf8) + [0x0D])
+                var queue = self.runQueues[s.id, default: []]
+                queue.append(item)
+                self.runQueues[s.id] = queue
+                if queue.count == 1 {
+                    s.view.showAgentGlow()
+                    s.pty.write(Array(text.utf8) + [0x0D])
+                }
             }
             guard sem.wait(timeout: .now() + 120) == .success else {
-                _ = onMain { self.runWaiters.removeValue(forKey: s.id) }
+                _ = onMain {
+                    if var queue = self.runQueues[s.id] {
+                        queue.removeAll { $0.id == itemID }
+                        self.runQueues[s.id] = queue.isEmpty ? nil : queue
+                    }
+                }
                 return "error: timed out waiting for completion (is OSC 133 shell integration enabled?)"
             }
             let payload: [String: Any] = [

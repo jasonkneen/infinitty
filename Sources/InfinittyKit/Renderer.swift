@@ -60,7 +60,16 @@ final class Renderer: NSObject {
                 region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
                 withBytes: buf.baseAddress!, bytesPerRow: w * 4)
         }
-        if imageTextures.count > 16 { imageTextures.removeAll() }
+        if imageTextures.count > 64 {
+            let activeIDs = Set(snap.images.map(\.id))
+            let unusedKeys = imageTextures.keys.filter { !activeIDs.contains($0) }
+            for key in unusedKeys {
+                imageTextures.removeValue(forKey: key)
+            }
+            if imageTextures.count > 64 {
+                imageTextures.removeAll()
+            }
+        }
         imageTextures[id] = texture
         return texture
     }
