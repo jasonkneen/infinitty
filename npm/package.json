@@ -1,6 +1,6 @@
 {
   "name": "@jasonkneen/infinitty",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "infinitty — the agent-native GPU terminal for macOS. Installs the app, the MCP server, and shell integration.",
   "keywords": [
     "terminal",
