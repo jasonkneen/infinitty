@@ -332,32 +332,40 @@ final class SessionScanner {
             // newest transcripts live (claude keeps no transcript fd open)
             let liveByCwd = cwdCounts[proj.lastPathComponent] ?? 0
             for (idx, (f, mtime)) in dated.enumerated() {
-                let projName = proj.lastPathComponent.split(separator: "-").last.map(String.init) ?? proj.lastPathComponent
-                let info = tailInfo(of: f)
-                let context = claudeContext(of: f)
-                var sess = AgentSession(id: f.path, kind: .claude, title: projName,
-                                        snippet: info.snippet, model: info.model, lastModified: mtime)
-                sess.prompt = info.prompt
-                sess.lastActivity = info.activity
-                sess.isLive = live.contains(f.path) || idx < liveByCwd
-                sess.threadID = context.sessionID
-                    ?? f.deletingPathExtension().lastPathComponent
-                let cwdCandidates = cwdProcesses[proj.lastPathComponent] ?? []
-                // Claude normally closes its transcript. A single process in
-                // the cwd can be paired safely; two processes in the same cwd
-                // cannot be assigned to two transcript files from ordering
-                // alone, so keep them live but deliberately ownership-unknown.
-                let cwdProcess = cwdCandidates.count == 1 && idx == 0
-                    ? cwdCandidates[0] : nil
-                let process = liveByPath[f.path] ?? cwdProcess
-                sess.processID = process?.processID
-                sess.workingDirectory = process?.cwd ?? context.cwd
-                sess.children = claudeSubagents(sessionFile: f, parentLive: sess.isLive)
-                for i in sess.children.indices {
-                    sess.children[i].processID = sess.processID
-                    sess.children[i].workingDirectory = sess.workingDirectory
+                // Skip stale transcripts before any file I/O — the recency
+                // filter in scan() would drop them anyway, and reading all of
+                // ~/.claude/projects (easily thousands of files) every pass
+                // is what ballooned the scan.
+                let isLive = live.contains(f.path) || idx < liveByCwd
+                if !isLive, Date().timeIntervalSince(mtime) > 6 * 3600 { continue }
+                autoreleasepool {
+                    let projName = proj.lastPathComponent.split(separator: "-").last.map(String.init) ?? proj.lastPathComponent
+                    let info = tailInfo(of: f)
+                    let context = claudeContext(of: f)
+                    var sess = AgentSession(id: f.path, kind: .claude, title: projName,
+                                            snippet: info.snippet, model: info.model, lastModified: mtime)
+                    sess.prompt = info.prompt
+                    sess.lastActivity = info.activity
+                    sess.isLive = isLive
+                    sess.threadID = context.sessionID
+                        ?? f.deletingPathExtension().lastPathComponent
+                    let cwdCandidates = cwdProcesses[proj.lastPathComponent] ?? []
+                    // Claude normally closes its transcript. A single process in
+                    // the cwd can be paired safely; two processes in the same cwd
+                    // cannot be assigned to two transcript files from ordering
+                    // alone, so keep them live but deliberately ownership-unknown.
+                    let cwdProcess = cwdCandidates.count == 1 && idx == 0
+                        ? cwdCandidates[0] : nil
+                    let process = liveByPath[f.path] ?? cwdProcess
+                    sess.processID = process?.processID
+                    sess.workingDirectory = process?.cwd ?? context.cwd
+                    sess.children = claudeSubagents(sessionFile: f, parentLive: sess.isLive)
+                    for i in sess.children.indices {
+                        sess.children[i].processID = sess.processID
+                        sess.children[i].workingDirectory = sess.workingDirectory
+                    }
+                    out.append(sess)
                 }
-                out.append(sess)
             }
         }
         return out
@@ -373,19 +381,21 @@ final class SessionScanner {
             guard let mtime = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate else { continue }
             // Skip old files early to avoid reading them
             if Date().timeIntervalSince(mtime) > 6 * 3600 { continue }
-            let meta = codexMeta(of: f)
-            let info = tailInfo(of: f)
-            var sess = AgentSession(id: f.path, kind: .codex, title: meta.title,
-                                    snippet: info.snippet, model: info.model, lastModified: mtime)
-            sess.prompt = info.prompt
-            sess.lastActivity = info.activity
-            sess.isLive = live.contains(f.path)
-            sess.threadID = meta.id
-            sess.parentID = meta.parentID
-            sess.nickname = meta.nickname
-            sess.workingDirectory = liveByPath[f.path]?.cwd ?? meta.cwd
-            sess.processID = liveByPath[f.path]?.processID
-            out.append(sess)
+            autoreleasepool {
+                let meta = codexMeta(of: f)
+                let info = tailInfo(of: f)
+                var sess = AgentSession(id: f.path, kind: .codex, title: meta.title,
+                                        snippet: info.snippet, model: info.model, lastModified: mtime)
+                sess.prompt = info.prompt
+                sess.lastActivity = info.activity
+                sess.isLive = live.contains(f.path)
+                sess.threadID = meta.id
+                sess.parentID = meta.parentID
+                sess.nickname = meta.nickname
+                sess.workingDirectory = liveByPath[f.path]?.cwd ?? meta.cwd
+                sess.processID = liveByPath[f.path]?.processID
+                out.append(sess)
+            }
         }
         return out
     }
@@ -398,16 +408,18 @@ final class SessionScanner {
         for c in files where c.pathExtension == "jsonl" {
             guard let mtime = (try? c.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
                   Date().timeIntervalSince(mtime) < 6 * 3600 else { continue }
-            let info = tailInfo(of: c)
-            var kid = AgentSession(id: c.path, kind: .claude, title: "subagent",
-                                   snippet: info.snippet, model: info.model, lastModified: mtime)
-            // no nicknames here — label with the task it was given
-            kid.nickname = info.prompt.isEmpty ? "subagent" : String(info.prompt.prefix(40))
-            // subagents share the parent process (open-vibe-island tracks them
-            // as parent metadata) — liveness inherits, busyness from writes
-            kid.isLive = parentLive
-            kid.lastActivity = info.activity
-            kids.append(kid)
+            autoreleasepool {
+                let info = tailInfo(of: c)
+                var kid = AgentSession(id: c.path, kind: .claude, title: "subagent",
+                                       snippet: info.snippet, model: info.model, lastModified: mtime)
+                // no nicknames here — label with the task it was given
+                kid.nickname = info.prompt.isEmpty ? "subagent" : String(info.prompt.prefix(40))
+                // subagents share the parent process (open-vibe-island tracks them
+                // as parent metadata) — liveness inherits, busyness from writes
+                kid.isLive = parentLive
+                kid.lastActivity = info.activity
+                kids.append(kid)
+            }
         }
         return kids.sorted { $0.lastModified > $1.lastModified }
     }
@@ -1473,36 +1485,41 @@ private final class NotchRuntime: NSObject {
     private func rescan() {
         scanQueue.async { [weak self] in
             guard let self, self.isShown else { return }
-            // Process discovery is the authoritative liveness signal. Keys are
-            // transcript paths, or "cwd#<encoded>#<i>" for claude's cwd fallback.
-            var seen = Set<String>()
-            var cwdIndex: [String: Int] = [:]
-            for snap in self.discovery.liveTranscripts() {
-                let key: String
-                if let path = snap.transcriptPath {
-                    key = path
-                } else if snap.kind == .claude, let cwd = snap.cwd {
-                    let encoded = cwd.replacingOccurrences(of: "/", with: "-")
-                    let i = cwdIndex[encoded, default: 0]
-                    cwdIndex[encoded] = i + 1
-                    key = "cwd#\(encoded)#\(i)"
-                } else { continue }
-                seen.insert(key)
-                self.processesByKey[key] = snap
-            }
-            for p in seen { self.missCounts[p] = 0 }
-            for (p, n) in self.missCounts where !seen.contains(p) {
-                if n + 1 >= 2 {
-                    self.missCounts.removeValue(forKey: p)
-                    self.processesByKey.removeValue(forKey: p)
-                } else {
-                    self.missCounts[p] = n + 1
+            // Pool the whole pass: this serial queue can stay busy back-to-back,
+            // and GCD only drains its own pool when a queue goes idle — without
+            // this, every transcript read of every pass accumulates.
+            let result = autoreleasepool { () -> [AgentSession] in
+                // Process discovery is the authoritative liveness signal. Keys are
+                // transcript paths, or "cwd#<encoded>#<i>" for claude's cwd fallback.
+                var seen = Set<String>()
+                var cwdIndex: [String: Int] = [:]
+                for snap in self.discovery.liveTranscripts() {
+                    let key: String
+                    if let path = snap.transcriptPath {
+                        key = path
+                    } else if snap.kind == .claude, let cwd = snap.cwd {
+                        let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+                        let i = cwdIndex[encoded, default: 0]
+                        cwdIndex[encoded] = i + 1
+                        key = "cwd#\(encoded)#\(i)"
+                    } else { continue }
+                    seen.insert(key)
+                    self.processesByKey[key] = snap
                 }
+                for p in seen { self.missCounts[p] = 0 }
+                for (p, n) in self.missCounts where !seen.contains(p) {
+                    if n + 1 >= 2 {
+                        self.missCounts.removeValue(forKey: p)
+                        self.processesByKey.removeValue(forKey: p)
+                    } else {
+                        self.missCounts[p] = n + 1
+                    }
+                }
+                let liveProcesses = self.missCounts.keys.compactMap {
+                    self.processesByKey[$0]
+                }
+                return self.scanner.scan(liveProcesses: liveProcesses)
             }
-            let liveProcesses = self.missCounts.keys.compactMap {
-                self.processesByKey[$0]
-            }
-            let result = self.scanner.scan(liveProcesses: liveProcesses)
             DispatchQueue.main.async {
                 guard self.isShown else { return }
                 // Track fullscreen-space changes: full-width bar when the menu bar is hidden
