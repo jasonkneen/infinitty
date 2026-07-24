@@ -45,7 +45,6 @@ final class TerminalSession: NSObject {
 
     var onExited: ((TerminalSession) -> Void)?
     var onTitleChanged: ((TerminalSession) -> Void)?
-    var onSuggestion: ((String) -> Void)?
 
     init(config: AppConfig, scale: CGFloat) {
         TerminalSession.nextID += 1
@@ -79,11 +78,6 @@ final class TerminalSession: NSObject {
         }
         terminal.onOutput = { [weak pty] bytes in pty?.write(bytes) }
         terminal.onChange = { [weak renderer] in renderer?.poke() }
-        terminal.onHint = { [weak self] suggestion in
-            DispatchQueue.main.async {
-                self?.onSuggestion?(suggestion)
-            }
-        }
         terminal.onTitle = { [weak self] t in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -142,7 +136,7 @@ final class TerminalSession: NSObject {
             hints: true, hintCommand: config.hintCommand,
             aiBaseURL: config.aiBaseURL, aiKey: config.aiKey, aiModel: config.aiModel)
         let engine = HintEngine(smart: smart)
-        engine.onAsyncSuggestion = { [weak self] _ in
+        engine.onAsyncSuggestion = { [weak self] in
             self?.terminal.refreshHint()
         }
         hintEngine = engine

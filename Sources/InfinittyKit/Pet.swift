@@ -158,10 +158,6 @@ enum PetSizePreset: CaseIterable, Equatable {
 }
 
 enum PetSpeechText {
-    static func suggestion(_ suggestion: String) -> String {
-        "Try this:\n" + preview(suggestion, limit: 112)
-    }
-
     /// Repo-mined tip: the command up top, provenance + affordance below.
     static func tip(_ tip: PetTip) -> String {
         preview(tip.command ?? tip.text, limit: 96)

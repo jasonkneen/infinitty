@@ -18,10 +18,9 @@ final class PetAssistantTests: XCTestCase {
             PetSpeechText.notification(
                 "\n## Build fixed\n\nThere is much more detail after this."),
             "Done.\nBuild fixed")
-        let long = PetSpeechText.suggestion(String(repeating: "a", count: 180))
-        XCTAssertTrue(long.hasPrefix("Try this:\n"))
+        let long = PetSpeechText.preview(String(repeating: "a", count: 180), limit: 112)
         XCTAssertTrue(long.hasSuffix("…"))
-        XCTAssertLessThan(long.count, 130)
+        XCTAssertLessThanOrEqual(long.count, 112)
     }
 
     func testPixelPetSpeechBubbleStaysCompactAndAccessible() {

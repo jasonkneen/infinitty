@@ -25,7 +25,7 @@ final class HintEngine {
     // Async smart-suggestion cache: last input asked about, and its answer.
     private var aiInput = ""
     private var aiResult: String?
-    var onAsyncSuggestion: ((String) -> Void)?  // redraw and optionally wake the pet
+    var onAsyncSuggestion: (() -> Void)?        // re-evaluate the hint when it replies
     var cwdProvider: (() -> String?)?           // optional cwd context
     private let aiQueue = DispatchQueue(label: "infinitty.hint.ai", qos: .utility)
     private var aiInFlight = false
@@ -192,9 +192,7 @@ final class HintEngine {
             self.aiInFlight = false
             if self.aiInput == input { self.aiResult = result }
             self.lock.unlock()
-            if let result {
-                DispatchQueue.main.async { self.onAsyncSuggestion?(result) }
-            }
+            if result != nil { DispatchQueue.main.async { self.onAsyncSuggestion?() } }
         }
 
         switch smart {

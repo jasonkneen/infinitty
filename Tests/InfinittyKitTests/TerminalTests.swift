@@ -141,34 +141,28 @@ final class TerminalTests: XCTestCase {
         XCTAssertEqual(t.lastCommandOutput(), "")
     }
 
-    func testVisibleHintNotifiesPetWithFullSuggestion() {
+    func testVisibleHintShowsGhostCompletion() {
         let t = makeTerminal()
         t.setHintProvider { input in
             input == "git st" ? "git status" : nil
         }
-        var suggestions: [String] = []
-        t.onHint = { suggestions.append($0) }
 
         feed(t, "\u{1B}]133;B\u{07}git st")
 
         XCTAssertEqual(t.currentGhost, "atus")
-        XCTAssertEqual(suggestions, ["git status"])
     }
 
-    func testAsyncHintRefreshUsesCurrentInputAndNotifiesPet() {
+    func testAsyncHintRefreshUsesCurrentInput() {
         let t = makeTerminal()
         var cached: String?
         t.setHintProvider { _ in cached }
-        var suggestions: [String] = []
-        t.onHint = { suggestions.append($0) }
         feed(t, "\u{1B}]133;B\u{07}swift bu")
-        XCTAssertTrue(suggestions.isEmpty)
+        XCTAssertEqual(t.currentGhost, "")
 
         cached = "swift build"
         t.refreshHint()
 
         XCTAssertEqual(t.currentGhost, "ild")
-        XCTAssertEqual(suggestions, ["swift build"])
     }
 
     // MARK: scroll & alt screen basics
