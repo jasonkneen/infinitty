@@ -1,17 +1,21 @@
 import AppKit
 
 enum SettingsMetrics {
-    static let windowWidth: CGFloat = 700
-    static let minimumPanelHeight: CGFloat = 440
-    static let sidebarWidth: CGFloat = 184
-    static let panelWidth: CGFloat = 480
-    static let labelWidth: CGFloat = 126
-    static let controlWidth: CGFloat = 340
-    static let bodyFontSize: CGFloat = 15
-    static let labelFontSize: CGFloat = 14
-    static let sectionFontSize: CGFloat = 16
-    static let sidebarFontSize: CGFloat = 16
-    static let detailFontSize: CGFloat = 13
+    static let windowWidth: CGFloat = 680
+    static let minimumPanelHeight: CGFloat = 420
+    static let sidebarWidth: CGFloat = 160
+    // sidebar (160 + 10 + 10 insets) + 1pt divider + panel = windowWidth,
+    // so rows can never run past the window edge.
+    static let panelWidth: CGFloat = 499
+    static let panelInset: CGFloat = 20
+    static let rowSpacing: CGFloat = 12
+    static let labelWidth: CGFloat = 110
+    static let controlWidth: CGFloat = panelWidth - panelInset * 2 - labelWidth - rowSpacing
+    static let bodyFontSize: CGFloat = 13
+    static let labelFontSize: CGFloat = 13
+    static let sectionFontSize: CGFloat = 13
+    static let sidebarFontSize: CGFloat = 13
+    static let detailFontSize: CGFloat = 11
 }
 
 extension NSBox {
@@ -79,6 +83,7 @@ final class SettingsWindowController: NSWindowController {
     private let accentWell = NSColorWell()
     private var panels: [String: NSView] = [:]
     private var panelHost: NSView?
+    private var rootStack: NSStackView?
 
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
         self.current = config
@@ -117,7 +122,7 @@ final class SettingsWindowController: NSWindowController {
         control.widthAnchor.constraint(equalToConstant: width).isActive = true
         let stack = NSStackView(views: [label(title), control])
         stack.orientation = .horizontal
-        stack.spacing = 14
+        stack.spacing = SettingsMetrics.rowSpacing
         stack.alignment = .firstBaseline
         return stack
     }
@@ -140,10 +145,12 @@ final class SettingsWindowController: NSWindowController {
         group.spacing = 10
         let stack = NSStackView(views: [label(title), group])
         stack.orientation = .horizontal
-        stack.spacing = 14
+        stack.spacing = SettingsMetrics.rowSpacing
         stack.alignment = .centerY
         return stack
     }
+
+    private static let sectionIdentifier = NSUserInterfaceItemIdentifier("settings-section")
 
     private func section(_ title: String) -> NSStackView {
         let l = NSTextField(labelWithString: title)
@@ -154,15 +161,16 @@ final class SettingsWindowController: NSWindowController {
         line.translatesAutoresizingMaskIntoConstraints = false
         let stack = NSStackView(views: [l, line])
         stack.orientation = .horizontal
-        stack.spacing = 12
+        stack.spacing = 10
+        stack.identifier = Self.sectionIdentifier
         return stack
     }
 
     private func colorRow() -> NSStackView {
         func item(_ name: String, _ well: NSColorWell) -> NSStackView {
             well.translatesAutoresizingMaskIntoConstraints = false
-            well.widthAnchor.constraint(equalToConstant: 52).isActive = true
-            well.heightAnchor.constraint(equalToConstant: 30).isActive = true
+            well.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            well.heightAnchor.constraint(equalToConstant: 26).isActive = true
             let l = NSTextField(labelWithString: name)
             l.font = .systemFont(
                 ofSize: SettingsMetrics.detailFontSize, weight: .medium)
@@ -170,7 +178,7 @@ final class SettingsWindowController: NSWindowController {
             l.alignment = .center
             let s = NSStackView(views: [well, l])
             s.orientation = .vertical
-            s.spacing = 5
+            s.spacing = 4
             s.alignment = .centerX
             return s
         }
@@ -180,7 +188,7 @@ final class SettingsWindowController: NSWindowController {
             item("Accent", accentWell),
         ])
         group.orientation = .horizontal
-        group.spacing = 18
+        group.spacing = 14
         return group
     }
 
@@ -192,7 +200,7 @@ final class SettingsWindowController: NSWindowController {
         fontCombo.completes = true
         fontCombo.addItems(withObjectValues: NSFontManager.shared.availableFontFamilies)
         fontCombo.placeholderString = "SF Mono (default)"
-        fontCombo.controlSize = .large
+        fontCombo.controlSize = .regular
         fontCombo.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
         fontCombo.target = self
         fontCombo.action = #selector(fontChanged(_:))
@@ -202,12 +210,20 @@ final class SettingsWindowController: NSWindowController {
         notchPopup.addItems(withTitles: ["builtin", "external", "primary", "all"])
 
         for popup in [stylePopup, lightsPopup, petPopup, petModePopup, notchPopup] {
-            popup.controlSize = .large
+            popup.controlSize = .regular
             popup.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
+            popup.target = self
+            popup.action = #selector(controlChanged(_:))
         }
         for check in [blurCheck, glowCheck, hintsCheck, notchCheck] {
-            check.controlSize = .large
+            check.controlSize = .regular
             check.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
+            check.target = self
+            check.action = #selector(controlChanged(_:))
+        }
+        for well in [fgWell, bgWell, cursorWell, selectionWell, accentWell] {
+            well.target = self
+            well.action = #selector(controlChanged(_:))
         }
 
         petPopup.addItem(withTitle: "none")
@@ -232,18 +248,15 @@ final class SettingsWindowController: NSWindowController {
         hintsWarning.preferredMaxLayoutWidth = Self.controlWidth
         notchPopup.widthAnchor.constraint(equalToConstant: 130).isActive = true
 
-        let apply = NSButton(title: "Apply", target: self, action: #selector(applyPressed))
-        apply.keyEquivalent = "\r"
-        apply.bezelStyle = .rounded
-        apply.controlSize = .large
-        apply.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize, weight: .medium)
-        let note = NSTextField(wrappingLabelWithString:
+        // No Apply button: every control saves as it changes (debounced), which
+        // is what the footer note promises.
+        let note = NSTextField(labelWithString:
             "Changes apply live to every pane and are written to the config file.")
         note.font = .systemFont(ofSize: SettingsMetrics.detailFontSize)
-        note.textColor = .secondaryLabelColor
-        let footer = NSStackView(views: [note, apply])
+        note.textColor = .tertiaryLabelColor
+        note.alignment = .center
+        let footer = NSStackView(views: [note])
         footer.orientation = .horizontal
-        footer.spacing = 22
         footer.alignment = .centerY
 
         // Version, author, links + update check.
@@ -289,16 +302,26 @@ final class SettingsWindowController: NSWindowController {
         versionRow.orientation = .horizontal
         versionRow.spacing = 10
         versionRow.alignment = .centerY
+        versionRow.translatesAutoresizingMaskIntoConstraints = false
+        versionRow.widthAnchor.constraint(
+            equalToConstant: SettingsMetrics.panelWidth - SettingsMetrics.panelInset * 2
+        ).isActive = true
 
         // Grouped into compact icon panels switched by a top segmented bar.
         func panel(_ rows: [NSView]) -> NSView {
             let s = NSStackView(views: rows)
             s.orientation = .vertical
             s.alignment = .leading
-            s.spacing = 16
-            s.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
+            s.spacing = 12
+            let inset = SettingsMetrics.panelInset
+            s.edgeInsets = NSEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
             s.translatesAutoresizingMaskIntoConstraints = false
             for view in rows { s.setVisibilityPriority(.mustHold, for: view) }
+            // Extra air above each section header after the first.
+            for (index, view) in rows.enumerated()
+            where index > 0 && view.identifier == Self.sectionIdentifier {
+                s.setCustomSpacing(24, after: rows[index - 1])
+            }
             return s
         }
         panels = [
@@ -345,8 +368,8 @@ final class SettingsWindowController: NSWindowController {
         let sidebar = NSStackView()
         sidebar.orientation = .vertical
         sidebar.alignment = .leading
-        sidebar.spacing = 4
-        sidebar.edgeInsets = NSEdgeInsets(top: 18, left: 10, bottom: 18, right: 10)
+        sidebar.spacing = 2
+        sidebar.edgeInsets = NSEdgeInsets(top: 14, left: 10, bottom: 14, right: 10)
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebarButtons = names.enumerated().map { index, name in
             let button = NSButton(title: "  \(name)", target: self, action: #selector(sidebarPicked(_:)))
@@ -357,16 +380,16 @@ final class SettingsWindowController: NSWindowController {
             button.isBordered = false
             button.bezelStyle = .inline
             button.wantsLayer = true
-            button.layer?.cornerRadius = 9
+            button.layer?.cornerRadius = 6
             button.font = .systemFont(
                 ofSize: SettingsMetrics.sidebarFontSize, weight: .medium)
             button.symbolConfiguration = NSImage.SymbolConfiguration(
-                pointSize: 17, weight: .regular)
+                pointSize: 13, weight: .regular)
             button.contentTintColor = .labelColor
             button.translatesAutoresizingMaskIntoConstraints = false
             button.widthAnchor.constraint(
                 equalToConstant: SettingsMetrics.sidebarWidth).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 42).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 30).isActive = true
             sidebar.addArrangedSubview(button)
             return button
         }
@@ -388,9 +411,10 @@ final class SettingsWindowController: NSWindowController {
         let root = NSStackView(views: [bodyRow, NSBox.separatorLine(), footer])
         root.orientation = .vertical
         root.alignment = .centerX
-        root.spacing = 16
-        root.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 18, right: 0)
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 14, right: 0)
         root.translatesAutoresizingMaskIntoConstraints = false
+        rootStack = root
 
         let content = NSView()
         content.addSubview(root)
@@ -430,8 +454,8 @@ final class SettingsWindowController: NSWindowController {
             view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
         ])
         window?.layoutIfNeeded()
-        let target = max(
-            view.fittingSize.height + 112, SettingsMetrics.minimumPanelHeight)
+        let fitted = rootStack?.fittingSize.height ?? 0
+        let target = max(fitted, SettingsMetrics.minimumPanelHeight)
         window?.setContentSize(NSSize(width: SettingsMetrics.windowWidth, height: target))
     }
 
@@ -489,10 +513,24 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func fontChanged(_ sender: Any?) {
         rebuildStyles(for: fontCombo.stringValue)
+        scheduleApply()
     }
 
     @objc private func sliderMoved(_ sender: Any?) {
         refreshValueLabels()
+        scheduleApply()
+    }
+
+    @objc private func controlChanged(_ sender: Any?) {
+        scheduleApply()
+    }
+
+    /// Coalesces rapid changes (slider drags, color-panel scrubbing) into one
+    /// config write + live reload.
+    private func scheduleApply() {
+        NSObject.cancelPreviousPerformRequests(
+            withTarget: self, selector: #selector(applyChanges), object: nil)
+        perform(#selector(applyChanges), with: nil, afterDelay: 0.2)
     }
 
     private func refreshValueLabels() {
@@ -515,7 +553,7 @@ final class SettingsWindowController: NSWindowController {
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
-    @objc private func applyPressed() {
+    @objc private func applyChanges() {
         var c = current
         let family = fontCombo.stringValue.trimmingCharacters(in: .whitespaces)
         c.fontName = family.isEmpty ? nil : family
@@ -565,4 +603,7 @@ final class SettingsWindowController: NSWindowController {
     }
     var fontControlSizeForTesting: NSControl.ControlSize { fontCombo.controlSize }
     var fontControlPointSizeForTesting: CGFloat { fontCombo.font?.pointSize ?? 0 }
+    /// Clicks the blur checkbox exactly as a user would, exercising the
+    /// debounced live-apply path.
+    func clickBlurCheckboxForTesting() { blurCheck.performClick(nil) }
 }

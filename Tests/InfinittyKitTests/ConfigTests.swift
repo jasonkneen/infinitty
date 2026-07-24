@@ -75,15 +75,40 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(serialized.contains("traffic-lights = diamond"))
     }
 
-    func testSettingsUseReadableLargeControlTypography() {
+    func testSettingsUseCompactSystemTypography() {
         let controller = SettingsWindowController(config: AppConfig()) { _ in }
 
-        XCTAssertGreaterThanOrEqual(controller.contentSizeForTesting.width, 700)
-        XCTAssertGreaterThanOrEqual(controller.contentSizeForTesting.height, 440)
-        XCTAssertTrue(controller.sidebarFontSizesForTesting.allSatisfy { $0 >= 16 })
-        XCTAssertTrue(controller.sidebarRowHeightsForTesting.allSatisfy { $0 >= 42 })
-        XCTAssertEqual(controller.fontControlSizeForTesting, .large)
-        XCTAssertGreaterThanOrEqual(controller.fontControlPointSizeForTesting, 15)
+        XCTAssertGreaterThanOrEqual(controller.contentSizeForTesting.width, 640)
+        XCTAssertGreaterThanOrEqual(controller.contentSizeForTesting.height, 400)
+        XCTAssertTrue(controller.sidebarFontSizesForTesting.allSatisfy { $0 == 13 })
+        XCTAssertTrue(controller.sidebarRowHeightsForTesting.allSatisfy { $0 >= 28 && $0 <= 34 })
+        XCTAssertEqual(controller.fontControlSizeForTesting, .regular)
+        XCTAssertEqual(controller.fontControlPointSizeForTesting, 13)
+    }
+
+    func testSettingsRowsFitInsidePanel() {
+        // Label + spacing + control + insets must fit the panel, or values
+        // like "14 pt" clip off the right edge of the window.
+        XCTAssertLessThanOrEqual(
+            SettingsMetrics.labelWidth + SettingsMetrics.rowSpacing
+                + SettingsMetrics.controlWidth + SettingsMetrics.panelInset * 2,
+            SettingsMetrics.panelWidth)
+        XCTAssertGreaterThanOrEqual(SettingsMetrics.controlWidth, 300)
+    }
+
+    func testSettingsApplyLiveWithoutApplyButton() {
+        let saved = expectation(description: "toggling a checkbox saves the config")
+        var savedConfig: AppConfig?
+        let controller = SettingsWindowController(config: AppConfig()) { config in
+            savedConfig = config
+            saved.fulfill()
+        }
+        let before = AppConfig().backgroundBlur
+
+        controller.clickBlurCheckboxForTesting()
+
+        wait(for: [saved], timeout: 3)
+        XCTAssertEqual(savedConfig?.backgroundBlur, !before)
     }
 
 }
