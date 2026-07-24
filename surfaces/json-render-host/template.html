@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px;
+    background: transparent; color: #ececf0;
+    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h2 { font-size: 17px; font-weight: 650; margin: 0 0 6px; }
+  h3 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+  h4 { font-size: 13px; font-weight: 600; margin: 8px 0 2px; }
+  p { margin: 2px 0; }
+  hr { border: none; border-top: 1px solid rgba(255,255,255,.09); margin: 10px 0; }
+  .muted { color: rgba(236,236,240,.55); }
+  .caption { font-size: 11px; }
+  .strike { text-decoration: line-through; }
+  .card {
+    background: rgba(255,255,255,.045);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 10px; padding: 12px; margin: 6px 0;
+  }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 99px;
+    font-size: 11px; font-weight: 600;
+    background: rgba(255,255,255,.09); color: rgba(236,236,240,.8);
+  }
+  .badge.tone-accent  { background: rgba(122,133,255,.22); color: #aab2ff; }
+  .badge.tone-success { background: rgba( 80,200,120,.18); color: #7ed99c; }
+  .badge.tone-warning { background: rgba(255,190, 80,.16); color: #f5c46a; }
+  .badge.tone-danger  { background: rgba(255, 99, 99,.16); color: #ff8a8a; }
+  .btn {
+    appearance: none; border: 1px solid rgba(255,255,255,.12);
+    border-radius: 7px; padding: 5px 12px; font: inherit; font-weight: 600;
+    background: rgba(255,255,255,.07); color: #ececf0; cursor: pointer;
+  }
+  .btn.primary { background: #5a64f0; border-color: #6a74ff; color: #fff; }
+  .btn.danger  { background: rgba(255,99,99,.16); border-color: rgba(255,99,99,.4); color: #ff9a9a; }
+  .btn:hover { filter: brightness(1.15); }
+  .field { display: flex; flex-direction: column; gap: 3px; margin: 4px 0; }
+  .field.row { flex-direction: row; align-items: center; gap: 7px; }
+  .field input[type="text"], .field input:not([type]) {
+    background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 7px; padding: 6px 9px; color: #ececf0; font: inherit;
+  }
+  .field input:focus { outline: none; border-color: #6a74ff; }
+  .track { height: 6px; border-radius: 3px; background: rgba(255,255,255,.09); overflow: hidden; }
+  .fill  { height: 100%; border-radius: 3px; background: #5a64f0; transition: width .25s; }
+  .list { display: flex; flex-direction: column; }
+  .list-item {
+    display: flex; gap: 9px; align-items: baseline;
+    padding: 6px 2px; border-bottom: 1px solid rgba(255,255,255,.05);
+  }
+  .list-item:last-child { border-bottom: none; }
+  .tick { color: rgba(236,236,240,.4); }
+  .tick.done { color: #7ed99c; }
+  .metric { padding: 8px 2px; }
+  .metric-value { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+  .code, code.inline {
+    font: 11.5px/1.5 "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .code {
+    background: rgba(0,0,0,.4); border: 1px solid rgba(255,255,255,.08);
+    border-radius: 8px; padding: 10px; overflow-x: auto; white-space: pre;
+  }
+  code.inline { background: rgba(255,255,255,.08); border-radius: 4px; padding: 1px 5px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  // Surface JS failures to the native side (and to evaluateJavaScript polls)
+  // instead of dying silently inside the webview.
+  window.__errors = [];
+  window.onerror = function (message, source, line, column) {
+    window.__errors.push(String(message) + " @" + line + ":" + column);
+    try { window.webkit.messageHandlers.infinittyui.postMessage(
+        { type: "error", message: String(message) }); } catch (_) {}
+  };
+</script>
+<script>/*__BUNDLE__*/</script>
+</body>
+</html>

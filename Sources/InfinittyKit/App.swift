@@ -2374,6 +2374,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// Agent surfaces opened as standalone windows: the controller must stay
     /// alive (it is the WKWebView's script-message handler) until close.
     private var surfaceWindowControllers: [ObjectIdentifier: SurfacePaneController] = [:]
+    /// surface id → its standalone window, for agent-driven surface-close.
+    private var surfaceWindows: [String: NSWindow] = [:]
 
     private func utilityRecords(in win: NSWindow) -> [UtilityPanelRecord] {
         utilityPanels[ObjectIdentifier(win)] ?? []
@@ -3006,6 +3008,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             // An agent opening a doc must not steal the user's keyboard focus.
             window.orderFront(nil)
             surfaceWindowControllers[ObjectIdentifier(window)] = controller
+            surfaceWindows[ledgerID] = window
             var token: NSObjectProtocol?
             token = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification, object: window, queue: .main
@@ -3015,6 +3018,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 let key = ObjectIdentifier(closing)
                 self?.surfaceWindowControllers[key]?.teardown()
                 self?.surfaceWindowControllers.removeValue(forKey: key)
+                self?.surfaceWindows.removeValue(forKey: ledgerID)
                 self?.appControl.broadcast([
                     "event": "surface-closed", "surface": ledgerID,
                 ])
@@ -3737,6 +3741,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 return onMain { self.openSurfacePanel(request, for: s) }
                     ?? "error: not ready"
             }
+        case "surface-close":
+            let surfaceID = arg.trimmingCharacters(in: .whitespaces)
+            guard !surfaceID.isEmpty else { return "error: surface-close <surface-id>" }
+            let closed = onMain { () -> Bool in
+                if let window = self.surfaceWindows[surfaceID] {
+                    window.close()
+                    return true
+                }
+                for win in NSApp.windows {
+                    if let record = self.utilityRecords(in: win).first(
+                        where: { $0.ledgerID == surfaceID && $0.surface != nil }) {
+                        self.closeUtilityPanel(record, in: win)
+                        return true
+                    }
+                }
+                return false
+            } ?? false
+            return closed ? "ok" : "error: no such surface: \(surfaceID)"
         case "todos":
             guard let (s, json) = paneAndText(arg) else {
                 return "error: todos <id> [json-array]"

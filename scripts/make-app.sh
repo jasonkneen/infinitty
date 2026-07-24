@@ -17,6 +17,7 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/"
 cp -R shell-integration "$APP/Contents/Resources/"
 cp -R Sources/InfinittyKit/Resources/Pets "$APP/Contents/Resources/"
 cp -R Sources/InfinittyKit/Resources/Logos "$APP/Contents/Resources/"
+cp -R Sources/InfinittyKit/Resources/Surfaces "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

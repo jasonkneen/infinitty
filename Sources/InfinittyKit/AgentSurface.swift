@@ -5,7 +5,7 @@ import WebKit
 /// a window) and show this markdown / HTML / URL in it". Sent over the app
 /// socket as `surface <pane-id> <json>` and via the infinitty_surface MCP tool.
 struct AgentSurfaceRequest: Equatable {
-    enum Kind: String { case markdown, html, url }
+    enum Kind: String { case markdown, html, url, ui }
     enum Target: String { case split, window }
     struct ParseError: Error, Equatable { let message: String }
 
@@ -39,6 +39,27 @@ struct AgentSurfaceRequest: Equatable {
                 return .failure(ParseError(message: "content is required for kind=\(kind.rawValue)"))
             }
             content = text
+        case .ui:
+            // A json-render spec: accept it inline as an object (preferred) or
+            // as a JSON string; store normalized JSON text either way.
+            let specValue = object["spec"] ?? object["content"]
+            if let dict = specValue as? [String: Any] {
+                guard dict["root"] != nil, dict["elements"] != nil,
+                      let data = try? JSONSerialization.data(withJSONObject: dict)
+                else {
+                    return .failure(ParseError(
+                        message: "ui spec must be an object with root and elements"))
+                }
+                content = String(decoding: data, as: UTF8.self)
+            } else if let text = specValue as? String,
+                      let data = text.data(using: .utf8),
+                      let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      dict["root"] != nil, dict["elements"] != nil {
+                content = text
+            } else {
+                return .failure(ParseError(
+                    message: "ui spec must be an object with root and elements"))
+            }
         case .url:
             guard let raw = (object["url"] as? String) ?? (object["content"] as? String),
                   let parsed = URL(string: raw), parsed.scheme?.hasPrefix("http") == true
@@ -90,8 +111,37 @@ final class SurfacePaneController: NSObject, WKScriptMessageHandler {
                 web.load(URLRequest(url: url))
             }
             view = web
+        case .ui:
+            // json-render: the bundled host page renders the injected spec
+            // with the built-in component registry. The spec was validated as
+            // JSON at parse time, so it is a safe JS literal.
+            let web = makeWebView()
+            web.configuration.userContentController.addUserScript(WKUserScript(
+                source: "window.__INITIAL_SPEC__ = \(request.content);",
+                injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            // A concrete baseURL gives the document a real origin, so script
+            // errors surface with messages instead of the masked
+            // "Script error @0:0" a null-origin document reports.
+            web.loadHTMLString(
+                Self.jsonRenderHostHTML
+                    ?? "<pre style=\"color:#eee\">json-render host page missing from bundle</pre>",
+                baseURL: URL(string: "https://surface.infinitty.local/"))
+            view = web
         }
     }
+
+    /// The self-contained json-render host page (built by
+    /// surfaces/json-render-host/build.mjs, shipped in Resources/Surfaces).
+    static let jsonRenderHostHTML: String? = {
+        let url = Bundle.main.url(
+            forResource: "json-render-host", withExtension: "html", subdirectory: "Surfaces")
+            ?? Bundle.main.url(forResource: "json-render-host", withExtension: "html")
+            ?? Bundle.module.url(
+                forResource: "json-render-host", withExtension: "html", subdirectory: "Surfaces")
+            ?? Bundle.module.url(forResource: "json-render-host", withExtension: "html")
+        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }()
 
     private static func markdownView(_ markdown: String) -> NSView {
         let text = NSTextView()

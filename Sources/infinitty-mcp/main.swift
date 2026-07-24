@@ -403,17 +403,30 @@ let tools: [Tool] = [
         name: "infinitty_surface",
         description: "Open a display surface in infinitty: rendered markdown, raw HTML "
             + "(an MCP-UI text/html resource payload renders directly; text/uri-list "
-            + "maps to kind=url), or a web URL. target=split places it beside the pane "
-            + "at the given ratio (e.g. 0.2 for an 80/20 split); target=window opens a "
-            + "standalone window. Returns a surface id; UI messages the content posts "
-            + "(MCP-UI intent/tool/prompt/link) arrive as \"ui\" events on the "
-            + "subscribe stream.",
+            + "maps to kind=url), a web URL, or kind=ui — a Vercel json-render spec "
+            + "rendered with a native-styled component registry. For kind=ui pass "
+            + "`spec` = {root, elements, state?} (flat element map; element = {type, "
+            + "props, children?, on?}). Components: Stack(direction,gap), Card(title,"
+            + "description), Text(content,variant:title|heading|body|caption|code), "
+            + "Badge(label,tone), Button(label,action,variant), Input(label,value:"
+            + "{$bindState:\"/path\"}), Checkbox(label,checked), Progress(value,label), "
+            + "List, ListItem(title,subtitle,done), Metric(label,value,delta), "
+            + "CodeBlock(code), Image(src), Divider. Actions (Button.action or "
+            + "on.press): submit|cancel|select|open|run|refresh|custom — clicks and "
+            + "state changes stream back as \"ui\" events (infinitty_events). "
+            + "target=split places the surface beside the pane at the given ratio "
+            + "(e.g. 0.2 for an 80/20 split); target=window opens a standalone "
+            + "window. Returns a surface id.",
         schema: [
             "type": "object",
             "properties": paneProperty.merging([
                 "kind": [
-                    "type": "string", "enum": ["markdown", "html", "url"],
+                    "type": "string", "enum": ["markdown", "html", "url", "ui"],
                     "description": "What the content is",
+                ] as [String: Any],
+                "spec": [
+                    "type": "object",
+                    "description": "json-render spec {root, elements, state?} (kind=ui)",
                 ] as [String: Any],
                 "target": [
                     "type": "string", "enum": ["split", "window"],
@@ -438,7 +451,7 @@ let tools: [Tool] = [
         ],
         invoke: { args in
             var payload: [String: Any] = [:]
-            for key in ["kind", "target", "direction", "ratio", "title", "content", "url"] {
+            for key in ["kind", "target", "direction", "ratio", "title", "content", "url", "spec"] {
                 if let value = args[key] { payload[key] = value }
             }
             guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
@@ -446,6 +459,24 @@ let tools: [Tool] = [
             }
             let json = String(decoding: data, as: UTF8.self)
             return infinittyRequest("surface \(paneArg(args)) \(json)")
+        }
+    ),
+    Tool(
+        name: "infinitty_surface_close",
+        description: "Close a surface previously opened with infinitty_surface "
+            + "(works for both split panes and standalone windows).",
+        schema: [
+            "type": "object",
+            "properties": [
+                "surfaceId": [
+                    "type": "string",
+                    "description": "Surface id returned by infinitty_surface (e.g. \"surface-1\")",
+                ] as [String: Any],
+            ],
+            "required": ["surfaceId"],
+        ],
+        invoke: { args in
+            infinittyRequest("surface-close \(args["surfaceId"] as? String ?? "")")
         }
     ),
     Tool(

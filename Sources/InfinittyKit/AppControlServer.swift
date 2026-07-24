@@ -27,10 +27,14 @@ import Foundation
 ///                               todo list; array of strings or of
 ///                               {text|content, done|status} objects
 ///   surface <id> <json>      -> open an agent display surface next to pane
-///                               <id>: {kind: markdown|html|url, target:
+///                               <id>: {kind: markdown|html|url|ui, target:
 ///                               split|window, direction, ratio, title,
-///                               content|url}. Returns the surface id; its
-///                               MCP-UI messages stream as "ui" events
+///                               content|url|spec}. kind=ui renders a
+///                               json-render spec {root, elements, state?}
+///                               via the bundled host page. Returns the
+///                               surface id; MCP-UI/json-render messages
+///                               stream as "ui" events
+///   surface-close <sid>      -> close an agent surface (split or window)
 ///   activity <text>          -> show text in the notch live-activity widget
 ///   toggle-quick-terminal    -> show or hide the persistent quick terminal
 ///   browser <base64url-json> -> native browser automation request/reply JSON
