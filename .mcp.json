@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "infinitty": {
+      "command": "/Applications/Infinitty.app/Contents/MacOS/infinitty-mcp"
+    }
+  }
+}
