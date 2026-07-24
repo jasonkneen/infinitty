@@ -23,13 +23,22 @@ import Foundation
 ///   last-output <id>         -> last command's output (OSC 133)
 ///   last-command <id>        -> last command line (OSC 133)
 ///   exit-code <id>           -> last exit code (OSC 133)
+///   todos <id> [json]        -> set (or read, with no json) the pane's agent
+///                               todo list; array of strings or of
+///                               {text|content, done|status} objects
+///   surface <id> <json>      -> open an agent display surface next to pane
+///                               <id>: {kind: markdown|html|url, target:
+///                               split|window, direction, ratio, title,
+///                               content|url}. Returns the surface id; its
+///                               MCP-UI messages stream as "ui" events
 ///   activity <text>          -> show text in the notch live-activity widget
 ///   toggle-quick-terminal    -> show or hide the persistent quick terminal
 ///   browser <base64url-json> -> native browser automation request/reply JSON
 ///                               (use the infinitty_browser MCP tools rather
 ///                               than constructing this framing by hand)
 ///   subscribe                -> connection stays open; JSON events stream in:
-///                               pane-opened, pane-closed, title, marker
+///                               pane-opened, pane-closed, title, marker,
+///                               process (foreground process changed)
 final class AppControlServer {
     let path: String
     static let currentLink = "/tmp/infinitty-current.sock"

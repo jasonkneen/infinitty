@@ -1,11 +1,21 @@
 ---
 name: infinitty-control
-description: Use when controlling infinitty, driving/automating/testing terminal or TUI apps running inside it (vim, htop, REPLs), reading its screen or scrollback, sending keystrokes, or checking a command's output/exit code via the per-pane Unix control socket ($INFINITTY_SOCKET, /tmp/infinitty-*.sock).
+description: Use when controlling infinitty, driving/automating/testing terminal or TUI apps running inside it (vim, htop, REPLs), reading its screen or scrollback, sending keystrokes, publishing agent todo lists or surfaces, or checking a command's output/exit code — via the infinitty_* MCP tools or the Unix control sockets ($INFINITTY_SOCKET, /tmp/infinitty-*.sock).
 ---
 
 # infinitty Control Socket
 
 infinitty exposes one Unix socket per pane. Any script can read the live screen and type into the terminal — no screen-scraping, no ANSI parsing. Implementation: `Sources/infinitty/ControlServer.swift`.
+
+## Choosing an interface
+
+Same engine, three front doors — use the highest one available:
+
+1. **MCP tools (`infinitty_*`)** — if tools like `infinitty_todos`, `infinitty_run`, `infinitty_screen`, `infinitty_send`, `infinitty_surface`, `infinitty_new_tab` are loaded in the session, prefer them over raw sockets. Structured arguments (no shell quoting or hand-built JSON) and the cleanest transcript for the user. Registered by this repo's `.mcp.json`; the server binary ships at `/Applications/Infinitty.app/Contents/MacOS/infinitty-mcp`.
+2. **App socket** — `/tmp/infinitty-app-<pid>.sock` (newest instance symlinked at `/tmp/infinitty-current.sock`, or `$INFINITTY_APP_SOCKET` when spawned by infinitty). Multi-pane commands take a pane id: `list`, `run <id> <cmd>`, `todos <id> [json]`, `surface <id> <json>`, `new-tab [dir]`, `new-window [dir]`, `split <id>`, `focus <id>`, `subscribe`.
+3. **Pane socket** — `$INFINITTY_SOCKET`, the id-less per-pane protocol below. Always available from inside a pane's shell; the fallback when MCP isn't loaded.
+
+MCP tools map 1:1 onto socket commands (`infinitty_todos` ⇄ `todos`, `infinitty_send` ⇄ `send`/`send-line`, `infinitty_run` ⇄ `run`), so every recipe below works through either door. The wait-for-prompt rule applies to all three.
 
 ## Socket discovery
 
@@ -50,6 +60,7 @@ def infinitty(cmd, path):
 | `exit-code` | its exit code * |
 | `send TEXT` | types TEXT (no return); everything after the first space, verbatim |
 | `send-line TEXT` | types TEXT then return (CR `0x0D`) |
+| `todos [json]` | set (or read, with no argument) the pane's agent todo list shown behind the pane-header checklist icon; array of strings or `{content, status: pending\|in_progress\|completed}` / `{text, done}` objects; `[]` clears |
 | `reload` | re-applies the config file |
 | `ping` | `pong` — liveness check |
 

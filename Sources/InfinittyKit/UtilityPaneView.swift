@@ -29,12 +29,15 @@ enum UtilityPanelKind: String, CaseIterable {
     case files
     case chat
     case browser
+    /// Agent-requested display surface (markdown doc, MCP-UI HTML, or URL).
+    case surface
 
     var title: String {
         switch self {
         case .files: return "Files"
         case .chat: return "Chat"
         case .browser: return "Browser"
+        case .surface: return "Surface"
         }
     }
 
@@ -43,6 +46,7 @@ enum UtilityPanelKind: String, CaseIterable {
         case .files: return "folder"
         case .chat: return "bubble.left.and.bubble.right"
         case .browser: return "globe"
+        case .surface: return "sparkles.rectangle.stack"
         }
     }
 
@@ -56,7 +60,6 @@ final class UtilityPaneView: NSView {
     let contentView: NSView
     let paneHeader = PaneHeaderView()
     private let paneOutline = PaneOutlineView()
-    private let closeButton = NSButton()
     private let newChatButton = NSButton()
     private lazy var focusClickRecognizer: NSClickGestureRecognizer = {
         let recognizer = NSClickGestureRecognizer(target: self, action: #selector(focusedWithinPane))
@@ -72,7 +75,7 @@ final class UtilityPaneView: NSView {
     var onChooseSplitDown: (() -> Void)? {
         didSet { paneHeader.onChooseSplitDown = onChooseSplitDown }
     }
-    var onClose: (() -> Void)?
+    var onClose: (() -> Void)? { didSet { paneHeader.onClose = onClose } }
     var onNewChat: (() -> Void)?
     var onFocus: (() -> Void)?
     var onDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onDragBegan } }
@@ -102,18 +105,6 @@ final class UtilityPaneView: NSView {
         addSubview(paneOutline, positioned: .above, relativeTo: contentView)
         addSubview(paneHeader, positioned: .above, relativeTo: paneOutline)
 
-        closeButton.image = NSImage(
-            systemSymbolName: "xmark", accessibilityDescription: "Close panel")
-        closeButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-        closeButton.imagePosition = .imageOnly
-        closeButton.isBordered = false
-        closeButton.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.62)
-        closeButton.target = self
-        closeButton.action = #selector(closePressed)
-        closeButton.toolTip = "Close \(kind.title) panel"
-        closeButton.frame = NSRect(x: 0, y: 0, width: 30, height: 30)
-        paneHeader.addSubview(closeButton)
-        closeButton.autoresizingMask = [.minXMargin]
         if kind == .chat {
             newChatButton.image = NSImage(
                 systemSymbolName: "plus", accessibilityDescription: "New chat")
@@ -197,12 +188,10 @@ final class UtilityPaneView: NSView {
             x: leading, y: bottom,
             width: max(bounds.width - leading - trailing, 0),
             height: max(headerY - top - bottom, 0))
-        closeButton.frame.origin = NSPoint(x: max(paneHeader.bounds.width - 98, 0), y: 2)
         newChatButton.frame = NSRect(
             x: 70, y: 2, width: 30, height: 30)
     }
 
-    @objc private func closePressed() { onClose?() }
     @objc private func newChatPressed() { onNewChat?() }
     @objc private func focusedWithinPane() { onFocus?() }
 

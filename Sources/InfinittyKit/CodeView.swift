@@ -368,12 +368,13 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             self.pageControl = CodeSegmentedBar(
                 labels: ["CHAT"], icons: ["bubble.left.and.bubble.right"],
                 fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
-        case .browser:
-            // Browser panes use BrowserPaneController directly.  Keep this
-            // fallback exhaustive so a future caller cannot crash while
-            // constructing the shared controller for a browser kind.
+        case .browser, .surface:
+            // Browser and agent-surface panes use their own controllers
+            // directly. Keep this fallback exhaustive so a future caller
+            // cannot crash while constructing the shared controller.
             self.pageControl = CodeSegmentedBar(
-                labels: ["BROWSER"], icons: ["globe"],
+                labels: [panelKind == .surface ? "SURFACE" : "BROWSER"],
+                icons: [panelKind == .surface ? "sparkles.rectangle.stack" : "globe"],
                 fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
         case nil:
             self.pageControl = CodeSegmentedBar(
