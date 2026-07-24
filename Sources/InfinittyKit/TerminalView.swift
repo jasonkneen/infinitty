@@ -11,6 +11,12 @@ final class TerminalView: NSView {
     var onFocus: (() -> Void)?
     /// Click landed on the pet sprite (pet assistant entry point).
     var onPetClick: (() -> Void)?
+    var onPetScaleChange: ((CGFloat) -> Void)?
+    var onPetHideUntilNeeded: (() -> Void)?
+    var onPetKeepVisible: (() -> Void)?
+    var onPaneRename: ((String) -> Void)? {
+        didSet { paneHeader.onRenameCommit = onPaneRename }
+    }
     var onSplitRight: (() -> Void)? { didSet { paneHeader.onSplitRight = onSplitRight } }
     var onSplitDown: (() -> Void)? { didSet { paneHeader.onSplitDown = onSplitDown } }
     var onChooseSplitRight: (() -> Void)? {
@@ -20,6 +26,7 @@ final class TerminalView: NSView {
         didSet { paneHeader.onChooseSplitDown = onChooseSplitDown }
     }
     var onTogglePaneZoom: (() -> Void)? { didSet { paneHeader.onToggleZoom = onTogglePaneZoom } }
+    var onClosePane: (() -> Void)? { didSet { paneHeader.onClose = onClosePane } }
     var onPaneDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onPaneDragBegan } }
     var onPaneDragMoved: ((NSPoint) -> Void)? { didSet { paneHeader.onDragMoved = onPaneDragMoved } }
     var onPaneDragEnded: ((NSPoint, Bool) -> Void)? { didSet { paneHeader.onDragEnded = onPaneDragEnded } }
@@ -66,6 +73,12 @@ final class TerminalView: NSView {
     private var glowTimer: Timer?
     private var focusHighlightView: PaneFocusHighlightView?
     private var paneShortcutHintView: PaneShortcutHintView?
+    private var petSpeechBubble: PixelPetSpeechBubble?
+    private var petSpeechTimer: Timer?
+    private var petSpeechDismissal: (() -> Void)?
+    private var petScale: CGFloat = 0.5
+    private var petIsTemporarilyRevealed = false
+    private var handledPetContextClick = false
 
     /// Pulse the inner border while an agent drives this pane; fades 3 s
     /// after the last socket command.
@@ -131,6 +144,67 @@ final class TerminalView: NSView {
             y: floor((bounds.height - hint.frame.height) / 2))
     }
 
+    func configurePetInteraction(scale: CGFloat, temporarilyRevealed: Bool) {
+        petScale = scale
+        petIsTemporarilyRevealed = temporarilyRevealed
+    }
+
+    func showPetSpeech(
+        _ text: String, timeout: TimeInterval = 8,
+        onClick: (() -> Void)? = nil,
+        onDismiss: (() -> Void)? = nil
+    ) {
+        dismissPetSpeech(notify: false)
+        let bubble = PixelPetSpeechBubble(text: text)
+        // A bubble with its own action (e.g. "click to insert") consumes the
+        // click and dismisses; otherwise clicking opens the assistant.
+        bubble.onClick = { [weak self] in
+            if let onClick {
+                onClick()
+                self?.dismissPetSpeech()
+            } else {
+                self?.onPetClick?()
+            }
+        }
+        bubble.frame.size = PixelPetSpeechBubble.fittingSize(for: text)
+        addSubview(bubble, positioned: .above, relativeTo: nil)
+        petSpeechBubble = bubble
+        petSpeechDismissal = onDismiss
+        positionPetSpeechBubble()
+        if timeout > 0 {
+            petSpeechTimer = Timer.scheduledTimer(
+                withTimeInterval: timeout, repeats: false
+            ) { [weak self] _ in
+                self?.dismissPetSpeech()
+            }
+        }
+    }
+
+    func dismissPetSpeech(notify: Bool = true) {
+        petSpeechTimer?.invalidate()
+        petSpeechTimer = nil
+        petSpeechBubble?.removeFromSuperview()
+        petSpeechBubble = nil
+        let dismissal = petSpeechDismissal
+        petSpeechDismissal = nil
+        if notify { dismissal?() }
+    }
+
+    private func positionPetSpeechBubble() {
+        guard let bubble = petSpeechBubble,
+              let petRect = renderer?.petHitRect(in: self) else { return }
+        let margin: CGFloat = 10
+        var x = min(
+            bounds.maxX - bubble.frame.width - margin,
+            max(bounds.minX + margin, petRect.maxX - bubble.frame.width))
+        var y = petRect.maxY + 7
+        if y + bubble.frame.height > bounds.maxY - renderer.topInsetPoints - margin {
+            x = max(bounds.minX + margin, petRect.minX - bubble.frame.width - 8)
+            y = max(bounds.minY + margin, petRect.midY - bubble.frame.height / 2)
+        }
+        bubble.frame.origin = NSPoint(x: floor(x), y: floor(y))
+    }
+
     override var acceptsFirstResponder: Bool { true }
     override var isOpaque: Bool {
         !(renderer?.usesSharedWindowSurface ?? false)
@@ -150,6 +224,53 @@ final class TerminalView: NSView {
         registerForDraggedTypes([.fileURL, .string])
         addSubview(paneOutline)
         addSubview(paneHeader)
+        paneHeader.onToggleTodos = { [weak self] in self?.toggleTodoPopover() }
+    }
+
+    // MARK: - agent todo list
+
+    private var paneTodos: [PaneTodo] = []
+    private var todoPopover: NSPopover?
+
+    /// Update the header checklist icon; refreshes the popover if it is open.
+    func setTodos(_ todos: [PaneTodo]) {
+        paneTodos = todos
+        paneHeader.setTodoProgress(
+            total: todos.count, done: todos.filter(\.done).count)
+        if let popover = todoPopover, popover.isShown {
+            if todos.isEmpty {
+                popover.close()
+            } else {
+                popover.contentViewController = Self.todoController(for: todos)
+            }
+        }
+    }
+
+    var todosForTesting: [PaneTodo] { paneTodos }
+
+    /// Click the checklist icon to open the list; click it (or anywhere else)
+    /// again to close — the popover is transient.
+    private func toggleTodoPopover() {
+        if let popover = todoPopover, popover.isShown {
+            popover.close()
+            todoPopover = nil
+            return
+        }
+        guard !paneTodos.isEmpty else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = Self.todoController(for: paneTodos)
+        popover.show(
+            relativeTo: paneHeader.todoAnchorView.bounds,
+            of: paneHeader.todoAnchorView, preferredEdge: .maxY)
+        todoPopover = popover
+    }
+
+    private static func todoController(for todos: [PaneTodo]) -> NSViewController {
+        let controller = NSViewController()
+        controller.view = PaneTodoListView(todos: todos)
+        return controller
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -193,6 +314,7 @@ final class TerminalView: NSView {
             width: max(bounds.width - leading - trailing, 0),
             height: min(PaneHeaderView.height, bounds.height))
         positionPaneShortcutHint()
+        positionPetSpeechBubble()
         updateGeometry()
         if inLiveResize {
             // Frame requests hop to the render thread (coalesced) — AppKit
@@ -239,10 +361,12 @@ final class TerminalView: NSView {
         // With a full-size content view, AppKit tells us how much of the top
         // is obscured by the (transparent) titlebar and any tab bar — this
         // tracks tab-bar appearance automatically.
+        // The renderer adds its side inset (15pt+) below this too; pull the
+        // grid up so the first row sits ~7pt under the header hairline.
         if window.styleMask.contains(.fullSizeContentView) {
-            renderer.topInsetPoints = paneTopObstructionPoints() + PaneHeaderView.height + 2
+            renderer.topInsetPoints = paneTopObstructionPoints() + PaneHeaderView.height - 5
         } else {
-            renderer.topInsetPoints = PaneHeaderView.height
+            renderer.topInsetPoints = PaneHeaderView.height - 5
         }
 
         terminal.setCellPixelSize(
@@ -648,6 +772,12 @@ final class TerminalView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let petRect = renderer.petHitRect(in: self), petRect.contains(point) {
+            handledPetContextClick = true
+            NSMenu.popUpContextMenu(petContextMenu(), with: event, for: self)
+            return
+        }
         let (mode, _) = terminal.mouseReporting
         if mode != 0 && !event.modifierFlags.contains(.shift) {
             reportMouse(event, button: 2, pressed: true, motion: false)
@@ -661,6 +791,16 @@ final class TerminalView: NSView {
         menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
+        menu.addItem(
+            withTitle: "New Chat",
+            action: #selector(AppDelegate.newChatPane(_:)), keyEquivalent: "")
+        menu.addItem(
+            withTitle: "Browser",
+            action: #selector(AppDelegate.openBrowserPane(_:)), keyEquivalent: "")
+        menu.addItem(
+            withTitle: "Files",
+            action: #selector(AppDelegate.openFilesPane(_:)), keyEquivalent: "")
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Split Right", action: #selector(AppDelegate.splitRight(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Split Left", action: #selector(AppDelegate.splitLeft(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Split Down", action: #selector(AppDelegate.splitDown(_:)), keyEquivalent: "")
@@ -670,11 +810,76 @@ final class TerminalView: NSView {
             action: #selector(AppDelegate.togglePaneZoom(_:)), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Rename Tab…", action: #selector(AppDelegate.renameTab(_:)), keyEquivalent: "")
+        let renamePanel = menu.addItem(
+            withTitle: "Rename Panel…", action: #selector(renamePanel(_:)),
+            keyEquivalent: "")
+        renamePanel.target = self
         menu.addItem(.separator())
         let reset = menu.addItem(withTitle: "Reset Terminal", action: #selector(resetTerminal(_:)), keyEquivalent: "")
         reset.target = self
         menu.addItem(withTitle: "Close Pane", action: #selector(AppDelegate.closePane(_:)), keyEquivalent: "")
         return menu
+    }
+
+    private func petContextMenu() -> NSMenu {
+        let menu = NSMenu(title: "Pet")
+        let open = menu.addItem(
+            withTitle: "Ask Infinitty…", action: #selector(openPetAssistant(_:)),
+            keyEquivalent: "")
+        open.target = self
+        menu.addItem(.separator())
+
+        let sizeMenu = NSMenu(title: "Pet Size")
+        let selected = PetSizePreset.nearest(to: petScale)
+        for preset in PetSizePreset.allCases {
+            let item = sizeMenu.addItem(
+                withTitle: preset.title, action: #selector(changePetSize(_:)),
+                keyEquivalent: "")
+            item.target = self
+            item.tag = preset.menuTag
+            item.state = preset == selected ? .on : .off
+        }
+        let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
+        sizeItem.submenu = sizeMenu
+        menu.addItem(sizeItem)
+
+        menu.addItem(.separator())
+        if petIsTemporarilyRevealed {
+            let keep = menu.addItem(
+                withTitle: "Keep Pet Visible", action: #selector(keepPetVisible(_:)),
+                keyEquivalent: "")
+            keep.target = self
+        } else {
+            let hide = menu.addItem(
+                withTitle: "Hide Until Needed",
+                action: #selector(hidePetUntilNeeded(_:)), keyEquivalent: "")
+            hide.target = self
+        }
+        return menu
+    }
+
+    var petContextMenuTitlesForTesting: [String] {
+        petContextMenu().items.filter { !$0.isSeparatorItem }.map(\.title)
+    }
+
+    @objc private func openPetAssistant(_ sender: Any?) {
+        onPetClick?()
+    }
+
+    @objc private func changePetSize(_ sender: NSMenuItem) {
+        onPetScaleChange?(CGFloat(sender.tag) / 100)
+    }
+
+    @objc private func hidePetUntilNeeded(_ sender: Any?) {
+        onPetHideUntilNeeded?()
+    }
+
+    @objc private func keepPetVisible(_ sender: Any?) {
+        onPetKeepVisible?()
+    }
+
+    @objc private func renamePanel(_ sender: Any?) {
+        paneHeader.beginRename()
     }
 
     @objc func resetTerminal(_ sender: Any?) {
@@ -683,6 +888,10 @@ final class TerminalView: NSView {
     }
 
     override func rightMouseUp(with event: NSEvent) {
+        if handledPetContextClick {
+            handledPetContextClick = false
+            return
+        }
         reportMouse(event, button: 2, pressed: false, motion: false)
     }
 

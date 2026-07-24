@@ -43,8 +43,8 @@ enum PaneMetrics {
     static let leadingInset: CGFloat = 8
     static let trailingInset: CGFloat = 8
     static let internalHorizontalInset: CGFloat = 2
-    static let topInset: CGFloat = 5
-    static let bottomInset: CGFloat = 10
+    static let topInset: CGFloat = 3
+    static let bottomInset: CGFloat = 8
     static let internalVerticalInset: CGFloat = 2
     static let horizontalCanvasInset: CGFloat = 0
     static let cornerRadius: CGFloat = 10
@@ -466,23 +466,34 @@ private final class PaneSplitButton: NSButton {
 }
 
 final class PaneHeaderView: NSView {
-    static let height: CGFloat = 34
+    static let height: CGFloat = 28
 
     var onSplitRight: (() -> Void)?
     var onSplitDown: (() -> Void)?
     var onChooseSplitRight: (() -> Void)?
     var onChooseSplitDown: (() -> Void)?
+    var onToggleTodos: (() -> Void)?
     var onToggleZoom: (() -> Void)?
     var onFocus: (() -> Void)?
+    var onRenameCommit: ((String) -> Void)?
     var onDragBegan: ((NSPoint) -> Void)?
     var onDragMoved: ((NSPoint) -> Void)?
     var onDragEnded: ((NSPoint, Bool) -> Void)?
+    /// When set, hovering the pane icon turns it into a close button.
+    var onClose: (() -> Void)? {
+        didSet { iconView.toolTip = onClose == nil ? nil : "Close Pane" }
+    }
 
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let splitRightButton = PaneSplitButton()
     private let splitDownButton = PaneSplitButton()
+    private let todoButton = PaneSplitButton()
+    private var todoTotal = 0
     private let bottomHairline = NSView()
+    private var closeHoverActive = false
+    private var iconTrackingArea: NSTrackingArea?
+    private weak var renameEditor: TabRenameTextView?
 
     var iconSymbol: String = "terminal" {
         didSet { updateIcon() }
@@ -507,6 +518,30 @@ final class PaneHeaderView: NSView {
     var titleFrameForTesting: NSRect { titleLabel.frame }
     var splitRightFrameForTesting: NSRect { splitRightButton.frame }
     var splitDownFrameForTesting: NSRect { splitDownButton.frame }
+    var isRenamingForTesting: Bool { renameEditor != nil }
+    var todoButtonIsVisibleForTesting: Bool { !todoButton.isHidden }
+    var todoTooltipForTesting: String { todoButton.toolTip ?? "" }
+
+    /// Anchor for the todo popover.
+    var todoAnchorView: NSView { todoButton }
+
+    /// Show/hide the checklist icon and reflect progress in its tooltip and
+    /// tint (accent while work remains, green when everything is done).
+    func setTodoProgress(total: Int, done: Int) {
+        todoTotal = total
+        todoButton.isHidden = total == 0
+        guard total > 0 else { return }
+        todoButton.toolTip = "Agent todos: \(done)/\(total) done"
+        todoButton.setAccessibilityLabel("Agent todo list, \(done) of \(total) done")
+        todoButton.contentTintColor = done == total
+            ? NSColor.systemGreen.withAlphaComponent(0.8)
+            : NSColor.secondaryLabelColor.withAlphaComponent(0.85)
+        needsLayout = true
+    }
+
+    @objc private func todoPressed(_ sender: Any?) {
+        onToggleTodos?()
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -514,12 +549,12 @@ final class PaneHeaderView: NSView {
         layer?.backgroundColor = NSColor.clear.cgColor
 
         updateIcon()
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
         iconView.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.72)
         iconView.imageScaling = .scaleProportionallyDown
         addSubview(iconView)
 
-        titleLabel.font = .monospacedSystemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .semibold)
         titleLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.92)
         titleLabel.lineBreakMode = .byTruncatingTail
         addSubview(titleLabel)
@@ -532,6 +567,10 @@ final class PaneHeaderView: NSView {
             splitDownButton, symbol: "rectangle.split.1x2",
             label: "Split pane down", action: #selector(splitDownPressed))
         splitDownButton.onRightClick = { [weak self] in self?.onChooseSplitDown?() }
+        configure(
+            todoButton, symbol: "checklist",
+            label: "Agent todo list", action: #selector(todoPressed))
+        todoButton.isHidden = true
 
         bottomHairline.wantsLayer = true
         bottomHairline.layer?.backgroundColor = NSColor.clear.cgColor
@@ -544,13 +583,54 @@ final class PaneHeaderView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func updateIcon() {
+        guard !closeHoverActive else { return }
         iconView.image = NSImage(
             systemSymbolName: iconSymbol, accessibilityDescription: titleLabel.stringValue)
     }
 
+    /// Slightly padded hit region so the close affordance is easy to target.
+    private var iconHoverRect: NSRect { iconView.frame.insetBy(dx: -3, dy: -3) }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let iconTrackingArea { removeTrackingArea(iconTrackingArea) }
+        let area = NSTrackingArea(
+            rect: iconHoverRect,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        iconTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard onClose != nil, !closeHoverActive else { return }
+        closeHoverActive = true
+        iconView.image = NSImage(
+            systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close pane")
+        iconView.contentTintColor = NSColor.systemRed.withAlphaComponent(0.85)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard closeHoverActive else { return }
+        closeHoverActive = false
+        iconView.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.72)
+        updateIcon()
+    }
+
+    var closeHoverActiveForTesting: Bool { closeHoverActive }
+    func simulateIconHoverForTesting(_ inside: Bool) {
+        let event = NSEvent.enterExitEvent(
+            with: inside ? .mouseEntered : .mouseExited,
+            location: NSPoint(x: iconHoverRect.midX, y: iconHoverRect.midY),
+            modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+            eventNumber: 0, trackingNumber: 0, userData: nil)
+        guard let event else { return }
+        inside ? mouseEntered(with: event) : mouseExited(with: event)
+    }
+
     private func configure(_ button: NSButton, symbol: String, label: String, action: Selector) {
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
         button.imagePosition = .imageOnly
         button.isBordered = false
         button.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.62)
@@ -563,24 +643,53 @@ final class PaneHeaderView: NSView {
 
     override func layout() {
         super.layout()
-        let buttonSize: CGFloat = 30
+        let buttonSize: CGFloat = 26
         splitDownButton.frame = NSRect(
-            x: bounds.maxX - buttonSize - 8, y: 2, width: buttonSize, height: buttonSize)
+            x: bounds.maxX - buttonSize - 8, y: 1, width: buttonSize, height: buttonSize)
         splitRightButton.frame = NSRect(
-            x: splitDownButton.frame.minX - buttonSize, y: 2,
+            x: splitDownButton.frame.minX - buttonSize, y: 1,
             width: buttonSize, height: buttonSize)
-        iconView.frame = NSRect(x: 10, y: 8, width: 18, height: 18)
+        todoButton.frame = NSRect(
+            x: splitRightButton.frame.minX - (todoButton.isHidden ? 0 : buttonSize), y: 1,
+            width: buttonSize, height: buttonSize)
+        iconView.frame = NSRect(x: 10, y: 6, width: 16, height: 16)
+        let titleLimit = todoButton.isHidden
+            ? splitRightButton.frame.minX : todoButton.frame.minX
         titleLabel.frame = NSRect(
-            x: 34, y: 5,
-            width: max(splitRightButton.frame.minX - 41, 0), height: 22)
+            x: 32, y: 1,
+            width: max(titleLimit - 39, 0), height: 20)
+        if let renameEditor {
+            renameEditor.frame = renameFrame
+        }
         bottomHairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
+    }
+
+    private var renameFrame: NSRect {
+        let name = renameEditor?.string ?? title
+        let textWidth = ceil(name.size(withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold),
+        ]).width)
+        let width = min(titleLabel.frame.width, max(96, textWidth + 28))
+        return NSRect(
+            x: titleLabel.frame.minX - 4, y: 3,
+            width: width, height: 22)
     }
 
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
+        if closeHoverActive, let onClose,
+           iconHoverRect.contains(convert(event.locationInWindow, from: nil)) {
+            onClose()
+            return
+        }
         onFocus?()
         if event.clickCount >= 2 {
+            let point = convert(event.locationInWindow, from: nil)
+            if titleLabel.frame.insetBy(dx: -5, dy: -4).contains(point) {
+                beginRename()
+                return
+            }
             onToggleZoom?()
             return
         }
@@ -611,6 +720,85 @@ final class PaneHeaderView: NSView {
             }
         }
         if dragging { onDragEnded?(start, true) }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        NSMenu.popUpContextMenu(panelContextMenu(), with: event, for: self)
+    }
+
+    private func panelContextMenu() -> NSMenu {
+        let menu = NSMenu(title: "Panel")
+        let rename = menu.addItem(
+            withTitle: "Rename Panel…", action: #selector(renamePanel(_:)),
+            keyEquivalent: "")
+        rename.target = self
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: "New Chat",
+            action: #selector(AppDelegate.newChatPane(_:)), keyEquivalent: "")
+        menu.addItem(
+            withTitle: "Browser",
+            action: #selector(AppDelegate.openBrowserPane(_:)), keyEquivalent: "")
+        menu.addItem(
+            withTitle: "Files",
+            action: #selector(AppDelegate.openFilesPane(_:)), keyEquivalent: "")
+        return menu
+    }
+
+    var contextMenuTitlesForTesting: [String] {
+        panelContextMenu().items.filter { !$0.isSeparatorItem }.map(\.title)
+    }
+
+    @objc private func renamePanel(_ sender: Any?) {
+        beginRename()
+    }
+
+    func beginRename() {
+        guard renameEditor == nil else { return }
+        onFocus?()
+        layoutSubtreeIfNeeded()
+        let editor = TabRenameTextView(frame: renameFrame)
+        editor.string = title
+        editor.font = .monospacedSystemFont(ofSize: 11.5, weight: .semibold)
+        editor.textColor = .labelColor
+        editor.insertionPointColor = .labelColor
+        editor.drawsBackground = false
+        editor.isRichText = false
+        editor.isVerticallyResizable = false
+        editor.isHorizontallyResizable = false
+        editor.textContainerInset = NSSize(width: 5, height: 4)
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.textContainer?.maximumNumberOfLines = 1
+        editor.textContainer?.lineBreakMode = .byClipping
+        editor.wantsLayer = true
+        editor.layer?.cornerRadius = 4
+        editor.layer?.borderWidth = 1
+        editor.layer?.borderColor = CodePalette.selectionAccent.cgColor
+        editor.layer?.backgroundColor = NSColor.controlBackgroundColor
+            .withAlphaComponent(0.96).cgColor
+        editor.onCommit = { [weak self] in self?.finishRename(committing: true) }
+        editor.onCancel = { [weak self] in self?.finishRename(committing: false) }
+        titleLabel.isHidden = true
+        addSubview(editor, positioned: .above, relativeTo: nil)
+        renameEditor = editor
+        window?.makeFirstResponder(editor)
+        editor.setSelectedRange(
+            NSRange(location: 0, length: (editor.string as NSString).length))
+    }
+
+    private func finishRename(committing: Bool) {
+        guard let editor = renameEditor else { return }
+        let value = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        renameEditor = nil
+        editor.onCommit = nil
+        editor.onCancel = nil
+        editor.removeFromSuperview()
+        titleLabel.isHidden = false
+        if committing, !value.isEmpty {
+            title = value
+            onRenameCommit?(value)
+        }
+        onFocus?()
     }
 
     @objc private func splitRightPressed() {

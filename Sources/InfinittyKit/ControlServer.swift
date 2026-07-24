@@ -22,6 +22,10 @@ final class ControlServer {
     private var listenFD: Int32 = -1
     var reloadHandler: (() -> Void)?
     var activityHandler: (() -> Void)? // agent is driving this pane
+    /// `todos [json]` — set (or read, with no argument) the pane's agent todo
+    /// list. Wired by the session so hooks can publish via $INFINITTY_SOCKET
+    /// without knowing pane ids.
+    var todosHandler: ((String) -> String)?
 
     private static var nextID = 0
     private static let idLock = NSLock()
@@ -193,6 +197,9 @@ final class ControlServer {
                 return "ok"
             }
             return "error: reload not wired"
+        case "todos":
+            if let handler = todosHandler { return handler(arg) }
+            return "error: todos not wired"
         case "ping":
             return "pong"
         default:

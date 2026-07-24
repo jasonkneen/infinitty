@@ -12,6 +12,28 @@ final class TerminalSession: NSObject {
     let control: ControlServer
 
     private(set) var title = "infinitty"
+    var paneTitleOverride: String?
+    /// Live agent-session name ("claude · titerm", later the real session
+    /// title) while a recognized agent CLI runs in this pane. Cleared when the
+    /// pane returns to its shell.
+    var agentSessionName: String?
+    /// Agent-published plan/todo list shown from the pane header's checklist
+    /// icon. Set via the pane socket (`todos <json>`), the app socket
+    /// (`todos <id> <json>`), or the infinitty_todos MCP tool.
+    private(set) var todos: [PaneTodo] = []
+    /// Broadcast hook for todo changes (wired by the app delegate).
+    var onTodosChanged: ((TerminalSession) -> Void)?
+
+    /// Replace the pane's todo list and refresh the header UI (main-safe).
+    func setTodos(_ todos: [PaneTodo]) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.todos = todos
+            self.view.setTodos(todos)
+            self.onTodosChanged?(self)
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
     /// Shell starting directory; set before launch() (folder launches, socket
     /// new-tab/new-window with a path).
     var workingDirectory: String?
@@ -23,6 +45,7 @@ final class TerminalSession: NSObject {
 
     var onExited: ((TerminalSession) -> Void)?
     var onTitleChanged: ((TerminalSession) -> Void)?
+    var onSuggestion: ((String) -> Void)?
 
     init(config: AppConfig, scale: CGFloat) {
         TerminalSession.nextID += 1
@@ -30,6 +53,7 @@ final class TerminalSession: NSObject {
         terminal = Terminal(cols: 120, rows: 32)
         pty = PTY()
         renderer = Renderer(config: config, scale: scale)
+        renderer.debugLabel = "pane-\(id)"
         view = TerminalView(frame: .zero)
         control = ControlServer(terminal: terminal, pty: pty)
         super.init()
@@ -55,6 +79,11 @@ final class TerminalSession: NSObject {
         }
         terminal.onOutput = { [weak pty] bytes in pty?.write(bytes) }
         terminal.onChange = { [weak renderer] in renderer?.poke() }
+        terminal.onHint = { [weak self] suggestion in
+            DispatchQueue.main.async {
+                self?.onSuggestion?(suggestion)
+            }
+        }
         terminal.onTitle = { [weak self] t in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -72,6 +101,21 @@ final class TerminalSession: NSObject {
 
         control.activityHandler = { [weak view] in
             DispatchQueue.main.async { view?.showAgentGlow() }
+        }
+        control.todosHandler = { [weak self] arg in
+            guard let self else { return "error: pane gone" }
+            let trimmed = arg.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                // Socket threads must not read main-mutated state directly.
+                let current = Thread.isMainThread
+                    ? self.todos : DispatchQueue.main.sync { self.todos }
+                return PaneTodoParser.encode(current)
+            }
+            guard let todos = PaneTodoParser.parse(trimmed) else {
+                return "error: todos expects a JSON array"
+            }
+            self.setTodos(todos)
+            return "ok"
         }
         control.start()
         applyMarkdownConfig(config)
@@ -98,7 +142,9 @@ final class TerminalSession: NSObject {
             hints: true, hintCommand: config.hintCommand,
             aiBaseURL: config.aiBaseURL, aiKey: config.aiKey, aiModel: config.aiModel)
         let engine = HintEngine(smart: smart)
-        engine.onAsyncSuggestion = { [weak self] in self?.terminal.touch() }
+        engine.onAsyncSuggestion = { [weak self] _ in
+            self?.terminal.refreshHint()
+        }
         hintEngine = engine
         terminal.setHintProvider { [weak engine] input in engine?.suggest(input) }
     }
