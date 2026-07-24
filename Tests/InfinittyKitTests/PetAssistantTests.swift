@@ -4,6 +4,93 @@ import AppKit
 
 final class PetAssistantTests: XCTestCase {
 
+    func testPetSizePresetsChooseNearestMenuSize() {
+        XCTAssertEqual(PetSizePreset.nearest(to: 0.22), .tiny)
+        XCTAssertEqual(PetSizePreset.nearest(to: 0.34), .small)
+        XCTAssertEqual(PetSizePreset.nearest(to: 0.52), .medium)
+        XCTAssertEqual(PetSizePreset.nearest(to: 0.8), .large)
+        XCTAssertEqual(PetSizePreset.nearest(to: 1.2), .extraLarge)
+        XCTAssertEqual(PetSizePreset.allCases.map(\.menuTag), [23, 35, 50, 75, 100])
+    }
+
+    func testPetSpeechTextUsesACompactPlainFirstLine() {
+        XCTAssertEqual(
+            PetSpeechText.notification(
+                "\n## Build fixed\n\nThere is much more detail after this."),
+            "Done.\nBuild fixed")
+        let long = PetSpeechText.suggestion(String(repeating: "a", count: 180))
+        XCTAssertTrue(long.hasPrefix("Try this:\n"))
+        XCTAssertTrue(long.hasSuffix("…"))
+        XCTAssertLessThan(long.count, 130)
+    }
+
+    func testPixelPetSpeechBubbleStaysCompactAndAccessible() {
+        let text = "Done.\nYour build passed."
+        let bubble = PixelPetSpeechBubble(text: text)
+        bubble.frame.size = PixelPetSpeechBubble.fittingSize(for: text)
+        XCTAssertGreaterThanOrEqual(bubble.frame.width, 164)
+        XCTAssertLessThanOrEqual(bubble.frame.width, 276)
+        XCTAssertGreaterThanOrEqual(bubble.frame.height, 52)
+        XCTAssertEqual(bubble.accessibilityLabel(), text)
+        XCTAssertFalse(
+            bubble.subviews.compactMap { $0 as? NSTextField }.first?
+                .isAccessibilityElement() ?? true)
+    }
+
+    func testPanelAndTerminalContextMenusExposeWorkspaceShortcuts() throws {
+        let renderer = Renderer(config: AppConfig(), scale: 2)
+        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+        terminal.renderer = renderer
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .rightMouseDown, location: NSPoint(x: 100, y: 100),
+            modifierFlags: [], timestamp: 0, windowNumber: 0,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        let terminalTitles = try XCTUnwrap(terminal.menu(for: event))
+            .items.filter { !$0.isSeparatorItem }.map(\.title)
+        XCTAssertTrue(terminalTitles.contains("New Chat"))
+        XCTAssertTrue(terminalTitles.contains("Browser"))
+        XCTAssertTrue(terminalTitles.contains("Files"))
+        XCTAssertTrue(terminalTitles.contains("Rename Panel…"))
+        XCTAssertEqual(
+            terminal.petContextMenuTitlesForTesting,
+            ["Ask Infinitty…", "Size", "Hide Until Needed"])
+
+        let header = PaneHeaderView(frame: NSRect(x: 0, y: 0, width: 420, height: 28))
+        XCTAssertEqual(
+            Array(header.contextMenuTitlesForTesting.prefix(4)),
+            ["Rename Panel…", "New Chat", "Browser", "Files"])
+    }
+
+    func testPanelRenameCommitsInlineAndTabRenameAvoidsSolidBlueFill() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        let header = PaneHeaderView(frame: NSRect(x: 0, y: 0, width: 420, height: 28))
+        header.title = "infinitty"
+        window.contentView = header
+        var committed: String?
+        header.onRenameCommit = { committed = $0 }
+        header.beginRename()
+        let panelEditor = try XCTUnwrap(
+            header.subviews.compactMap { $0 as? TabRenameTextView }.first)
+        XCTAssertLessThanOrEqual(panelEditor.frame.width, 120)
+        panelEditor.string = "Server"
+        panelEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(header.title, "Server")
+        XCTAssertEqual(committed, "Server")
+        XCTAssertFalse(header.isRenamingForTesting)
+
+        let strip = TerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 600, height: TerminalTabStripView.height))
+        window.contentView = strip
+        strip.update(titles: ["infinitty"], selectedIndex: 0)
+        strip.layoutSubtreeIfNeeded()
+        XCTAssertTrue(strip.beginRename(at: 0, currentName: "infinitty"))
+        let frame = try XCTUnwrap(strip.renameEditorFrameForTesting)
+        XCTAssertLessThan(frame.width, 150)
+        XCTAssertFalse(strip.renameEditorUsesSolidAccentFillForTesting)
+    }
+
     func testChatMarkdownRendersStructureInsteadOfRawMarkers() {
         let rendered = MarkdownRender.attributed(
             "## Root\n\n**Directories:**\n- `Sources` — main code",
@@ -172,14 +259,19 @@ final class PetAssistantTests: XCTestCase {
 
         // (b) sidebar chat has no panel background — sits on the black host.
         XCTAssertTrue(panel.surfaceIsClearForTesting)
-        // (d) an effort/thinking control sits beside the model picker.
+        // (d) labeled chips replace the stock popup + brain glyph: the model
+        // chip carries the provider logo + name, the effort chip says what it
+        // is and its current value.
         XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "None", "Low", "Medium", "High"])
         XCTAssertEqual(panel.effortValueForTesting, "Auto")
-        XCTAssertTrue(panel.effortUsesBrainButtonForTesting)
+        XCTAssertTrue(panel.stockModelPopupIsHiddenForTesting)
+        XCTAssertEqual(panel.modelChipTitleForTesting, " Auto ▾ ")
+        XCTAssertTrue(panel.effortChipTitleForTesting.contains("Effort · Auto"))
         XCTAssertTrue(panel.effortUsesPrimaryActionMenuForTesting)
-        XCTAssertEqual(panel.modelPickerHeightForTesting, 26, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(panel.modelChipHeightForTesting, 24)
         XCTAssertTrue(panel.selectEffort(named: "High"))
         XCTAssertEqual(panel.effortValueForTesting, "High")
+        XCTAssertTrue(panel.effortChipTitleForTesting.contains("High"))
 
         // (c) user turns render as bubbles; assistant turns do not.
         panel.setMessages([(role: "You", text: "hi"), (role: "Assistant", text: "hello")])

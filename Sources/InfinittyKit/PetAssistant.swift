@@ -224,50 +224,68 @@ final class PrimaryMenuButton: NSButton {
     }
 }
 
-/// Animated "Thinking" row shown while the assistant generates — three pulsing
-/// dots, matching the Stream AITypingIndicator pattern.
+/// Status row shown while the assistant generates. Says what is actually
+/// happening — which model is thinking and for how long — instead of an
+/// anonymous dot animation.
 final class ChatTypingIndicator: NSView {
-    private let dots = (0..<3).map { _ -> NSView in
-        let dot = NSView()
-        dot.wantsLayer = true
-        dot.layer?.backgroundColor = NSColor(white: 0.6, alpha: 1).cgColor
-        dot.layer?.cornerRadius = 3
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        return dot
-    }
+    private let spinner = NSProgressIndicator()
+    private let label = NSTextField(labelWithString: "")
+    private let baseText: String
+    private var startedAt = Date()
+    private var elapsedTimer: Timer?
 
-    init() {
+    init(label baseText: String = "Thinking") {
+        self.baseText = baseText
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        let row = NSStackView(views: dots)
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.85)
+        label.stringValue = baseText + "…"
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let row = NSStackView(views: [spinner, label])
         row.orientation = .horizontal
-        row.spacing = 5
+        row.alignment = .centerY
+        row.spacing = 6
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
-        ] + dots.flatMap { [
-            $0.widthAnchor.constraint(equalToConstant: 6),
-            $0.heightAnchor.constraint(equalToConstant: 6),
-        ] })
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+            spinner.widthAnchor.constraint(equalToConstant: 14),
+            spinner.heightAnchor.constraint(equalToConstant: 14),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    deinit { elapsedTimer?.invalidate() }
+
     func startAnimating() {
-        for (index, dot) in dots.enumerated() {
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 0.3
-            pulse.toValue = 1.0
-            pulse.duration = 0.6
-            pulse.autoreverses = true
-            pulse.repeatCount = .infinity
-            pulse.beginTime = CACurrentMediaTime() + Double(index) * 0.2
-            dot.layer?.add(pulse, forKey: "pulse")
+        spinner.startAnimation(nil)
+        startedAt = Date()
+        elapsedTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshElapsed()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        elapsedTimer = timer
+        refreshElapsed()
     }
+
+    private func refreshElapsed() {
+        let seconds = Int(Date().timeIntervalSince(startedAt))
+        label.stringValue = seconds < 2
+            ? baseText + "…"
+            : baseText + "… \(seconds)s"
+    }
+
+    var labelTextForTesting: String { label.stringValue }
 }
 
 /// Full-height presentation of the pet assistant for the sidebar CHAT page.
@@ -299,8 +317,11 @@ final class PetAssistantPanelView: NSView {
     private var queueHeightConstraint: NSLayoutConstraint!
     private let emptyStateLabel = NSTextField(
         labelWithString: "Choose an agent, ask a question, and keep chatting here.")
+    // Hidden state stores: the pickers keep selection + agent-control APIs
+    // stable while the visible controls are the quiet chip buttons below.
     private let modelPicker = NSPopUpButton()
     private let effortPicker = NSPopUpButton()
+    private let modelButton = PrimaryMenuButton()
     private let effortButton = PrimaryMenuButton()
     private let inputContainer = NSView()
     private let inputScroll = NSScrollView()
@@ -451,6 +472,7 @@ final class PetAssistantPanelView: NSView {
             item.image = PetAssistantPanelView.providerImage(for: choice)
             modelPicker.menu?.addItem(item)
         }
+        modelPicker.isHidden = true
 
         effortPicker.controlSize = .regular
         effortPicker.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -462,17 +484,14 @@ final class PetAssistantPanelView: NSView {
         effortPicker.selectItem(at: 0)
         effortPicker.isHidden = true
 
-        effortButton.image = NSImage(
-            systemSymbolName: "brain.head.profile", accessibilityDescription: "Thinking effort")
-        effortButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-        effortButton.imagePosition = .imageOnly
-        effortButton.title = "▾"
-        effortButton.imagePosition = .imageLeading
-        effortButton.font = .systemFont(ofSize: 10, weight: .medium)
-        effortButton.isBordered = false
-        effortButton.contentTintColor = .secondaryLabelColor
+        styleChip(modelButton)
+        modelButton.imagePosition = .imageLeading
+        modelButton.menu = makeModelMenu()
+        refreshModelChip()
+
+        styleChip(effortButton)
         effortButton.menu = makeEffortMenu()
-        effortButton.toolTip = "Thinking: Auto"
+        refreshEffortChip()
 
         inputContainer.wantsLayer = true
         inputContainer.layer?.backgroundColor = NSColor(white: 0.055, alpha: 0.72).cgColor
@@ -553,6 +572,7 @@ final class PetAssistantPanelView: NSView {
         if let item = items.first(where: { $0.title.lowercased() == q })
             ?? items.first(where: { $0.title.lowercased().contains(q) }) {
             modelPicker.select(item)
+            refreshModelChip()
             return true
         }
         return false
@@ -564,6 +584,7 @@ final class PetAssistantPanelView: NSView {
             ($0.representedObject as? PetAssistant.AgentChoice)?.kind == kind
         }) else { return false }
         modelPicker.select(item)
+        refreshModelChip()
         return true
     }
 
@@ -574,8 +595,7 @@ final class PetAssistantPanelView: NSView {
         guard !q.isEmpty, let items = effortPicker.menu?.items else { return false }
         if let item = items.first(where: { $0.title.lowercased() == q }) {
             effortPicker.select(item)
-            effortButton.toolTip = "Thinking: \(item.title)"
-            effortButton.menu = makeEffortMenu()
+            refreshEffortChip()
             return true
         }
         return false
@@ -649,14 +669,14 @@ final class PetAssistantPanelView: NSView {
         let views = [
             newChatButton, closeButton,
             separator, transcriptScroll, emptyStateLabel, showFilesButton, queueScroll,
-            modelPicker, effortButton, inputContainer, attachmentButton,
+            modelPicker, modelButton, effortButton, inputContainer, attachmentButton,
             inputScroll, sendButton, sendWrap,
         ]
         for view in views { view.translatesAutoresizingMaskIntoConstraints = false }
         for view in [
             newChatButton, closeButton, separator,
             transcriptScroll, emptyStateLabel, showFilesButton, queueScroll,
-            modelPicker, effortButton, inputContainer,
+            modelButton, effortButton, inputContainer,
         ] { addSubview(view) }
 
         NSLayoutConstraint.activate(headerConstraints() + bodyConstraints() + composerConstraints())
@@ -710,16 +730,13 @@ final class PetAssistantPanelView: NSView {
         [
             inputContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             inputContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            inputContainer.bottomAnchor.constraint(equalTo: modelPicker.topAnchor, constant: -7),
+            inputContainer.bottomAnchor.constraint(equalTo: modelButton.topAnchor, constant: -7),
             inputContainer.heightAnchor.constraint(equalToConstant: 44),
-            modelPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            modelPicker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            modelPicker.heightAnchor.constraint(equalToConstant: 26),
-            modelPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
-            effortButton.leadingAnchor.constraint(equalTo: modelPicker.trailingAnchor, constant: 5),
-            effortButton.centerYAnchor.constraint(equalTo: modelPicker.centerYAnchor),
-            effortButton.widthAnchor.constraint(equalToConstant: 44),
-            effortButton.heightAnchor.constraint(equalToConstant: 26),
+            modelButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            modelButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            modelButton.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+            effortButton.leadingAnchor.constraint(equalTo: modelButton.trailingAnchor, constant: 6),
+            effortButton.centerYAnchor.constraint(equalTo: modelButton.centerYAnchor),
             effortButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             attachmentButton.leadingAnchor.constraint(equalTo: inputContainer.leadingAnchor, constant: 8),
             attachmentButton.centerYAnchor.constraint(equalTo: inputContainer.centerYAnchor),
@@ -798,11 +815,11 @@ final class PetAssistantPanelView: NSView {
         }
     }
 
-    func setThinking(_ thinking: Bool) {
+    func setThinking(_ thinking: Bool, label: String? = nil) {
         input.isEditable = true
         sendWrap.alphaValue = 1
         if thinking, typingIndicator == nil {
-            typingIndicator = ChatTypingIndicator()
+            typingIndicator = ChatTypingIndicator(label: label ?? "Thinking")
             rebuildTranscript()
         } else if !thinking, typingIndicator != nil {
             typingIndicator = nil
@@ -826,8 +843,49 @@ final class PetAssistantPanelView: NSView {
     @objc private func newChatTapped(_ sender: Any?) { onNewChat?() }
     @objc private func closeTapped(_ sender: Any?) { onClose?() }
 
+    /// Shared look for the two quiet composer chips (model + effort): flat,
+    /// small, labeled — no stock popup bezel.
+    private func styleChip(_ button: NSButton) {
+        button.isBordered = false
+        button.font = .systemFont(ofSize: 12, weight: .medium)
+        button.contentTintColor = .secondaryLabelColor
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor(white: 1, alpha: 0.06).cgColor
+        button.layer?.borderColor = NSColor(white: 1, alpha: 0.08).cgColor
+        button.layer?.borderWidth = 1
+        button.layer?.cornerRadius = 7
+    }
+
+    private func makeModelMenu() -> NSMenu {
+        let menu = NSMenu(title: "Model")
+        for pickerItem in modelPicker.menu?.items ?? [] {
+            let item = NSMenuItem(
+                title: pickerItem.title, action: #selector(modelChoiceSelected(_:)),
+                keyEquivalent: "")
+            item.target = self
+            item.representedObject = pickerItem.representedObject
+            item.image = pickerItem.image
+            item.state = pickerItem === modelPicker.selectedItem ? .on : .off
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func modelChoiceSelected(_ sender: NSMenuItem) {
+        modelPicker.selectItem(withTitle: sender.title)
+        refreshModelChip()
+    }
+
+    private func refreshModelChip() {
+        let choice = selectedChoice
+        modelButton.image = PetAssistantPanelView.providerImage(for: choice)
+        modelButton.title = " \(choice.displayName) ▾ "
+        modelButton.toolTip = "Model: \(choice.displayName)"
+        modelButton.menu = makeModelMenu()
+    }
+
     private func makeEffortMenu() -> NSMenu {
-        let menu = NSMenu(title: "Thinking")
+        let menu = NSMenu(title: "Effort")
         for level in effortPicker.itemTitles {
             let item = NSMenuItem(
                 title: level, action: #selector(effortSelected(_:)), keyEquivalent: "")
@@ -840,7 +898,12 @@ final class PetAssistantPanelView: NSView {
 
     @objc private func effortSelected(_ sender: NSMenuItem) {
         effortPicker.selectItem(withTitle: sender.title)
-        effortButton.toolTip = "Thinking: \(sender.title)"
+        refreshEffortChip()
+    }
+
+    private func refreshEffortChip() {
+        effortButton.title = " Effort · \(selectedEffort) ▾ "
+        effortButton.toolTip = "Reasoning effort: \(selectedEffort)"
         effortButton.menu = makeEffortMenu()
     }
 
@@ -861,16 +924,24 @@ final class PetAssistantPanelView: NSView {
     var newChatTitleForTesting: String { newChatButton.title }
     var emptyStateForTesting: String { emptyStateLabel.stringValue }
     var modelValueForTesting: String { modelPicker.titleOfSelectedItem ?? "" }
-    func selectModelForTesting(_ index: Int) { modelPicker.selectItem(at: index) }
+    func selectModelForTesting(_ index: Int) {
+        modelPicker.selectItem(at: index)
+        refreshModelChip()
+    }
     var selectedChoiceForTesting: PetAssistant.AgentChoice { selectedChoice }
     var modelItemTitlesForTesting: [String] { modelPicker.itemTitles }
     var effortTitlesForTesting: [String] { effortPicker.itemTitles }
     var effortValueForTesting: String { effortPicker.titleOfSelectedItem ?? "" }
-    var effortUsesBrainButtonForTesting: Bool { effortButton.image != nil }
+    /// The visible composer controls are the flat labeled chips, not the old
+    /// stock popup + brain glyph.
+    var modelChipTitleForTesting: String { modelButton.title }
+    var modelChipShowsProviderLogoForTesting: Bool { modelButton.image != nil }
+    var effortChipTitleForTesting: String { effortButton.title }
     var effortUsesPrimaryActionMenuForTesting: Bool {
         effortButton.menu?.items.count == 5
     }
-    var modelPickerHeightForTesting: CGFloat { modelPicker.frame.height }
+    var stockModelPopupIsHiddenForTesting: Bool { modelPicker.isHidden }
+    var modelChipHeightForTesting: CGFloat { modelButton.frame.height }
     /// The sidebar chat surface is transparent (sits on the black host); the
     /// popover keeps its glass. nil layer color reads as clear.
     var surfaceIsClearForTesting: Bool {
@@ -905,10 +976,10 @@ final class PetAssistantPanelView: NSView {
     var hasModelLabelForTesting: Bool {
         subviews.contains { ($0 as? NSTextField)?.stringValue == "MODEL" }
     }
-    /// The picker's leading edge, to confirm it moved into the old MODEL slot.
-    var modelPickerLeadingForTesting: CGFloat { modelPicker.frame.minX }
+    /// The chip's leading edge, to confirm it sits in the old MODEL slot.
+    var modelPickerLeadingForTesting: CGFloat { modelButton.frame.minX }
     var composerControlsAreBelowInputForTesting: Bool {
-        modelPicker.frame.maxY <= inputContainer.frame.minY + 0.5
+        modelButton.frame.maxY <= inputContainer.frame.minY + 0.5
             && effortButton.frame.maxY <= inputContainer.frame.minY + 0.5
     }
     var queueIsAboveInputForTesting: Bool {
@@ -981,6 +1052,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     /// Hand-off: file results the user wants to see in the code-view sidebar.
     var onShowInSidePanel: ((_ paths: [String], _ query: String?) -> Void)?
+    /// Compact pet-bubble notification when a background answer is ready.
+    var onPetMessage: ((String) -> Void)?
 
     init(
         config: AppConfig,
@@ -1123,9 +1196,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func setPanelsThinking(_ thinking: Bool) {
+    private func setPanelsThinking(_ thinking: Bool, label: String? = nil) {
         for panel in [sidebarPanel, popoverPanel].compactMap({ $0 }) {
-            panel.setThinking(thinking)
+            panel.setThinking(thinking, label: label)
         }
     }
 
@@ -1165,7 +1238,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         requestInFlight = true
         sidebarMessages.append(AssistantChatMessage(role: "You", text: request.text))
         updatePanels()
-        setPanelsThinking(true)
+        // The status row names the model doing the work; a bare "Thinking"
+        // is only right when routing is automatic.
+        setPanelsThinking(
+            true,
+            label: request.model.hasPrefix("Auto")
+                ? "Thinking" : "\(request.model) · thinking")
 
         let completion: AskCompletion = { [weak self] answer, files, query in
             guard let self else { return }
@@ -1322,7 +1400,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     You have infinitty tools (infinitty_list_panes, infinitty_run, \
     infinitty_send, infinitty_screen, infinitty_history, infinitty_last_output, \
     infinitty_exit_code, infinitty_new_tab, infinitty_split, infinitty_focus, \
-    infinitty_close). When the user asks you to DO something in the terminal — \
+    infinitty_close, infinitty_surface, infinitty_todos). To SHOW the user \
+    something rich — a plan, a doc, a rendered preview, a small UI — use \
+    infinitty_surface (markdown, HTML, or a URL; target=split for a side \
+    panel at a ratio like 0.25, target=window for a standalone doc). For \
+    multi-step work, keep infinitty_todos updated so the pane header shows \
+    your progress. When the user asks you to DO something in the terminal — \
     run a command, type text, open a tab, launch a program — you MUST call the \
     matching tool. Never describe an action as done unless the tool call \
     returned success. Never invent output, exit codes, or state: read them with \
@@ -1635,6 +1718,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         DispatchQueue.main.async {
             self.session?.petAnimator?.stopThinking()
             completion?(answer, files, query)
+            self.onPetMessage?(answer)
         }
     }
 
