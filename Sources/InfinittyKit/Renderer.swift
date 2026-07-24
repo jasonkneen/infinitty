@@ -87,6 +87,26 @@ final class Renderer: NSObject {
 
     private let renderLock = NSLock()
     private var lastGen: UInt64 = 0
+
+    /// Pane label for diagnostic log lines (set by Session).
+    var debugLabel = ""
+    /// Render-thread-only evidence for the blank-pane investigation: which
+    /// drop path starved a pane, and whether it recovered or idled out.
+    private var dropCounts: [String: Int] = [:]
+    private var lastDropLogTime: CFTimeInterval = 0
+
+    private func noteDrop(_ reason: String) {
+        dropCounts[reason, default: 0] += 1
+        let now = CACurrentMediaTime()
+        guard now - lastDropLogTime >= 1 else { return }
+        lastDropLogTime = now
+        PaneLog.log("RENDER drop \(debugLabel) \(dropSummary())")
+    }
+
+    private func dropSummary() -> String {
+        dropCounts.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+    }
     /// Wall-clock idle gate (display-Hz independent). Pause the display link
     /// after this much quiet so idle CPU is truly zero on 30/60/120 Hz panels.
     private var lastActivityTime: CFTimeInterval = 0
@@ -303,6 +323,11 @@ final class Renderer: NSObject {
                 // sleep if nothing changed in the meantime.
                 if terminal.currentGeneration == lastGen {
                     link.isPaused = true
+                    // Smoking gun for a stuck-blank pane: idling out while
+                    // frames since the last successful present were dropped.
+                    if !dropCounts.isEmpty {
+                        PaneLog.log("RENDER pause-after-drop \(debugLabel) \(dropSummary())")
+                    }
                 } else {
                     linkPaused.withLock { $0 = false }
                     lastActivityTime = CACurrentMediaTime()
@@ -364,6 +389,7 @@ final class Renderer: NSObject {
         let drawableSize = layer.drawableSize
         guard drawableSize.width >= 1, drawableSize.height >= 1 else {
             renderLock.unlock()
+            noteDrop("zero-size")
             return
         }
         let atlas = self.atlas
@@ -394,6 +420,7 @@ final class Renderer: NSObject {
                 petDirty = true
                 renderLock.unlock()
             }
+            noteDrop("inflight-timeout")
             return
         }
         guard let drawable = layer.nextDrawable(),
@@ -404,6 +431,7 @@ final class Renderer: NSObject {
                 petDirty = true
                 renderLock.unlock()
             }
+            noteDrop("no-drawable")
             return
         }
 
@@ -432,6 +460,7 @@ final class Renderer: NSObject {
                 petDirty = true
                 renderLock.unlock()
             }
+            noteDrop("no-encoder")
             return
         }
         var viewport = SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
@@ -499,7 +528,12 @@ final class Renderer: NSObject {
         }
         enc.endEncoding()
 
-        cb.addCompletedHandler { [inflight] _ in inflight.signal() }
+        cb.addCompletedHandler { [inflight, debugLabel] buffer in
+            inflight.signal()
+            if let error = buffer.error {
+                PaneLog.log("RENDER cb-error \(debugLabel) \(error.localizedDescription)")
+            }
+        }
         // Present tied to command-buffer completion. Never waitUntilScheduled:
         // an unbounded GPU wait here wedges every later frame.
         cb.present(drawable)
@@ -507,6 +541,10 @@ final class Renderer: NSObject {
         renderLock.lock()
         lastGen = gen
         renderLock.unlock()
+        if !dropCounts.isEmpty {
+            PaneLog.log("RENDER recovered \(debugLabel) after \(dropSummary())")
+            dropCounts.removeAll()
+        }
     }
 
     private func fill<T>(_ buffer: inout MTLBuffer?, with data: [T]) -> MTLBuffer? {
