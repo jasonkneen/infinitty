@@ -123,6 +123,166 @@ enum Pet {
     }
 }
 
+enum PetSizePreset: CaseIterable, Equatable {
+    case tiny
+    case small
+    case medium
+    case large
+    case extraLarge
+
+    var title: String {
+        switch self {
+        case .tiny: return "Tiny"
+        case .small: return "Small"
+        case .medium: return "Medium"
+        case .large: return "Large"
+        case .extraLarge: return "Extra Large"
+        }
+    }
+
+    var scale: CGFloat {
+        switch self {
+        case .tiny: return 0.23 // ~2/3 of Small
+        case .small: return 0.35
+        case .medium: return 0.5
+        case .large: return 0.75
+        case .extraLarge: return 1
+        }
+    }
+
+    var menuTag: Int { Int((scale * 100).rounded()) }
+
+    static func nearest(to scale: CGFloat) -> PetSizePreset {
+        allCases.min { abs($0.scale - scale) < abs($1.scale - scale) } ?? .medium
+    }
+}
+
+enum PetSpeechText {
+    static func suggestion(_ suggestion: String) -> String {
+        "Try this:\n" + preview(suggestion, limit: 112)
+    }
+
+    /// Repo-mined tip: the command up top, provenance + affordance below.
+    static func tip(_ tip: PetTip) -> String {
+        preview(tip.command ?? tip.text, limit: 96)
+            + "\nclick to insert · " + tip.source
+    }
+
+    static func notification(_ message: String) -> String {
+        "Done.\n" + preview(message, limit: 128)
+    }
+
+    static func preview(_ text: String, limit: Int) -> String {
+        let firstMeaningfulLine = text
+            .split(whereSeparator: \.isNewline)
+            .map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(
+                        of: #"^[#>*_`-]+\s*"#, with: "",
+                        options: .regularExpression)
+            }
+            .first(where: { !$0.isEmpty }) ?? "I have an update for you."
+        guard firstMeaningfulLine.count > limit else { return firstMeaningfulLine }
+        let end = firstMeaningfulLine.index(
+            firstMeaningfulLine.startIndex, offsetBy: max(limit - 1, 1))
+        return String(firstMeaningfulLine[..<end])
+            .trimmingCharacters(in: .whitespaces) + "…"
+    }
+}
+
+/// A deliberately code-drawn speech bubble for the Metal-rendered pet.
+/// Rectilinear corners, a two-step tail, nearest-pixel strokes, and a mono
+/// label keep it visually consistent with the sprite.
+final class PixelPetSpeechBubble: NSView {
+    private let label = NSTextField(wrappingLabelWithString: "")
+    var onClick: (() -> Void)?
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    init(text: String) {
+        super.init(frame: .zero)
+        label.stringValue = text
+        label.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        label.textColor = NSColor(white: 0.96, alpha: 1)
+        label.maximumNumberOfLines = 5
+        label.lineBreakMode = .byWordWrapping
+        label.drawsBackground = false
+        label.isEditable = false
+        label.isSelectable = false
+        label.setAccessibilityElement(false)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -13),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(text)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        context.setShouldAntialias(false)
+
+        let pixel = 2 / max(window?.backingScaleFactor ?? 2, 1)
+        let body = CGRect(x: 1, y: 1, width: bounds.width - 2, height: bounds.height - 13)
+        let stepped = NSBezierPath()
+        stepped.move(to: CGPoint(x: body.minX + 6, y: body.minY))
+        stepped.line(to: CGPoint(x: body.maxX - 6, y: body.minY))
+        stepped.line(to: CGPoint(x: body.maxX - 6, y: body.minY + 3))
+        stepped.line(to: CGPoint(x: body.maxX, y: body.minY + 3))
+        stepped.line(to: CGPoint(x: body.maxX, y: body.maxY - 3))
+        stepped.line(to: CGPoint(x: body.maxX - 6, y: body.maxY - 3))
+        stepped.line(to: CGPoint(x: body.maxX - 6, y: body.maxY))
+        stepped.line(to: CGPoint(x: body.minX + 6, y: body.maxY))
+        stepped.line(to: CGPoint(x: body.minX + 6, y: body.maxY - 3))
+        stepped.line(to: CGPoint(x: body.minX, y: body.maxY - 3))
+        stepped.line(to: CGPoint(x: body.minX, y: body.minY + 3))
+        stepped.line(to: CGPoint(x: body.minX + 6, y: body.minY + 3))
+        stepped.close()
+
+        NSColor(calibratedRed: 0.48, green: 0.52, blue: 1, alpha: 1).setFill()
+        stepped.fill()
+
+        let inner = body.insetBy(dx: pixel + 1, dy: pixel + 1)
+        NSColor(calibratedWhite: 0.075, alpha: 0.98).setFill()
+        NSBezierPath(rect: inner).fill()
+
+        // Two square blocks make a pixel tail aimed at the pet below.
+        let tailX = bounds.maxX - 34
+        NSColor(calibratedRed: 0.48, green: 0.52, blue: 1, alpha: 1).setFill()
+        NSBezierPath(rect: CGRect(x: tailX, y: body.maxY, width: 16, height: 7)).fill()
+        NSBezierPath(rect: CGRect(x: tailX + 7, y: body.maxY + 7, width: 9, height: 6)).fill()
+        NSColor(calibratedWhite: 0.075, alpha: 0.98).setFill()
+        NSBezierPath(rect: CGRect(x: tailX + 2, y: body.maxY, width: 11, height: 5)).fill()
+
+        context.restoreGState()
+    }
+
+    static func fittingSize(for text: String, maxWidth: CGFloat = 276) -> NSSize {
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        let width = min(maxWidth, max(164, CGFloat(text.count) * 7.2 + 26))
+        let textRect = (text as NSString).boundingRect(
+            with: NSSize(width: width - 26, height: 180),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font])
+        return NSSize(
+            width: ceil(width),
+            height: min(126, max(52, ceil(textRect.height) + 31)))
+    }
+}
+
 /// Drives the pet on the main thread. The pet RESTS on a static frame most
 /// of the time and animates at things that happen:
 ///   - occasional idle fidget (one cycle every ~10-20 s)

@@ -78,6 +78,7 @@ final class Terminal {
     var onBell: (() -> Void)?
     var onChange: (() -> Void)? // fired after every mutating batch, outside the lock
     var onMarker: ((UInt8, Int) -> Void)? // OSC 133 events: (kind, exitCode)
+    var onHint: ((String) -> Void)? // a new visible completion, outside the lock
 
     private let lock = OSAllocatedUnfairLock()
     private var generation: UInt64 = 1
@@ -140,6 +141,7 @@ final class Terminal {
     private var pendingTitle: String?
     private var pendingBell = false
     private var pendingMarkers: [(UInt8, Int)] = []
+    private var pendingHint: String?
 
     // MARK: semantic command markers (OSC 133, for agents/tooling)
 
@@ -353,6 +355,8 @@ final class Terminal {
         pendingBell = false
         let markerEvents = pendingMarkers
         pendingMarkers.removeAll(keepingCapacity: true)
+        let hint = pendingHint
+        pendingHint = nil
         let imageJobs = pendingImageWork
         pendingImageWork.removeAll(keepingCapacity: true)
         let wantMarkdown = pendingMarkdownRender && !markdownRenderInFlight
@@ -363,6 +367,7 @@ final class Terminal {
         if let t = title { onTitle?(t) }
         if bell { onBell?() }
         for (kind, exit) in markerEvents { onMarker?(kind, exit) }
+        if let hint { onHint?(hint) }
         onChange?()
 
         for job in imageJobs {
@@ -1766,6 +1771,21 @@ final class Terminal {
         hintProvider = provider
     }
 
+    /// Re-evaluate the current input when an asynchronous hint source fills
+    /// its cache. This is also what makes the pet notification use the actual
+    /// still-current completion rather than a stale response for older input.
+    func refreshHint() {
+        lock.lock()
+        lastHintInput = ""
+        updateHint()
+        generation &+= 1
+        let hint = pendingHint
+        pendingHint = nil
+        lock.unlock()
+        if let hint { onHint?(hint) }
+        onChange?()
+    }
+
     /// Image pixels for the renderer's texture cache.
     func imageData(id: UInt64) -> (width: Int, height: Int, rgba: [UInt8])? {
         lock.lock()
@@ -2006,7 +2026,11 @@ final class Terminal {
             return
         }
         if let full = hintProvider?(input), full.hasPrefix(input), full.count > input.count {
-            ghostText = String(full.dropFirst(input.count))
+            let remainder = String(full.dropFirst(input.count))
+            if ghostText != remainder {
+                ghostText = remainder
+                pendingHint = full
+            }
         } else {
             ghostText = ""
         }
