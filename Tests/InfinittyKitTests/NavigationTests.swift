@@ -371,7 +371,7 @@ final class NavigationTests: XCTestCase {
         XCTAssertLessThan(strip.searchButtonFrameForTesting.maxX, frames[0].minX)
         XCTAssertGreaterThanOrEqual(strip.searchButtonFrameForTesting.minX, 86)
         XCTAssertEqual(
-            strip.tabButtonCornerRadiiForTesting[1], 10,
+            strip.tabButtonCornerRadiiForTesting[1], 8,
             accuracy: 0.5)
         XCTAssertEqual(strip.selectionPillFrameForTesting, frames[1])
         XCTAssertGreaterThanOrEqual(strip.selectionPillAlphaForTesting, 0.16)
@@ -459,15 +459,15 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(tint.alphaComponent, 0.24, accuracy: 0.01)
     }
 
-    func testExpandedTabSelectionDefaultsToPaneBlue() throws {
+    func testExpandedTabSelectionDefaultsToNeutralPill() throws {
         let strip = TerminalTabStripView(
             frame: NSRect(x: 0, y: 0, width: 600, height: 34))
         strip.update(titles: ["infinitty"], selectedIndex: 0)
 
         let tint = try XCTUnwrap(
             strip.selectionPillColorForTesting?.usingColorSpace(.sRGB))
-        XCTAssertGreaterThan(tint.blueComponent, tint.redComponent)
-        XCTAssertEqual(tint.alphaComponent, 0.24, accuracy: 0.01)
+        XCTAssertEqual(tint.blueComponent, tint.redComponent, accuracy: 0.001)
+        XCTAssertEqual(tint.alphaComponent, 0.18, accuracy: 0.01)
     }
 
     func testMainTabContextMenuOffersPinAndTintColorsTogether() {
@@ -540,16 +540,17 @@ final class NavigationTests: XCTestCase {
     }
 
     func testMainTabUsesWiderShorterRoundedRectWhenSpaceAllows() throws {
-        let strip = TerminalTabStripView(frame: NSRect(x: 0, y: 0, width: 900, height: 48))
+        let strip = TerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 900, height: TerminalTabStripView.height))
         strip.update(titles: ["infinitty"], selectedIndex: 0)
         strip.layoutSubtreeIfNeeded()
 
         let frame = try XCTUnwrap(strip.tabButtonFramesForTesting.first)
-        XCTAssertEqual(frame.height, 30, accuracy: 0.5)
-        XCTAssertEqual(frame.minY, 7, accuracy: 0.5)
-        XCTAssertGreaterThanOrEqual(frame.width, 190)
-        XCTAssertLessThanOrEqual(frame.width, 260)
-        XCTAssertEqual(strip.tabButtonCornerRadiiForTesting.first, 10)
+        XCTAssertEqual(frame.height, 26, accuracy: 0.5)
+        XCTAssertEqual(frame.minY, 5, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(frame.width, 160)
+        XCTAssertLessThanOrEqual(frame.width, 230)
+        XCTAssertEqual(strip.tabButtonCornerRadiiForTesting.first, 8)
     }
 
     /// Side-tabs mode lays the strip out as a left column and the body fills
@@ -591,8 +592,8 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(PaneMetrics.leadingInset, 8)
         XCTAssertEqual(PaneMetrics.trailingInset, 8)
         XCTAssertEqual(PaneMetrics.internalHorizontalInset, 2)
-        XCTAssertEqual(PaneMetrics.topInset, 5)
-        XCTAssertEqual(PaneMetrics.bottomInset, 10)
+        XCTAssertEqual(PaneMetrics.topInset, 3)
+        XCTAssertEqual(PaneMetrics.bottomInset, 8)
         XCTAssertEqual(PaneMetrics.internalVerticalInset, 2)
         XCTAssertEqual(PaneMetrics.horizontalCanvasInset, 0)
         XCTAssertEqual(PaneMetrics.cornerRadius, 10)
@@ -707,8 +708,8 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(header.accessibilityLabel(), "Terminal pane: fish")
         XCTAssertEqual(header.splitRightAccessibilityLabelForTesting, "Split pane right")
         XCTAssertEqual(header.splitDownAccessibilityLabelForTesting, "Split pane down")
-        XCTAssertEqual(header.iconFrameForTesting.minY, 8, accuracy: 0.5)
-        XCTAssertEqual(header.titleFrameForTesting.minY, 5, accuracy: 0.5)
+        XCTAssertEqual(header.iconFrameForTesting.minY, 6, accuracy: 0.5)
+        XCTAssertEqual(header.titleFrameForTesting.minY, 1, accuracy: 0.5)
         XCTAssertEqual(
             header.splitRightFrameForTesting.midY,
             header.splitDownFrameForTesting.midY,
@@ -717,10 +718,30 @@ final class NavigationTests: XCTestCase {
             header.iconFrameForTesting.midY,
             header.splitRightFrameForTesting.midY,
             accuracy: 0.5)
+        // The title text sits 3pt below the buttons' center: the label field
+        // renders its text high, so the offset optically centers it.
         XCTAssertEqual(
             header.titleFrameForTesting.midY,
-            header.splitRightFrameForTesting.midY,
+            header.splitRightFrameForTesting.midY - 3,
             accuracy: 1)
+    }
+
+    func testPaneHeaderIconBecomesCloseButtonOnHoverWhenClosable() {
+        let header = PaneHeaderView(frame: NSRect(x: 0, y: 0, width: 500, height: PaneHeaderView.height))
+        header.iconSymbol = "terminal"
+        header.layoutSubtreeIfNeeded()
+
+        // Without a close handler the icon never changes.
+        header.simulateIconHoverForTesting(true)
+        XCTAssertFalse(header.closeHoverActiveForTesting)
+
+        var closed = 0
+        header.onClose = { closed += 1 }
+        header.simulateIconHoverForTesting(true)
+        XCTAssertTrue(header.closeHoverActiveForTesting)
+        header.simulateIconHoverForTesting(false)
+        XCTAssertFalse(header.closeHoverActiveForTesting)
+        XCTAssertEqual(closed, 0)
     }
 
     func testSplitChooserOffersTerminalFilesChatAndBrowser() {

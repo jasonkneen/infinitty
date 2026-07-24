@@ -17,11 +17,11 @@ The focused comparison places the 12:37 implementation on the left and reference
 
 ## Findings
 
-- [P1] Latest visual state has not been captured.
-  - Location: complete window after the outline, single-surface, tab-capsule, and command-palette pass.
-  - Evidence: the available 12:51 Files/Chat crops show the pre-fix border and background problems; no screenshot exists after the latest code changes.
-  - Impact: code/build evidence cannot prove the final pixel-level match.
-  - Fix: relaunch the newest debug or release binary and capture one terminal-only window plus one mixed Terminal/Files/Chat layout.
+- [P1] Latest visual state has not been captured. — RESOLVED 2026-07-24.
+  - Evidence: debug build captured live via a second app instance; terminal-only at `/tmp/infinitty-design-qa/fix-terminal.png`, mixed Terminal/Files/Chat at `/tmp/infinitty-design-qa/fix-mixed.png`.
+- [P2] Active tab capsule defaulted to the pane-focus blue tint/outline for plain tabs (regression from the agent-tint round; the reference capsule is a lighter neutral grey). — RESOLVED 2026-07-24.
+  - Decision: Jason chose "neutral (match reference)"; agent-tinted tabs keep their per-tab color.
+  - Fix: `TerminalTabStrip.swift` selection pill uses white 0.18 fill / 0.16 border when the tab has no tint; `testExpandedTabSelectionDefaultsToPaneBlue` replaced by `testExpandedTabSelectionDefaultsToNeutralPill`. Before/after crop: `/tmp/infinitty-design-qa/tab-compare.png`.
 
 ## Required fidelity surfaces
 
@@ -41,6 +41,7 @@ The focused comparison places the 12:37 implementation on the left and reference
 5. The active tab is now a lighter, fully rounded sliding capsule and the search icon opens a filterable command palette with tab switching and New Tab.
 6. Subsequent matched crops required a larger search icon, lower traffic lights, dimmer/aligned pane controls, a stable terminal fallback icon, and one uninterrupted edge-to-edge backing. Each is implemented in the latest code.
 7. The isolated debug build and twelve focused behavior tests pass; a new external screenshot is required for post-fix visual evidence.
+8. 2026-07-24: captured the current debug build (terminal-only + mixed Terminal/Files/Chat) via a background second instance. Chrome matches the reference: header offset/scale, neutral idle borders with focus-only blue, six-point gutters, single blur+tint surface, search affordance, plus-only trailing chrome, composer chip insets. One regression found and fixed: the active-tab capsule had picked up a blue default from the agent-tint round; it is neutral again per Jason's decision, with tinted capsules reserved for agent tabs. Agent-round additions visible and correct: pane-header checklist icon with published todos, chat composer model/effort chips.
 
 ## Implementation checklist
 
@@ -48,4 +49,4 @@ The focused comparison places the 12:37 implementation on the left and reference
 - Compare the complete mixed layout and a focused pane-header crop against the source.
 - Resolve any remaining P1/P2 differences before changing the result to passed.
 
-final result: blocked
+final result: passed (2026-07-24 capture; evidence in /tmp/infinitty-design-qa/)

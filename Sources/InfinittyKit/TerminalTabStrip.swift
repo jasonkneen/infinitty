@@ -239,7 +239,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
     /// Tear the tab at `index` out into its own new window (drag out).
     var onTearOut: ((Int) -> Void)?
 
-    static let height: CGFloat = 48
+    static let height: CGFloat = 40
     /// Vertical column layout (side tabs) instead of a horizontal row.
     var vertical = false { didSet { needsLayout = true } }
     private static var accent: NSColor { CodePalette.selectionAccent }
@@ -267,6 +267,10 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
     private var dragMoved = false
 
     var isRenaming: Bool { renameEditor != nil }
+    var renameEditorFrameForTesting: NSRect? { renameEditor?.frame }
+    var renameEditorUsesSolidAccentFillForTesting: Bool {
+        renameEditor?.layer?.backgroundColor == Self.accent.cgColor
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -284,7 +288,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
 
         searchButton.image = NSImage(
             systemSymbolName: "magnifyingglass", accessibilityDescription: "Search Tabs")
-        searchButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        searchButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
         searchButton.imagePosition = .imageOnly
         searchButton.isBordered = false
         searchButton.contentTintColor = .secondaryLabelColor
@@ -373,9 +377,14 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         self.selectedIndex = selectedIndex
         self.pins = pins
         self.tints = tints
-        let selectedTint = tints[selectedIndex] ?? CodePalette.paneFocusAccent
-        selectionPill.layer?.backgroundColor = selectedTint.withAlphaComponent(0.24).cgColor
-        selectionPill.layer?.borderColor = selectedTint.withAlphaComponent(0.48).cgColor
+        // Plain tabs keep the neutral reference capsule; only an agent tint colors it.
+        if let selectedTint = tints[selectedIndex] {
+            selectionPill.layer?.backgroundColor = selectedTint.withAlphaComponent(0.24).cgColor
+            selectionPill.layer?.borderColor = selectedTint.withAlphaComponent(0.48).cgColor
+        } else {
+            selectionPill.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
+            selectionPill.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        }
         if titles.count != self.titles.count {
             // Structure changed mid-rename: positional target is now ambiguous.
             if renameEditor != nil { finishRename(committing: false) }
@@ -407,7 +416,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
                 tabTitleLabels[index].isHidden = false
                 tabTitleLabels[index].stringValue = title
                 tabTitleLabels[index].font = .systemFont(
-                    ofSize: 15, weight: active ? .semibold : .regular)
+                    ofSize: 13, weight: active ? .semibold : .regular)
                 tabTitleLabels[index].textColor = active ? .labelColor : .secondaryLabelColor
                 button.contentTintColor = active ? .labelColor : .secondaryLabelColor
                 button.layer?.backgroundColor = NSColor.clear.cgColor
@@ -464,7 +473,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
             close.image = NSImage(
                 systemSymbolName: "xmark", accessibilityDescription: "Close Tab")
             close.imagePosition = .imageOnly
-            close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
             close.isBordered = false
             close.contentTintColor = .secondaryLabelColor
             (close.cell as? NSButtonCell)?.imageScaling = .scaleProportionallyDown
@@ -482,7 +491,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         // 134 points keeps the search affordance clear of both native circles
         // and the widest custom traffic-light treatment at narrow widths.
         let leadingInset = min(CGFloat(165), max(CGFloat(134), bounds.width * 0.13))
-        let addSize: CGFloat = 28
+        let addSize: CGFloat = 26
         if vertical {
             searchButton.isHidden = false
             hairline.frame = NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height)
@@ -515,42 +524,42 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
                     width: 20, height: 20)
             }
             if let renamingIndex, tabButtons.indices.contains(renamingIndex), let renameEditor {
-                renameEditor.frame = tabButtons[renamingIndex].frame.insetBy(dx: 8, dy: 5)
+                renameEditor.frame = renameEditorFrame(at: renamingIndex)
             }
             positionSelectionPill()
             return
         }
         searchButton.isHidden = false
         searchButton.frame = NSRect(
-            x: max(leadingInset - 48, 4), y: (bounds.height - 28) / 2,
-            width: 28, height: 28)
+            x: max(leadingInset - 44, 4), y: (bounds.height - 26) / 2,
+            width: 26, height: 26)
         hairline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
         addButton.frame = NSRect(
             x: bounds.maxX - addSize - pad, y: (bounds.height - addSize) / 2,
             width: addSize, height: addSize)
         guard !tabButtons.isEmpty else { return }
         let available = max(addButton.frame.minX - pad - leadingInset, 1)
-        let pinWidth: CGFloat = 34
+        let pinWidth: CGFloat = 30
         let pinnedCount = pins.count
         let unpinnedCount = max(tabButtons.count - pinnedCount, 0)
         let spacingTotal = pad * CGFloat(max(tabButtons.count - 1, 0))
         let remaining = max(
             available - CGFloat(pinnedCount) * pinWidth - spacingTotal, 1)
-        // Roomy tabs use this wider 190...260pt range. Multiple tabs may
-        // compress proportionally below it so they never overlap the + button.
+        // Roomy tabs use this 160...230pt range. Multiple tabs may compress
+        // proportionally below it so they never overlap the + button.
         let preferredWidths: [CGFloat] = titles.enumerated().map { index, title in
             guard pins[index] == nil else { return pinWidth }
             let textWidth = ceil(title.size(withAttributes: [
-                .font: NSFont.systemFont(ofSize: 15, weight: .regular),
+                .font: NSFont.systemFont(ofSize: 13, weight: .regular),
             ]).width)
-            return min(260, max(190, textWidth + 112))
+            return min(230, max(160, textWidth + 92))
         }
         let preferredUnpinnedTotal = preferredWidths.enumerated().reduce(CGFloat(0)) {
             $0 + (pins[$1.offset] == nil ? $1.element : 0)
         }
         let unpinnedScale = unpinnedCount > 0 && preferredUnpinnedTotal > remaining
             ? remaining / preferredUnpinnedTotal : 1
-        let tabHeight = min(30, max(bounds.height - 8, 1))
+        let tabHeight = min(26, max(bounds.height - 8, 1))
         let tabY = max((bounds.height - tabHeight) / 2 - 2, 0)
         var xPos = leadingInset
         for (index, button) in tabButtons.enumerated() {
@@ -559,24 +568,24 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
             button.alignment = isPinned ? .center : .center
             let frame = NSRect(x: xPos, y: tabY, width: width, height: tabHeight)
             button.frame = frame
-            button.layer?.cornerRadius = min(10, tabHeight / 2)
+            button.layer?.cornerRadius = min(8, tabHeight / 2)
             if isPinned {
                 tabIconViews[index].frame = NSRect(
-                    x: frame.midX - 9, y: frame.midY - 9, width: 18, height: 18)
+                    x: frame.midX - 8, y: frame.midY - 8, width: 16, height: 16)
             } else {
                 tabIconViews[index].frame = NSRect(
-                    x: frame.minX + 8, y: frame.midY - 12, width: 34, height: 24)
+                    x: frame.minX + 8, y: frame.midY - 8, width: 24, height: 16)
             }
             tabTitleLabels[index].alignment = .center
             tabTitleLabels[index].frame = NSRect(
-                x: frame.minX + 52, y: frame.midY - 11,
-                width: max(frame.width - 104, 0), height: 22)
+                x: frame.minX + 44, y: frame.midY - 12,
+                width: max(frame.width - 88, 0), height: 20)
             closeButtons[index].frame = NSRect(
-                x: frame.maxX - 30, y: frame.minY, width: 20, height: frame.height)
+                x: frame.maxX - 26, y: frame.minY, width: 18, height: frame.height)
             xPos += width + pad
         }
         if let renamingIndex, tabButtons.indices.contains(renamingIndex), let renameEditor {
-            renameEditor.frame = tabButtons[renamingIndex].frame.insetBy(dx: 8, dy: 5)
+            renameEditor.frame = renameEditorFrame(at: renamingIndex)
         }
         positionSelectionPill()
     }
@@ -592,7 +601,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
            tabButtons.indices.contains(origin), origin != selectedIndex {
             selectionPill.frame = tabButtons[origin].frame
             selectionPill.isHidden = false
-            selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(10, target.height / 2)
+            selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(8, target.height / 2)
             selectionAnimationOrigin = nil
             animateSelectionOnNextLayout = false
             guard window != nil else {
@@ -619,7 +628,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         }
         selectionAnimationOrigin = nil
         if pendingSelectionAnimationTarget != nil { return }
-        selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(10, target.height / 2)
+        selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(8, target.height / 2)
         let shouldAnimate = animateSelectionOnNextLayout
             && !selectionPill.isHidden && window != nil
         selectionPill.isHidden = false
@@ -682,32 +691,43 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
 
     // MARK: - rename
 
+    private func renameEditorFrame(at index: Int) -> NSRect {
+        guard tabTitleLabels.indices.contains(index) else { return .zero }
+        let titleFrame = tabTitleLabels[index].frame
+        return NSRect(
+            x: titleFrame.minX - 4,
+            y: titleFrame.midY - 11,
+            width: max(titleFrame.width + 8, 72),
+            height: 22)
+    }
+
     @discardableResult
     func beginRename(at index: Int, currentName: String) -> Bool {
         guard renameEditor == nil, tabButtons.indices.contains(index) else { return false }
         layoutSubtreeIfNeeded()
         renamingIndex = index
-        tabButtons[index].isHidden = true
-        tabIconViews[index].isHidden = true
         tabTitleLabels[index].isHidden = true
         closeButtons[index].isHidden = true
 
-        let editor = TabRenameTextView(frame: tabButtons[index].frame.insetBy(dx: 8, dy: 5))
+        let editor = TabRenameTextView(frame: renameEditorFrame(at: index))
         editor.string = currentName
         editor.alignment = .center
         editor.font = .systemFont(ofSize: 12, weight: .semibold)
-        editor.textColor = .white
-        editor.insertionPointColor = .white
+        editor.textColor = .labelColor
+        editor.insertionPointColor = .labelColor
         editor.drawsBackground = false
         editor.isRichText = false
         editor.isVerticallyResizable = false
         editor.isHorizontallyResizable = false
-        editor.textContainerInset = NSSize(width: 4, height: 3)
+        editor.textContainerInset = NSSize(width: 4, height: 4)
         editor.textContainer?.lineFragmentPadding = 0
         editor.wantsLayer = true
-        editor.layer?.cornerRadius = 7
+        editor.layer?.cornerRadius = 4
         editor.layer?.zPosition = 10
-        editor.layer?.backgroundColor = Self.accent.cgColor
+        editor.layer?.borderWidth = 1
+        editor.layer?.borderColor = Self.accent.cgColor
+        editor.layer?.backgroundColor = NSColor.controlBackgroundColor
+            .withAlphaComponent(0.96).cgColor
         editor.onCommit = { [weak self] in self?.finishRename(committing: true) }
         editor.onCancel = { [weak self] in self?.finishRename(committing: false) }
         addSubview(editor, positioned: .above, relativeTo: nil)
@@ -742,9 +762,8 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         editor.onCancel = nil
         editor.removeFromSuperview()
         if let index, tabButtons.indices.contains(index) {
-            tabButtons[index].isHidden = false
-            tabIconViews[index].isHidden = false
             tabTitleLabels[index].isHidden = pins[index] != nil
+            closeButtons[index].isHidden = pins[index] != nil
         }
         endingRename = false
         if committing { onRenameCommit?(value) } else { onRenameCancel?() }
