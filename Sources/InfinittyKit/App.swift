@@ -4111,6 +4111,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             action: #selector(AppDelegate.openSettings(_:)),
             keyEquivalent: ","
         )
+        appMenu.addItem(
+            withTitle: "Screen Recording Permission…",
+            action: #selector(AppDelegate.showScreenRecordingPermission(_:)),
+            keyEquivalent: ""
+        )
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Quit infinitty",
