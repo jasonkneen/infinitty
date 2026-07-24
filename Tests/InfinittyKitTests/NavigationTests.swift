@@ -145,12 +145,17 @@ final class NavigationTests: XCTestCase {
             styleMask: [.titled],
             backing: .buffered,
             defer: false)
+        // Programmatic titled windows default to releasedWhenClosed; close()
+        // in the defer below would over-release them under ARC and crash the
+        // autorelease-pool drain at test teardown.
+        window.isReleasedWhenClosed = false
         let rename = TabRenameField(hostWindow: window, currentName: "Terminal")
         let otherWindow = NSWindow(
             contentRect: NSRect(x: 40, y: 40, width: 300, height: 200),
             styleMask: [.titled],
             backing: .buffered,
             defer: false)
+        otherWindow.isReleasedWhenClosed = false
         var cancelled = false
         rename.onCancel = { cancelled = true }
         defer {
@@ -190,6 +195,7 @@ final class NavigationTests: XCTestCase {
             styleMask: [.titled],
             backing: .buffered,
             defer: false)
+        window.isReleasedWhenClosed = false
         let rename = TabRenameField(hostWindow: window, currentName: "Terminal")
         var committedNames: [String] = []
         var cancelCount = 0
@@ -317,6 +323,7 @@ final class NavigationTests: XCTestCase {
             defer: false)
         window.tabbingIdentifier = "infinitty"
         window.contentView = originalContent
+        window.isReleasedWhenClosed = false
         defer {
             delegate.windowWillClose(Notification(
                 name: NSWindow.willCloseNotification,
