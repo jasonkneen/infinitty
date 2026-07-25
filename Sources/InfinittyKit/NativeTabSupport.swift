@@ -53,6 +53,11 @@ extension NSWindow {
     /// own TerminalTabStripView inside the content instead. Safe no-op if the
     /// private view layout changes in a future macOS.
     func hideNativeTabBar() {
+        // Borderless windows (the quick terminal panel) have no titlebar, and
+        // AppKit throws NSInternalInconsistencyException — "titlebarAccessory
+        // ViewControllers not supported for this window style" — on the mere
+        // getter. They never carry a native tab bar, so skipping is correct.
+        guard styleMask.contains(.titled) else { return }
         for accessory in titlebarAccessoryViewControllers where !accessory.isHidden {
             if accessory.view.nativeTabDescendants(withClassName: "NSTabBar").isEmpty,
                String(describing: type(of: accessory.view)) != "NSTabBar" {

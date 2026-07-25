@@ -370,4 +370,45 @@ final class QuickTerminalTests: XCTestCase {
             .filter { $0.title != "+" && $0.title != "×" }
         XCTAssertTrue(tabButtons.allSatisfy { !$0.isHidden })
     }
+
+    /// Regression: `hideNativeTabBar()` read `titlebarAccessoryViewControllers`
+    /// unconditionally, but AppKit refuses that getter on a window with no
+    /// titlebar — NSInternalInconsistencyException, "titlebarAccessoryView
+    /// Controllers not supported for this window style" (NSWindow.m:4052).
+    /// The quick terminal is `.borderless`, and `refreshTabStrips(in:)` calls
+    /// this for every window in the tab group, so simply opening the quick
+    /// terminal aborted the app. Without the guard this test fails with that
+    /// exception; in the app itself, nothing catches it and the process aborts.
+    func testHideNativeTabBarIsSafeOnBorderlessQuickTerminalWindow() {
+        let panel = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+            styleMask: [.borderless, .resizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        defer { panel.close() }
+
+        XCTAssertFalse(panel.styleMask.contains(.titled))
+        panel.hideNativeTabBar()
+    }
+
+    /// The guard must not stop ordinary titled windows from being inspected:
+    /// accessories that are not the native tab bar stay visible, which means
+    /// the loop still ran.
+    func testHideNativeTabBarLeavesNonTabBarAccessoriesOnTitledWindows() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        accessory.layoutAttribute = .top
+        window.addTitlebarAccessoryViewController(accessory)
+
+        window.hideNativeTabBar()
+        XCTAssertFalse(accessory.isHidden)
+        XCTAssertTrue(window.titlebarAccessoryViewControllers.contains { $0 === accessory })
+    }
 }
