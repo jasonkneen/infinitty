@@ -83,7 +83,7 @@ An agent driving a shell can therefore: run a command, wait, read precisely
 its output and exit code, and never parse ANSI soup. That's the interface a
 model wants.
 
-#### Pane identity in the environment
+### Pane identity in the environment
 
 Every pane exports who it is, so a child process can address the pane it is
 running in without guessing:
