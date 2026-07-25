@@ -83,6 +83,27 @@ An agent driving a shell can therefore: run a command, wait, read precisely
 its output and exit code, and never parse ANSI soup. That's the interface a
 model wants.
 
+#### Pane identity in the environment
+
+Every pane exports who it is, so a child process can address the pane it is
+running in without guessing:
+
+| Variable | Value |
+| --- | --- |
+| `INFINITTY_SOCKET` | this pane's control socket (`TITERM_SOCKET` is the legacy alias) |
+| `INFINITTY_PANE_ID` | this pane's id, as taken by the app-level API below |
+| `INFINITTY_APP_SOCKET` | the app-level socket for this infinitty process |
+
+That matters one hop away. `$INFINITTY_SOCKET` is an `AF_UNIX` path on this
+machine, so an agent running over SSH cannot reach it — but forward either
+socket and the pane id travels as a plain string, and the remote process can
+address this exact pane:
+
+```sh
+ssh -R /tmp/infinitty.sock:"$INFINITTY_APP_SOCKET" \
+    -o SendEnv=INFINITTY_PANE_ID you@remote      # AcceptEnv on the far side
+```
+
 ### App-level API (control infinitty from other apps)
 
 One socket per infinitty process, discoverable at `/tmp/infinitty-current.sock`:

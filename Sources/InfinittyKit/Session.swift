@@ -151,7 +151,8 @@ final class TerminalSession: NSObject {
         view.window?.layoutIfNeeded()
         let ok = pty.spawn(
             cols: terminal.cols, rows: terminal.rows,
-            socketPath: control.path, cwd: workingDirectory)
+            socketPath: control.path, paneID: id,
+            appSocketPath: AppControlServer.ownSocketPath, cwd: workingDirectory)
         guard ok else {
             // Don't crash the whole app on process-table exhaustion; surface
             // a modal and tear the pane down cleanly.

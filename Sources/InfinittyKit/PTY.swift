@@ -2,6 +2,15 @@ import CPty
 import Darwin
 import Foundation
 
+/// `String.withCString` that also accepts nil, so an absent value becomes a
+/// NULL `const char *` instead of an empty string.
+private func withCStringOrNull<R>(
+    _ value: String?, _ body: (UnsafePointer<CChar>?) -> R
+) -> R {
+    guard let value else { return body(nil) }
+    return value.withCString(body)
+}
+
 /// Pseudo-terminal plumbing. Reads happen on a dedicated high-QoS thread in
 /// 256 KB batches (one wakeup per kernel buffer, not per byte); writes go
 /// through a serial queue so a slow child can never block the UI.
@@ -25,13 +34,29 @@ final class PTY {
     /// Spawn the login shell. Returns false on forkpty failure (process limit,
     /// etc.) instead of crashing the whole app.
     @discardableResult
-    func spawn(cols: Int, rows: Int, socketPath: String? = nil, cwd: String? = nil) -> Bool {
+    func spawn(
+        cols: Int, rows: Int, socketPath: String? = nil, paneID: Int? = nil,
+        appSocketPath: String? = nil, cwd: String? = nil
+    ) -> Bool {
         var ws = winsize(
             ws_row: UInt16(rows), ws_col: UInt16(cols),
             ws_xpixel: 0, ws_ypixel: 0
         )
         var master: Int32 = -1
-        let child = cpty_spawn_shell(&master, &ws, socketPath, cwd)
+        // The C struct borrows these pointers, so each string must outlive the
+        // call — hence nested withCString rather than Swift's automatic
+        // String? -> const char * bridging, which only covers direct arguments.
+        let child = withCStringOrNull(socketPath) { paneSocket in
+            withCStringOrNull(paneID.map(String.init)) { paneIdentifier in
+                withCStringOrNull(appSocketPath) { appSocket in
+                    var identity = cpty_identity(
+                        pane_socket: paneSocket,
+                        pane_id: paneIdentifier,
+                        app_socket: appSocket)
+                    return cpty_spawn_shell(&master, &ws, &identity, cwd)
+                }
+            }
+        }
         guard child > 0, master >= 0 else {
             FileHandle.standardError.write(
                 Data("infinitty: failed to spawn shell (forkpty)\n".utf8))
