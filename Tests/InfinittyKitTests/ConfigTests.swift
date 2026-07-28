@@ -37,6 +37,17 @@ final class ConfigTests: XCTestCase {
         }
     }
 
+    func testOptionAsAltIgnoresUnrecognizedValues() {
+        var config = AppConfig()
+        config.apply(fileContents: "macos-option-as-alt = left")
+        config.apply(fileContents: "macos-option-as-alt = lefft")
+        XCTAssertEqual(config.optionAsAlt, "left", "a typo must not silently drop Meta")
+
+        var fresh = AppConfig()
+        fresh.apply(fileContents: "macos-option-as-alt = maybe")
+        XCTAssertEqual(fresh.optionAsAlt, "true")
+    }
+
     func testParsePaletteEntry() {
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.index, 4)
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.color, 0x61AFEF)

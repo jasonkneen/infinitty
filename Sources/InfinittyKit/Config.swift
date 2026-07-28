@@ -282,7 +282,12 @@ struct AppConfig {
             case "macos-option-as-alt", "option-as-alt", "option-as-meta":
                 switch value.lowercased() {
                 case "left", "right": optionAsAlt = value.lowercased()
-                default: optionAsAlt = AppConfig.parseBool(value) ? "true" : "false"
+                case "true", "yes", "on", "1": optionAsAlt = "true"
+                case "false", "no", "off", "0": optionAsAlt = "false"
+                // A typo keeps the current value: routing it through parseBool
+                // would land on "false" and silently drop Meta, which is not
+                // the default and not what the line was trying to say.
+                default: break
                 }
             default:
                 break // unknown keys (themes, cursor styles, ...) ignored
