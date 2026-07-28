@@ -424,6 +424,18 @@ final class TerminalView: NSView {
         pty.write(bytes)
     }
 
+    /// Whether the Option key(s) held in `flags` should act as Alt/Meta rather
+    /// than composing a character. Left/right are told apart via the
+    /// device-dependent modifier bits AppKit keeps in `rawValue`.
+    private func optionIsAlt(_ flags: NSEvent.ModifierFlags) -> Bool {
+        switch renderer?.config.optionAsAlt ?? "true" {
+        case "false": return false
+        case "left": return flags.rawValue & 0x0000_0020 != 0 // NX_DEVICELALTKEYMASK
+        case "right": return flags.rawValue & 0x0000_0040 != 0 // NX_DEVICERALTKEYMASK
+        default: return true
+        }
+    }
+
     private func encodeKey(_ event: NSEvent) -> [UInt8]? {
         let flags = event.modifierFlags
         if flags.contains(.command) { return nil }
@@ -480,8 +492,10 @@ final class TerminalView: NSView {
         default: break
         }
 
-        // Option-as-meta: ESC prefix + the unmodified character.
-        if flags.contains(.option), !flags.contains(.control),
+        // Option-as-meta: ESC prefix + the unmodified character. Disabled per
+        // macos-option-as-alt so layouts that need Option for common characters
+        // (Finnish Option+2 = @) fall through to the composed `event.characters`.
+        if flags.contains(.option), !flags.contains(.control), optionIsAlt(flags),
            let chars = event.charactersIgnoringModifiers, !chars.isEmpty {
             return [0x1B] + Array(chars.utf8)
         }

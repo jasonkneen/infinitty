@@ -17,6 +17,26 @@ final class ConfigTests: XCTestCase {
         XCTAssertNil(reparsed.pet)
     }
 
+    func testOptionAsAltDefaultsToMetaAndRoundTrips() {
+        XCTAssertEqual(AppConfig().optionAsAlt, "true")
+
+        for (input, expected) in [
+            ("macos-option-as-alt = false", "false"),
+            ("macos-option-as-alt = off", "false"),
+            ("option-as-alt = left", "left"),
+            ("option-as-meta = RIGHT", "right"),
+            ("macos-option-as-alt = true", "true"),
+        ] {
+            var config = AppConfig()
+            config.apply(fileContents: input)
+            XCTAssertEqual(config.optionAsAlt, expected, input)
+
+            var reparsed = AppConfig()
+            reparsed.apply(fileContents: config.serializeApp())
+            XCTAssertEqual(reparsed.optionAsAlt, expected, "round trip: \(input)")
+        }
+    }
+
     func testParsePaletteEntry() {
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.index, 4)
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.color, 0x61AFEF)
