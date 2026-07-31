@@ -43,6 +43,9 @@ import Foundation
 ///                               than constructing this framing by hand)
 ///   channel <base64url-json> -> versioned Channel snapshot or typed mutation
 ///                               (use the infinitty_channel MCP tools)
+///   channel-panel <base64url-json> -> list/open/focus/close/snapshot/select
+///                               a first-class Channel pane, or post a room/
+///                               delegation-thread message
 ///   subscribe                -> connection stays open; JSON events stream in:
 ///                               pane-opened, pane-closed, title, marker,
 ///                               process (foreground process changed)

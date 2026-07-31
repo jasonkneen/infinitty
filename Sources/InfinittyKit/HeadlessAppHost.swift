@@ -24,6 +24,10 @@ public enum HeadlessAppHostError: LocalizedError {
     }
 }
 
+private struct HeadlessChannelPanelState {
+    var selectedThreadID: String?
+}
+
 /// Renderer-free Infinitty runtime.
 ///
 /// This host deliberately owns only terminal engines, PTYs, control sockets,
@@ -41,8 +45,10 @@ public final class HeadlessAppHost: @unchecked Sendable {
     private let stateLock = NSLock()
 
     private var sessions: [Int: HeadlessTerminalSession] = [:]
+    private var channelPanels: [String: HeadlessChannelPanelState] = [:]
     private var nextSessionID = 1
     private var focusedSessionID: Int?
+    private var focusedChannelID: String?
     private var started = false
 
     public init(
@@ -163,7 +169,9 @@ public final class HeadlessAppHost: @unchecked Sendable {
         started = false
         let liveSessions = Array(sessions.values)
         sessions.removeAll()
+        channelPanels.removeAll()
         focusedSessionID = nil
+        focusedChannelID = nil
         stateLock.unlock()
 
         appControl.handler = nil
@@ -305,6 +313,15 @@ public final class HeadlessAppHost: @unchecked Sendable {
             focusedSessionID)
     }
 
+    private func allChannelPanels() -> (
+        panels: [String: HeadlessChannelPanelState],
+        focusedID: String?
+    ) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return (channelPanels, focusedChannelID)
+    }
+
     private func paneAndText(
         _ argument: String
     ) -> (HeadlessTerminalSession, String)? {
@@ -358,12 +375,14 @@ public final class HeadlessAppHost: @unchecked Sendable {
                     "terminal",
                     "terminal.run",
                     "channel",
+                    "channel.panel",
                     "events",
                 ],
             ])
         case "list":
             let values = allSessions()
-            let panes: [[String: Any]] = values.sessions.map { session in
+            let panelValues = allChannelPanels()
+            let terminalPanes: [[String: Any]] = values.sessions.map { session in
                 let endpoint = channelEndpoint(for: session)
                 return [
                     "id": session.id,
@@ -382,9 +401,32 @@ public final class HeadlessAppHost: @unchecked Sendable {
                     ],
                 ]
             }
-            return jsonString(panes)
+            let channelPanes: [[String: Any]]
+            if panelValues.panels.isEmpty {
+                channelPanes = []
+            } else {
+                let snapshot = collaborationCoordinator.snapshot()
+                channelPanes =
+                    panelValues.panels.keys.sorted().compactMap { channelID in
+                        guard let channel = snapshot?.channels.first(where: {
+                            $0.id == channelID
+                        }) else { return nil }
+                        return [
+                            "id": "channel-panel-\(channelID)",
+                            "title": channel.name,
+                            "windowTitle": "",
+                            "focused": panelValues.focusedID == channelID,
+                            "kind": "channel",
+                            "channelId": channelID,
+                            "headless": true,
+                        ]
+                    }
+            }
+            return jsonString(terminalPanes + channelPanes)
         case "channel":
             return collaborationCoordinator.execute(argument).response
+        case "channel-panel":
+            return handleChannelPanel(argument)
         case "channel-project":
             // Headless panes have no AppKit projection; accepting the
             // coordinator notification confirms this live instance is aware
@@ -415,6 +457,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
             }
             stateLock.lock()
             focusedSessionID = target.id
+            focusedChannelID = nil
             stateLock.unlock()
             appControl.broadcast([
                 "event": "focus",
@@ -504,8 +547,246 @@ public final class HeadlessAppHost: @unchecked Sendable {
             return "error: unknown command '\(command)' (ping | version | instance | "
                 + "list | new-window | new-tab | split | focus | close | send | "
                 + "send-line | screen | history | last-output | last-command | "
-                + "exit-code | run | todos | channel | subscribe)"
+                + "exit-code | run | todos | channel | channel-panel | subscribe)"
         }
+    }
+
+    private func handleChannelPanel(_ encoded: String) -> String {
+        let request: [String: Any]
+        switch BrowserControlCodec.decode(encoded) {
+        case let .success(value):
+            request = value
+        case let .failure(error):
+            return BrowserControlCodec.response(
+                error: "invalid_request",
+                message: error.localizedDescription)
+        }
+        guard request["v"] as? Int == 1 else {
+            return BrowserControlCodec.response(
+                error: "unsupported_version",
+                message: "Channel panel requests require version 1.")
+        }
+        let operation = request["op"] as? String ?? ""
+        guard let snapshot = collaborationCoordinator.snapshot() else {
+            return BrowserControlCodec.response(
+                error: "coordinator_unavailable",
+                message: "The shared Channel coordinator is unavailable.")
+        }
+        let panelValues = allChannelPanels()
+        if operation == "list" {
+            let values = snapshot.channels.map { channel in
+                ChannelPanelProjection(
+                    channel: channel,
+                    selectedThreadID:
+                        panelValues.panels[channel.id]?.selectedThreadID)
+                    .controlState(
+                        isOpen: panelValues.panels[channel.id] != nil)
+            }
+            return BrowserControlCodec.response(result: ["channels": values])
+        }
+        guard let channelID = request["channelId"] as? String,
+              let channel = snapshot.channels.first(where: {
+                  $0.id == channelID
+              })
+        else {
+            return BrowserControlCodec.response(
+                error: "unknown_channel",
+                message: "channelId must identify an existing Channel.")
+        }
+
+        if operation == "post_message" {
+            guard let rawText = request["text"] as? String else {
+                return BrowserControlCodec.response(
+                    error: "missing_text",
+                    message: "text is required.")
+            }
+            let text = rawText.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                return BrowserControlCodec.response(
+                    error: "missing_text",
+                    message: "text must not be empty.")
+            }
+            let threadID = request["threadId"] as? String
+            if let threadID,
+               !channel.messages.contains(where: {
+                   $0.threadID == threadID
+               })
+            {
+                return BrowserControlCodec.response(
+                    error: "unknown_thread",
+                    message: "No Channel thread has id \(threadID).")
+            }
+            let messageID = UUID().uuidString.lowercased()
+            let actor = CollaborationActor(
+                id: "human:headless-control",
+                kind: .human,
+                displayName: "Headless control")
+            let mutation = CollaborationControlRequest(
+                op: .postMessage,
+                actor: actor,
+                idempotencyKey: "headless-channel-panel:\(messageID)",
+                channelID: channelID,
+                message: CollaborationMessage(
+                    id: messageID,
+                    threadID: threadID,
+                    authorID: actor.id,
+                    text: CollaborationMessage.boundedChannelText(text)))
+            return executeChannelPanelMutation(
+                mutation,
+                channelID: channelID,
+                selectedThreadID: threadID)
+        }
+
+        if operation == "assign_role" {
+            guard let participantID = request["participantId"] as? String,
+                  let rawRole = request["role"] as? String,
+                  let participant = channel.participants.first(where: {
+                      $0.id == participantID
+                  }),
+                  let endpoint = channel.endpoints.first(where: {
+                      $0.participantID == participantID
+                  })
+            else {
+                return BrowserControlCodec.response(
+                    error: "unknown_participant",
+                    message:
+                        "participantId and role must identify a connected participant.")
+            }
+            let role = rawRole.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            guard !role.isEmpty else {
+                return BrowserControlCodec.response(
+                    error: "missing_role",
+                    message: "role must not be empty.")
+            }
+            let mutation = CollaborationControlRequest(
+                op: .updateMembership,
+                actor: CollaborationActor(
+                    id: "human:headless-control",
+                    kind: .human,
+                    displayName: "Headless control"),
+                idempotencyKey:
+                    "headless-channel-role:\(participantID):\(UUID().uuidString)",
+                channelID: channelID,
+                endpoint: endpoint,
+                participant: CollaborationParticipant(
+                    id: participant.id,
+                    displayName: participant.displayName,
+                    role: role,
+                    provider: participant.provider,
+                    modelID: participant.modelID,
+                    capabilities: participant.capabilities))
+            return executeChannelPanelMutation(
+                mutation,
+                channelID: channelID,
+                selectedThreadID:
+                    panelValues.panels[channelID]?.selectedThreadID)
+        }
+
+        stateLock.lock()
+        let result: String
+        switch operation {
+        case "snapshot":
+            result = BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: channel,
+                    selectedThreadID:
+                        channelPanels[channelID]?.selectedThreadID)
+                    .controlState(
+                        isOpen: channelPanels[channelID] != nil))
+        case "open":
+            if channelPanels[channelID] == nil {
+                channelPanels[channelID] = HeadlessChannelPanelState()
+            }
+            focusedChannelID = channelID
+            focusedSessionID = nil
+            result = BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: channel,
+                    selectedThreadID:
+                        channelPanels[channelID]?.selectedThreadID)
+                    .controlState(isOpen: true))
+        case "focus":
+            guard channelPanels[channelID] != nil else {
+                stateLock.unlock()
+                return BrowserControlCodec.response(
+                    error: "panel_closed",
+                    message: "Open the Channel panel before focusing it.")
+            }
+            focusedChannelID = channelID
+            focusedSessionID = nil
+            result = BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: channel,
+                    selectedThreadID:
+                        channelPanels[channelID]?.selectedThreadID)
+                    .controlState(isOpen: true))
+        case "close":
+            channelPanels[channelID] = nil
+            if focusedChannelID == channelID { focusedChannelID = nil }
+            result = BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: channel,
+                    selectedThreadID: nil)
+                    .controlState(isOpen: false))
+        case "select_thread":
+            guard var panel = channelPanels[channelID] else {
+                stateLock.unlock()
+                return BrowserControlCodec.response(
+                    error: "panel_closed",
+                    message:
+                        "Open the Channel panel before selecting a thread.")
+            }
+            let threadID = request["threadId"] as? String
+            if let threadID,
+               !channel.messages.contains(where: {
+                   $0.threadID == threadID
+               })
+            {
+                stateLock.unlock()
+                return BrowserControlCodec.response(
+                    error: "unknown_thread",
+                    message: "No Channel thread has id \(threadID).")
+            }
+            panel.selectedThreadID = threadID
+            channelPanels[channelID] = panel
+            result = BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: channel,
+                    selectedThreadID: threadID)
+                    .controlState(isOpen: true))
+        default:
+            stateLock.unlock()
+            return BrowserControlCodec.response(
+                error: "unknown_operation",
+                message: "Unknown Channel panel operation '\(operation)'.")
+        }
+        stateLock.unlock()
+        return result
+    }
+
+    private func executeChannelPanelMutation(
+        _ mutation: CollaborationControlRequest,
+        channelID: String,
+        selectedThreadID: String?
+    ) -> String {
+        guard let encoded = CollaborationControlCodec.encode(mutation) else {
+            return BrowserControlCodec.response(
+                error: "encode_failed",
+                message: "Could not encode the Channel panel mutation.")
+        }
+        let executed = collaborationCoordinator.execute(encoded)
+        guard let updated = executed.snapshot?.channels.first(where: {
+            $0.id == channelID
+        }) else { return executed.response }
+        return BrowserControlCodec.response(result:
+            ChannelPanelProjection(
+                channel: updated,
+                selectedThreadID: selectedThreadID)
+                .controlState(
+                    isOpen:
+                        allChannelPanels().panels[channelID] != nil))
     }
 
     private func channelEndpoint(

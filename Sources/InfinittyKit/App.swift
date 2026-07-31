@@ -104,6 +104,8 @@ private final class UtilityPanelRecord {
     let controller: CodeViewController?
     let browser: BrowserPaneController?
     let surface: SurfacePaneController?
+    let channelController: ChannelPanelController?
+    let channelID: String?
     let pane: UtilityPaneView
     /// Stable pane-ledger identity. Files stays a per-window singleton
     /// (`files`); each Chat and Browser instance gets a unique
@@ -119,6 +121,8 @@ private final class UtilityPanelRecord {
         self.controller = controller
         self.browser = nil
         self.surface = nil
+        self.channelController = nil
+        self.channelID = nil
         self.pane = pane
         self.ledgerID = ledgerID
     }
@@ -127,6 +131,8 @@ private final class UtilityPanelRecord {
         self.controller = nil
         self.browser = browser
         self.surface = nil
+        self.channelController = nil
+        self.channelID = nil
         self.pane = pane
         self.ledgerID = ledgerID
     }
@@ -135,6 +141,23 @@ private final class UtilityPanelRecord {
         self.controller = nil
         self.browser = nil
         self.surface = surface
+        self.channelController = nil
+        self.channelID = nil
+        self.pane = pane
+        self.ledgerID = ledgerID
+    }
+
+    init(
+        channel: ChannelPanelController,
+        channelID: String,
+        pane: UtilityPaneView,
+        ledgerID: String
+    ) {
+        self.controller = nil
+        self.browser = nil
+        self.surface = nil
+        self.channelController = channel
+        self.channelID = channelID
         self.pane = pane
         self.ledgerID = ledgerID
     }
@@ -674,7 +697,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         s.view.onChannelActivate = { [weak self, weak s] in
             guard let self, let s else { return }
-            self.presentChannelSummary(for: s.view)
+            self.activateChannel(for: s.view)
         }
         s.view.onChannelDragBegan = { [weak self, weak s] point in
             guard let self, let s else { return }
@@ -2115,6 +2138,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             _ = openUtilityPanel(
                 .chat, in: win, relativeTo: context.sourceView, vertical: context.vertical,
                 forceNewInstance: true)
+        case .channel:
+            guard let channelID = channelID(for: context.sourceView) else {
+                presentChannelSummary(
+                    for: context.sourceView,
+                    errorMessage: "Link this pane to a Channel first.")
+                return
+            }
+            _ = openChannelPanel(
+                channelID: channelID,
+                in: win,
+                relativeTo: context.sourceView,
+                vertical: context.vertical)
         case .browser:
             // The split chooser places a pane at a chosen spot, so it always
             // creates a fresh Browser instance instead of refocusing one.
@@ -2566,6 +2601,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else if let utility = view as? UtilityPaneView {
             switch utility.kind {
             case .chat: kind = .chat
+            case .channel: kind = .channel
             case .browser: kind = .browser
             case .surface: kind = .surface
             case .files: kind = CollaborationEndpoint.Kind(rawValue: "files")
@@ -2615,6 +2651,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         collaborationProjection.channels.first {
             $0.endpoints.contains(where: { $0.id == endpointID })
         }
+    }
+
+    private func channelID(for pane: NSView) -> String? {
+        if let record = utilityRecord(forPane: pane),
+           let channelID = record.channelID
+        {
+            return channelID
+        }
+        return channel(for: collaborationEndpoint(for: pane).id)?.id
+    }
+
+    private func activateChannel(for pane: NSView) {
+        guard let channelID = channelID(for: pane),
+              let window = pane.window
+        else {
+            presentChannelSummary(for: pane)
+            return
+        }
+        _ = openChannelPanel(
+            channelID: channelID,
+            in: window,
+            relativeTo: pane,
+            vertical: true)
     }
 
     private func beginChannelConnectorDrag(sourceView: NSView, at point: NSPoint) {
@@ -2734,6 +2793,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         dispatchPrecondition(condition: .onQueue(.main))
         collaborationProjection = snapshot
         for pane in liveCollaborationPanes() {
+            if let utility = pane as? UtilityPaneView,
+               utility.kind == .channel,
+               let record = utilityRecord(forPane: utility),
+               let channelID = record.channelID,
+               let state = snapshot.channels.first(where: {
+                   $0.id == channelID
+               })
+            {
+                let color = collaborationColor(hex: state.colorHex)
+                utility.paneHeader.title = state.name
+                utility.setChannel(
+                    name: state.name,
+                    color: color,
+                    memberCount: state.endpoints.count)
+                utility.setPaneAccent(color)
+                record.channelController?.update(channel: state)
+                continue
+            }
             let endpointID = collaborationEndpoint(for: pane).id
             let state = channel(for: endpointID)
             let color = state.map { collaborationColor(hex: $0.colorHex) }
@@ -2978,6 +3055,126 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     "messageId": messageID,
                     "message": "Could not encode Channel message.",
                 ])
+            }
+        }
+    }
+
+    private func postChannelPanelMessage(
+        _ text: String,
+        threadID: String?,
+        channelID: String
+    ) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let actorID = "human:\(NSUserName())"
+        let actor = CollaborationActor(
+            id: actorID,
+            kind: .human,
+            displayName: NSFullUserName().isEmpty
+                ? NSUserName()
+                : NSFullUserName())
+        let message = CollaborationMessage(
+            id: UUID().uuidString.lowercased(),
+            threadID: threadID,
+            authorID: actorID,
+            text: CollaborationMessage.boundedChannelText(trimmed))
+        collaborationQueue.async { [weak self] in
+            guard let self else { return }
+            let request = CollaborationControlRequest(
+                op: .postMessage,
+                actor: actor,
+                idempotencyKey: "channel-panel-message:\(message.id)",
+                channelID: channelID,
+                message: message)
+            guard let encoded = CollaborationControlCodec.encode(request) else {
+                self.appControl.broadcast([
+                    "event": "channel-error",
+                    "channelId": channelID,
+                    "message": "Could not encode Channel panel message.",
+                ])
+                return
+            }
+            let result = self.collaborationCoordinator.execute(encoded)
+            guard let snapshot = result.snapshot else {
+                self.appControl.broadcast([
+                    "event": "channel-error",
+                    "channelId": channelID,
+                    "message": result.response,
+                ])
+                return
+            }
+            self.appControl.broadcast([
+                "event": "channel-message",
+                "channelId": channelID,
+                "messageId": message.id,
+                "threadId": threadID ?? "",
+            ])
+            DispatchQueue.main.async { [weak self] in
+                self?.applyCollaborationProjection(snapshot)
+            }
+        }
+    }
+
+    private func updateChannelParticipantRole(
+        participantID: String,
+        role: String,
+        channelID: String
+    ) {
+        let role = role.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !role.isEmpty,
+              let channel = authoritativeCollaborationSnapshot()
+                .channels.first(where: { $0.id == channelID }),
+              let participant = channel.participants.first(where: {
+                  $0.id == participantID
+              }),
+              participant.role != role,
+              let endpoint = channel.endpoints.first(where: {
+                  $0.participantID == participantID
+              })
+        else { return }
+        let updated = CollaborationParticipant(
+            id: participant.id,
+            displayName: participant.displayName,
+            role: role,
+            provider: participant.provider,
+            modelID: participant.modelID,
+            capabilities: participant.capabilities)
+        let actor = CollaborationActor(
+            id: "local-user:\(NSUserName())",
+            kind: .human,
+            displayName: NSFullUserName().isEmpty
+                ? NSUserName()
+                : NSFullUserName())
+        collaborationQueue.async { [weak self] in
+            guard let self else { return }
+            let request = CollaborationControlRequest(
+                op: .updateMembership,
+                actor: actor,
+                idempotencyKey:
+                    "channel-role:\(participantID):\(UUID().uuidString)",
+                channelID: channelID,
+                endpoint: endpoint,
+                participant: updated)
+            guard let encoded = CollaborationControlCodec.encode(request) else {
+                return
+            }
+            let result = self.collaborationCoordinator.execute(encoded)
+            guard let snapshot = result.snapshot else {
+                self.appControl.broadcast([
+                    "event": "channel-error",
+                    "channelId": channelID,
+                    "message": result.response,
+                ])
+                return
+            }
+            self.appControl.broadcast([
+                "event": "channel-role-updated",
+                "channelId": channelID,
+                "participantId": participantID,
+                "role": role,
+            ])
+            DispatchQueue.main.async { [weak self] in
+                self?.applyCollaborationProjection(snapshot)
             }
         }
     }
@@ -3328,9 +3525,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     // MARK: - code view
 
     /// Independent utility leaves mixed into each tab's pane tree, in
-    /// creation order. Files stays one-per-window; Chat and Browser may have
-    /// any number of instances, so records are a list rather than keyed by
-    /// kind.
+    /// creation order. Files stays one-per-window; Chat, Channel, and Browser
+    /// may have multiple instances, so records are a list rather than keyed
+    /// by kind.
     private var utilityPanels: [ObjectIdentifier: [UtilityPanelRecord]] = [:]
     /// Monotonic counters behind per-instance "browser-N" / "chat-N" ledger IDs.
     private var nextBrowserLedgerID = 1
@@ -3385,6 +3582,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return nil
     }
 
+    private func channelRecord(
+        withID channelID: String,
+        in window: NSWindow? = nil
+    ) -> UtilityPanelRecord? {
+        let records: [UtilityPanelRecord]
+        if let window {
+            records = utilityRecords(in: window)
+        } else {
+            records = utilityPanels.values.flatMap { $0 }
+        }
+        return records.first {
+            $0.kind == .channel && $0.channelID == channelID
+        }
+    }
+
     private func removeUtilityRecord(_ record: UtilityPanelRecord, windowKey id: ObjectIdentifier) {
         utilityPanels[id]?.removeAll { $0 === record }
         if utilityPanels[id]?.isEmpty == true { utilityPanels.removeValue(forKey: id) }
@@ -3430,6 +3642,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let win = standardKeyWindow(),
               let record = openUtilityPanel(.chat, in: win) else { return }
         record.controller?.focusChatInput()
+    }
+
+    @discardableResult
+    private func openChannelPanel(
+        channelID: String,
+        in window: NSWindow,
+        relativeTo source: NSView? = nil,
+        vertical: Bool = true
+    ) -> UtilityPanelRecord? {
+        if let existing = channelRecord(withID: channelID, in: window) {
+            restorePaneZoom(revealing: existing.pane)
+            window.makeFirstResponder(existing.pane)
+            return existing
+        }
+        return openUtilityPanel(
+            .channel,
+            in: window,
+            relativeTo: source,
+            vertical: vertical,
+            forceNewInstance: true,
+            channelID: channelID)
     }
 
     /// Open (or focus the most recent) Browser pane in the key window.
@@ -3757,6 +3990,31 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             endpointID: endpointID)
     }
 
+    func openChannelPanelForTesting(
+        channelID: String,
+        in window: NSWindow,
+        relativeTo source: NSView
+    ) -> UtilityPaneView? {
+        openChannelPanel(
+            channelID: channelID,
+            in: window,
+            relativeTo: source)?.pane
+    }
+
+    func channelPanelControllerForTesting(
+        _ pane: UtilityPaneView
+    ) -> ChannelPanelController? {
+        utilityRecord(forPane: pane)?.channelController
+    }
+
+    func channelIDForTesting(_ pane: UtilityPaneView) -> String? {
+        utilityRecord(forPane: pane)?.channelID
+    }
+
+    func handleAppRequestForTesting(_ request: String) -> String {
+        handleAppRequest(request)
+    }
+
     func utilityPaneControllerForTesting(_ pane: UtilityPaneView) -> CodeViewController? {
         utilityRecord(forPane: pane)?.controller
     }
@@ -3958,18 +4216,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         in win: NSWindow,
         relativeTo requestedSource: NSView? = nil,
         vertical: Bool = true,
-        forceNewInstance: Bool = false
+        forceNewInstance: Bool = false,
+        channelID: String? = nil
     ) -> UtilityPanelRecord? {
         let id = ObjectIdentifier(win)
-        // Files stays one-per-window. Chat and Browser support extra instances
-        // when forceNewInstance is set; a plain "open" focuses the newest
-        // existing pane of that kind.
-        let allowsMultiple = kind == .browser || kind == .chat
+        // Files stays one-per-window. Chat, Channel, and Browser support extra
+        // instances when forceNewInstance is set; a plain "open" focuses the
+        // newest existing pane of that kind.
+        if kind == .channel {
+            guard let channelID else { return nil }
+            if let existing = channelRecord(withID: channelID, in: win) {
+                restorePaneZoom(revealing: existing.pane)
+                win.makeFirstResponder(existing.pane)
+                return existing
+            }
+        }
+        let allowsMultiple =
+            kind == .browser || kind == .chat || kind == .channel
         let wantsNewInstance = forceNewInstance && allowsMultiple
         let requestedRoot = requestedSource.flatMap {
             terminalRoot(of: win, containing: $0)
         } ?? (win === quickTerminal.window ? quickTerminal.activeRootView : nil)
-        if !wantsNewInstance,
+        if kind != .channel,
+           !wantsNewInstance,
            let existing = utilityRecord(kind, in: win, rootedAt: requestedRoot) {
             restorePaneZoom(revealing: existing.pane)
             win.makeFirstResponder(existing.pane)
@@ -3993,17 +4262,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             alpha: CGFloat(bg.w))
         let codeController: CodeViewController?
         let browserController: BrowserPaneController?
+        let channelController: ChannelPanelController?
         let contentView: NSView
         switch kind {
         case .files, .chat:
             let controller = CodeViewController(config: config, panelKind: kind)
             codeController = controller
             browserController = nil
+            channelController = nil
+            contentView = controller.view
+        case .channel:
+            guard let channelID,
+                  let state = authoritativeCollaborationSnapshot()
+                    .channels.first(where: { $0.id == channelID })
+            else { return nil }
+            let controller = ChannelPanelController(channel: state)
+            codeController = nil
+            browserController = nil
+            channelController = controller
             contentView = controller.view
         case .browser:
             let controller = BrowserPaneController()
             codeController = nil
             browserController = controller
+            channelController = nil
             contentView = controller.view
         case .surface:
             return nil // surfaces are agent-created via openSurfacePanel
@@ -4022,6 +4304,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             ledgerID = "chat-\(nextChatLedgerID)"
             nextChatLedgerID += 1
             pane.paneHeader.title = "Chat \(ledgerID.dropFirst("chat-".count))"
+        case .channel:
+            guard let channelID,
+                  let state = authoritativeCollaborationSnapshot()
+                    .channels.first(where: { $0.id == channelID })
+            else { return nil }
+            ledgerID = "channel-panel-\(channelID)"
+            pane.paneHeader.title = state.name
         case .files, .surface:
             ledgerID = kind.rawValue
         }
@@ -4030,10 +4319,31 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             record = UtilityPanelRecord(controller: controller, pane: pane, ledgerID: ledgerID)
         } else if let controller = browserController {
             record = UtilityPanelRecord(browser: controller, pane: pane, ledgerID: ledgerID)
+        } else if let controller = channelController, let channelID {
+            record = UtilityPanelRecord(
+                channel: controller,
+                channelID: channelID,
+                pane: pane,
+                ledgerID: ledgerID)
         } else {
             return nil
         }
         utilityPanels[id, default: []].append(record)
+        if let controller = channelController, let channelID {
+            controller.onSendMessage = { [weak self] text, threadID in
+                self?.postChannelPanelMessage(
+                    text,
+                    threadID: threadID,
+                    channelID: channelID)
+            }
+            controller.onUpdateRole = {
+                [weak self] participantID, role in
+                self?.updateChannelParticipantRole(
+                    participantID: participantID,
+                    role: role,
+                    channelID: channelID)
+            }
+        }
         if let controller = codeController {
             controller.onPageChanged = { [weak self, weak win, weak record] page in
                 guard let self, let win, let record,
@@ -4174,7 +4484,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         pane.onChannelActivate = { [weak self, weak pane] in
             guard let self, let pane else { return }
-            self.presentChannelSummary(for: pane)
+            self.activateChannel(for: pane)
         }
         pane.onChannelDragBegan = { [weak self, weak pane] point in
             guard let self, let pane else { return }
@@ -4924,6 +5234,280 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
+    private func handleChannelPanelControl(_ encoded: String) -> String {
+        let request: [String: Any]
+        switch BrowserControlCodec.decode(encoded) {
+        case let .success(value):
+            request = value
+        case let .failure(error):
+            return BrowserControlCodec.response(
+                error: "invalid_request",
+                message: error.localizedDescription)
+        }
+        guard request["v"] as? Int == 1 else {
+            return BrowserControlCodec.response(
+                error: "unsupported_version",
+                message: "Channel panel requests require version 1.")
+        }
+        let operation = request["op"] as? String ?? ""
+        let snapshot = authoritativeCollaborationSnapshot()
+
+        if operation == "list" {
+            let states = onMain {
+                snapshot.channels.map { channel in
+                    let record = self.channelRecord(withID: channel.id)
+                    return ChannelPanelProjection(
+                        channel: channel,
+                        selectedThreadID:
+                            record?.channelController?.selectedThreadID)
+                        .controlState(isOpen: record != nil)
+                }
+            } ?? snapshot.channels.map {
+                ChannelPanelProjection(
+                    channel: $0,
+                    selectedThreadID: nil)
+                    .controlState(isOpen: false)
+            }
+            return BrowserControlCodec.response(result: ["channels": states])
+        }
+
+        guard let channelID = request["channelId"] as? String,
+              !channelID.isEmpty
+        else {
+            return BrowserControlCodec.response(
+                error: "missing_channel",
+                message: "channelId is required.")
+        }
+        guard let channel = snapshot.channels.first(where: {
+            $0.id == channelID
+        }) else {
+            return BrowserControlCodec.response(
+                error: "unknown_channel",
+                message: "No Channel has id \(channelID).")
+        }
+
+        if operation == "post_message" {
+            guard let rawText = request["text"] as? String else {
+                return BrowserControlCodec.response(
+                    error: "missing_text",
+                    message: "text is required.")
+            }
+            let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                return BrowserControlCodec.response(
+                    error: "missing_text",
+                    message: "text must not be empty.")
+            }
+            let threadID = request["threadId"] as? String
+            if let threadID,
+               !channel.messages.contains(where: { $0.threadID == threadID })
+            {
+                return BrowserControlCodec.response(
+                    error: "unknown_thread",
+                    message: "No Channel thread has id \(threadID).")
+            }
+            let messageID = UUID().uuidString.lowercased()
+            let actor = CollaborationActor(
+                id: "local-user:\(NSUserName())",
+                kind: .human,
+                displayName: NSFullUserName().isEmpty
+                    ? NSUserName()
+                    : NSFullUserName())
+            let message = CollaborationMessage(
+                id: messageID,
+                threadID: threadID,
+                authorID: actor.id,
+                text: CollaborationMessage.boundedChannelText(text))
+            let mutation = CollaborationControlRequest(
+                op: .postMessage,
+                actor: actor,
+                idempotencyKey: "channel-panel:\(messageID)",
+                channelID: channelID,
+                message: message)
+            guard let encodedMutation = CollaborationControlCodec.encode(mutation)
+            else {
+                return BrowserControlCodec.response(
+                    error: "encode_failed",
+                    message: "Could not encode the Channel message.")
+            }
+            let response = handleCollaborationControl(encodedMutation)
+            guard let committed = CollaborationControlCodec.snapshot(
+                fromResponse: response),
+                  let updated = committed.channels.first(where: {
+                      $0.id == channelID
+                  })
+            else { return response }
+            return BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: updated,
+                    selectedThreadID: threadID)
+                    .controlState(
+                        isOpen: onMain {
+                            self.channelRecord(withID: channelID) != nil
+                        } ?? false))
+        }
+
+        if operation == "assign_role" {
+            guard let participantID = request["participantId"] as? String,
+                  let rawRole = request["role"] as? String
+            else {
+                return BrowserControlCodec.response(
+                    error: "missing_role",
+                    message: "participantId and role are required.")
+            }
+            let role = rawRole.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            guard !role.isEmpty else {
+                return BrowserControlCodec.response(
+                    error: "missing_role",
+                    message: "role must not be empty.")
+            }
+            guard let participant = channel.participants.first(where: {
+                $0.id == participantID
+            }), let endpoint = channel.endpoints.first(where: {
+                $0.participantID == participantID
+            }) else {
+                return BrowserControlCodec.response(
+                    error: "unknown_participant",
+                    message: "No connected participant has id \(participantID).")
+            }
+            let updatedParticipant = CollaborationParticipant(
+                id: participant.id,
+                displayName: participant.displayName,
+                role: role,
+                provider: participant.provider,
+                modelID: participant.modelID,
+                capabilities: participant.capabilities)
+            let actor = CollaborationActor(
+                id: "local-user:\(NSUserName())",
+                kind: .human,
+                displayName: NSFullUserName().isEmpty
+                    ? NSUserName()
+                    : NSFullUserName())
+            let mutation = CollaborationControlRequest(
+                op: .updateMembership,
+                actor: actor,
+                idempotencyKey:
+                    "channel-role:\(participantID):\(UUID().uuidString)",
+                channelID: channelID,
+                endpoint: endpoint,
+                participant: updatedParticipant)
+            guard let encodedMutation = CollaborationControlCodec.encode(mutation)
+            else {
+                return BrowserControlCodec.response(
+                    error: "encode_failed",
+                    message: "Could not encode the role update.")
+            }
+            let response = handleCollaborationControl(encodedMutation)
+            guard let committed = CollaborationControlCodec.snapshot(
+                fromResponse: response),
+                  let updated = committed.channels.first(where: {
+                      $0.id == channelID
+                  })
+            else { return response }
+            let record = onMain {
+                self.channelRecord(withID: channelID)
+            } ?? nil
+            return BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: updated,
+                    selectedThreadID:
+                        record?.channelController?.selectedThreadID)
+                    .controlState(isOpen: record != nil))
+        }
+
+        let result = onMain { () -> String in
+            let existing = self.channelRecord(withID: channelID)
+            switch operation {
+            case "snapshot":
+                return BrowserControlCodec.response(result:
+                    ChannelPanelProjection(
+                        channel: channel,
+                        selectedThreadID:
+                            existing?.channelController?.selectedThreadID)
+                        .controlState(isOpen: existing != nil))
+            case "open":
+                let window = existing?.pane.window
+                    ?? self.liveCollaborationPanes().first(where: { pane in
+                        guard let paneWindow = pane.window,
+                              paneWindow !== self.quickTerminal.window
+                        else { return false }
+                        let endpointID =
+                            self.collaborationEndpoint(for: pane).id
+                        return channel.endpoints.contains {
+                            $0.id == endpointID
+                        }
+                    })?.window
+                    ?? self.standardKeyWindow()
+                guard let window,
+                      let record = self.openChannelPanel(
+                          channelID: channelID,
+                          in: window)
+                else {
+                    return BrowserControlCodec.response(
+                        error: "open_failed",
+                        message: "No main tab can host the Channel panel.")
+                }
+                return BrowserControlCodec.response(result:
+                    record.channelController?.controlState()
+                        ?? ChannelPanelProjection(
+                            channel: channel,
+                            selectedThreadID: nil)
+                            .controlState(isOpen: true))
+            case "focus":
+                guard let existing else {
+                    return BrowserControlCodec.response(
+                        error: "panel_closed",
+                        message: "Open the Channel panel before focusing it.")
+                }
+                self.restorePaneZoom(revealing: existing.pane)
+                existing.pane.window?.makeFirstResponder(existing.pane)
+                return BrowserControlCodec.response(result:
+                    existing.channelController?.controlState()
+                        ?? ChannelPanelProjection(
+                            channel: channel,
+                            selectedThreadID: nil)
+                            .controlState(isOpen: true))
+            case "close":
+                if let existing, let window = existing.pane.window,
+                   !self.closeUtilityPanel(existing, in: window)
+                {
+                    return BrowserControlCodec.response(
+                        error: "close_failed",
+                        message: "The Channel panel could not be closed.")
+                }
+                return BrowserControlCodec.response(result:
+                    ChannelPanelProjection(
+                        channel: channel,
+                        selectedThreadID: nil)
+                        .controlState(isOpen: false))
+            case "select_thread":
+                guard let existing,
+                      let controller = existing.channelController
+                else {
+                    return BrowserControlCodec.response(
+                        error: "panel_closed",
+                        message: "Open the Channel panel before selecting a thread.")
+                }
+                let threadID = request["threadId"] as? String
+                guard controller.selectThreadForControl(threadID) else {
+                    return BrowserControlCodec.response(
+                        error: "unknown_thread",
+                        message: "No Channel thread has id \(threadID ?? "").")
+                }
+                return BrowserControlCodec.response(result:
+                    controller.controlState())
+            default:
+                return BrowserControlCodec.response(
+                    error: "unknown_operation",
+                    message: "Unknown Channel panel operation '\(operation)'.")
+            }
+        }
+        return result ?? BrowserControlCodec.response(
+            error: "main_thread_timeout",
+            message: "Could not schedule Channel panel control.")
+    }
+
     private func handleAppRequest(_ request: String) -> String {
         let parts = request.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
         let cmd = parts.first.map(String.init) ?? ""
@@ -4955,6 +5539,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return handleBrowserControl(arg)
         case "channel":
             return handleCollaborationControl(arg)
+        case "channel-panel":
+            return handleChannelPanelControl(arg)
         case "channel-project":
             if let snapshot = CollaborationCoordinatorClient.projectedSnapshot(
                 from: arg)
@@ -5274,7 +5860,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return "error: unknown command '\(cmd)' (ping | version | list | new-window | new-tab | "
                 + "split | focus | close | send | send-line | screen | history | last-output | "
                 + "last-command | exit-code | run | activity | toggle-quick-terminal | toggle-sidebar | "
-                + "sidebar | sidebar-tab | chat-model | chat-effort | browser | subscribe)"
+                + "sidebar | sidebar-tab | chat-model | chat-effort | browser | channel | "
+                + "channel-panel | subscribe)"
         }
     }
 

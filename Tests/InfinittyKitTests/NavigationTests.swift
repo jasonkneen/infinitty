@@ -783,10 +783,13 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(closed, 0)
     }
 
-    func testSplitChooserOffersTerminalFilesChatAndBrowser() {
-        XCTAssertEqual(PaneType.allCases.map(\.title), ["Terminal", "Files", "Chat", "Browser"])
+    func testSplitChooserOffersTerminalFilesChatChannelAndBrowser() {
+        XCTAssertEqual(
+            PaneType.allCases.map(\.title),
+            ["Terminal", "Files", "Chat", "Channel", "Browser"])
         XCTAssertEqual(PaneType.allCases.map(\.symbol), [
-            "terminal", "folder", "bubble.left.and.bubble.right", "globe",
+            "terminal", "folder", "bubble.left.and.bubble.right",
+            "person.3.sequence", "globe",
         ])
     }
 
@@ -1298,6 +1301,85 @@ final class NavigationTests: XCTestCase {
             delegate.collaborationContextForTesting(pane: chat2)?
                 .peers.map(\.displayName),
             ["Chat 1"])
+        let channelID = try XCTUnwrap(
+            delegate.collaborationContextForTesting(pane: chat1)?.channelID)
+        let openRequest = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "op": "open",
+            "channelId": channelID,
+        ]))
+        let openResponse = delegate.handleAppRequestForTesting(
+            "channel-panel \(openRequest)")
+        let openEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(openResponse.utf8))
+                as? [String: Any])
+        XCTAssertEqual(openEnvelope["ok"] as? Bool, true)
+        let openResult = try XCTUnwrap(
+            openEnvelope["result"] as? [String: Any])
+        XCTAssertEqual(
+            openResult["panelId"] as? String,
+            "channel-panel-\(channelID)")
+        XCTAssertEqual(openResult["title"] as? String, "Channel 1")
+        XCTAssertEqual(openResult["open"] as? Bool, true)
+        let participantID = try XCTUnwrap(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .identity.participantID)
+        let roleRequest = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "op": "assign_role",
+            "channelId": channelID,
+            "participantId": participantID,
+            "role": "lead planner",
+        ]))
+        let roleResponse = delegate.handleAppRequestForTesting(
+            "channel-panel \(roleRequest)")
+        let roleEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(roleResponse.utf8))
+                as? [String: Any])
+        XCTAssertEqual(roleEnvelope["ok"] as? Bool, true)
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .identity.role,
+            "lead planner")
+        let channelPane = try XCTUnwrap(
+            delegate.openChannelPanelForTesting(
+                channelID: channelID,
+                in: window,
+                relativeTo: chat2))
+        let channelController = try XCTUnwrap(
+            delegate.channelPanelControllerForTesting(channelPane))
+        XCTAssertEqual(channelPane.kind, .channel)
+        XCTAssertEqual(channelPane.paneHeader.title, "Channel 1")
+        XCTAssertEqual(delegate.channelIDForTesting(channelPane), channelID)
+        XCTAssertTrue(channelController.renderedTextForTesting.contains("Channel 1"))
+        XCTAssertTrue(channelController.renderedTextForTesting.contains("Chat 1"))
+        XCTAssertTrue(channelController.renderedTextForTesting.contains("Chat 2"))
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 3)
+
+        let closeRequest = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "op": "close",
+            "channelId": channelID,
+        ]))
+        let closeResponse = delegate.handleAppRequestForTesting(
+            "channel-panel \(closeRequest)")
+        let closeEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(closeResponse.utf8))
+                as? [String: Any])
+        XCTAssertEqual(closeEnvelope["ok"] as? Bool, true)
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 2)
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .peers.map(\.displayName),
+            ["Chat 2"])
+        let reopenedChannelPane = try XCTUnwrap(
+            delegate.openChannelPanelForTesting(
+                channelID: channelID,
+                in: window,
+                relativeTo: chat1))
+        XCTAssertEqual(delegate.channelIDForTesting(reopenedChannelPane), channelID)
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(
+            reopenedChannelPane, in: window))
 
         let firstTranscript = assistant1.makeSidebarPanelView()
         assistant1.submitForQA("Tell the Channel what you completed.")

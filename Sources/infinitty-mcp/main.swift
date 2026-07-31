@@ -297,6 +297,27 @@ func channelCall(
     return infinittyRequest("channel \(encoded)")
 }
 
+func channelPanelCall(
+    _ operation: String,
+    arguments: [String: Any] = [:]
+) -> String {
+    var payload = arguments
+    payload["v"] = 1
+    payload["op"] = operation
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload) else {
+        return "error: could not encode Channel panel request"
+    }
+    guard data.count <= maximumChannelRequestBytes else {
+        return "error: Channel panel request exceeds \(maximumChannelRequestBytes) bytes"
+    }
+    let encoded = data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return infinittyRequest("channel-panel \(encoded)")
+}
+
 // MARK: - tool definitions
 
 struct Tool {
@@ -445,6 +466,51 @@ let tools: [Tool] = [
             var payload = args
             let operation = payload.removeValue(forKey: "op") as? String ?? ""
             return channelCall(operation, arguments: payload)
+        }
+    ),
+    Tool(
+        name: "infinitty_channel_panel",
+        description: "Control the first-class Channel workspace pane. List room panels; "
+            + "open, focus, close, or inspect a room; select a delegation thread; "
+            + "post a durable human message; or assign a connected participant's role.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "action": [
+                    "type": "string",
+                    "enum": [
+                        "list", "open", "focus", "close", "snapshot",
+                        "select_thread", "post_message", "assign_role",
+                    ],
+                ] as [String: Any],
+                "channelId": [
+                    "type": "string",
+                    "description": "Channel id from infinitty_channels; omitted only for list.",
+                ],
+                "threadId": [
+                    "type": ["string", "null"],
+                    "description": "Delegation thread id, or null for the room conversation.",
+                ] as [String: Any],
+                "text": [
+                    "type": "string",
+                    "description": "Message text for post_message.",
+                ],
+                "participantId": [
+                    "type": "string",
+                    "description": "Participant id for assign_role.",
+                ],
+                "role": [
+                    "type": "string",
+                    "description": "Responsibility-focused role for assign_role.",
+                ],
+            ],
+            "required": ["action"],
+        ],
+        invoke: { args in
+            var payload = args
+            let action = payload.removeValue(forKey: "action") as? String
+                ?? "list"
+            return channelPanelCall(action, arguments: payload)
         }
     ),
     Tool(

@@ -30,7 +30,10 @@ final class HeadlessAppHostTests: XCTestCase {
         XCTAssertEqual(instance["mode"] as? String, "headless")
         XCTAssertEqual(
             Set(instance["capabilities"] as? [String] ?? []),
-            Set(["terminal", "terminal.run", "channel", "events"]))
+            Set([
+                "terminal", "terminal.run", "channel", "channel.panel",
+                "events",
+            ]))
 
         XCTAssertEqual(
             AppSocketClient.request("list", socketPath: fixture.socketPath),
@@ -104,6 +107,34 @@ final class HeadlessAppHostTests: XCTestCase {
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         let channels = try XCTUnwrap(result["channels"] as? [[String: Any]])
         XCTAssertEqual(channels.first?["id"] as? String, "headless-channel")
+
+        let panelRequest = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "op": "open",
+            "channelId": "headless-channel",
+        ]))
+        let panelText = try XCTUnwrap(AppSocketClient.request(
+            "channel-panel \(panelRequest)",
+            socketPath: fixture.socketPath))
+        let panelEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(panelText.utf8))
+                as? [String: Any])
+        XCTAssertEqual(panelEnvelope["ok"] as? Bool, true)
+        let panel = try XCTUnwrap(
+            panelEnvelope["result"] as? [String: Any])
+        XCTAssertEqual(panel["panelId"] as? String,
+                       "channel-panel-headless-channel")
+        XCTAssertEqual(panel["title"] as? String, "Headless Channel")
+        XCTAssertEqual(panel["open"] as? Bool, true)
+
+        let listWithPanelText = try XCTUnwrap(
+            AppSocketClient.request("list", socketPath: fixture.socketPath))
+        let listWithPanel = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(listWithPanelText.utf8))
+                as? [[String: Any]])
+        XCTAssertEqual(
+            listWithPanel.compactMap { $0["kind"] as? String },
+            ["channel"])
     }
 
     func testHeadlessChannelJournalReplaysAfterHostRestart() throws {

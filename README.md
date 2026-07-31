@@ -113,7 +113,12 @@ events as JSON lines. Socket-driven input lights the agent glow.
 Every Chat pane has a stable process-local identity (`Chat 1`, `Chat 2`, …).
 Drag the circular connector in one pane header onto another pane's connector to
 create or join a Channel. Linked headers show a visible badge such as
-`Channel 1 · 2`, not color alone.
+`Channel 1 · 2`, not color alone. Click that badge to open the Channel as a
+first-class movable pane. Its room identity remains visible in the pane header;
+the workspace exposes named participants, connected status, editable roles,
+room and delegation-thread conversations, plan/dependency status,
+responsibility claims, and the durable audit revision. Narrow panes switch to
+People / Room / Plan sections so the workspace remains usable beside Chats.
 
 For linked Chat panes, Channel membership is part of every real provider turn:
 the agent receives its own participant name, the Channel name, exact peer
@@ -129,7 +134,10 @@ Visual and headless processes use one local Channel coordinator and one
 tamper-evident journal. Linking endpoints from different Infinitty instances
 therefore updates the same authoritative room; live instances receive the new
 projection, and another process replays the journal and takes over if the
-coordinator owner exits.
+coordinator owner exits. `infinitty_channel_panel` exposes the same
+list/open/focus/close/snapshot/thread-selection/message/role controls through
+MCP; a headless process keeps a virtual Channel pane with the same stable
+`channel-panel-<channel-id>` identity.
 
 ### Headless terminal/app host
 
@@ -257,10 +265,11 @@ Font to use one everywhere.
 - **Tabs**: native macOS tabs — ⌘T new tab, ⇧⌘←/→ previous/next tab,
   ⌘1–8 select by position, ⌘9 selects the last tab, and the tab bar "+" works;
   hold ⌘ to reveal the numbers in tab titles; ⇧⌘T renames the active tab
-- **Splits**: ⌘D split right, ⇧⌘D split down, then choose Terminal, Files, or
-  Chat. Splits nest arbitrarily; Files contains its own Files/Changes switch,
-  and each main tab can keep one Files pane and one Chat pane alongside any
-  number of terminals. ⌘W closes the focused pane (the tab closes when its last
+- **Splits**: ⌘D split right, ⇧⌘D split down; right-click either split button
+  to choose Terminal, Files, Chat, Channel, or Browser. Splits nest arbitrarily;
+  Files contains its own Files/Changes switch, and each main tab can keep one
+  Files pane plus multiple independently named Chat and Channel panes alongside
+  any number of terminals. ⌘W closes the focused pane (the tab closes when its last
   terminal exits); ⇧⌥←/→/↑/↓ focuses
   and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
   pane numbers and the focused-pane outline, then press ⇧⌥1–9 to focus directly.
@@ -338,9 +347,10 @@ Font to use one everywhere.
   Infinitty's running command, exit status (OSC 133), and `infinitty_activity`
   socket/MCP messages continue to appear in the same indicator.
 
-### Mixed Files and Chat panes
+### Mixed Files, Chat, and Channel panes
 
-Files and Chat are first-class leaves in the same split tree as terminals. The
+Files, Chat, and Channel are first-class leaves in the same split tree as
+terminals. The
 legacy `toggle-sidebar` socket command toggles the Files pane for compatibility.
 
 - **Files / Changes**: One pane with a compact internal switch. Files provides
@@ -350,9 +360,14 @@ legacy `toggle-sidebar` socket command toggles the Files pane for compatibility.
   your code, execute shell commands, read the screen, or switch between panes.
   Choose your AI model (Claude, Codex, or Apple Intelligence) via the dropdown,
   and enable reasoning/thinking via the effort selector for deeper analysis.
+- **Channel**: shared room coordination for linked panes. Click a linked
+  Channel badge to open it, then steer the room or an individual delegation
+  thread, assign participant roles, and inspect plan, responsibility, and audit
+  state without merging Chat transcripts.
 
-Each main tab owns its Files/Chat panes and nested layout independently. Both
-panes follow the terminal focused in that tab.
+Each main tab owns its Files/Chat/Channel panes and nested layout independently.
+Files and Chat follow the terminal focused in that tab; Channel remains bound
+to its durable room ID when moved, closed, or reopened.
 
 ### Pane lifecycle ledger
 

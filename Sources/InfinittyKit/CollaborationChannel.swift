@@ -1012,7 +1012,11 @@ final class CollaborationRoom {
     private var channels: [String: CollaborationChannelState] = [:]
     private var endpointChannels: [String: String] = [:]
     private var idempotencyFingerprints: [String: String] = [:]
-    private var idempotencySnapshots: [String: CollaborationSnapshot] = [:]
+    /// Compact exactly-once receipt index. Keeping a full room snapshot for
+    /// every unique message key makes memory grow as O(events × room state).
+    /// Store only the committed sequence; the uncommon delayed retry rebuilds
+    /// its original receipt from the durable hash-chained journal.
+    private var idempotencyRevisions: [String: Int] = [:]
     private var revision = 0
     private var previousHash = CollaborationAuditRecord.genesisHash
 
@@ -1043,7 +1047,7 @@ final class CollaborationRoom {
             previousHash = record.hash
             if let key = record.idempotencyKey {
                 idempotencyFingerprints[key] = record.commandFingerprint
-                idempotencySnapshots[key] = snapshotLocked()
+                idempotencyRevisions[key] = record.sequence
             }
         }
     }
@@ -1067,8 +1071,15 @@ final class CollaborationRoom {
                 guard previousFingerprint == fingerprint else {
                     throw CollaborationRoomError.idempotencyMismatch(validatedKey)
                 }
-                let result = idempotencySnapshots[validatedKey]
-                    ?? snapshotLocked()
+                let result: CollaborationSnapshot
+                if let receiptRevision =
+                    idempotencyRevisions[validatedKey]
+                {
+                    result = try historicalSnapshotLocked(
+                        through: receiptRevision)
+                } else {
+                    result = snapshotLocked()
+                }
                 lock.unlock()
                 return result
             }
@@ -1086,14 +1097,12 @@ final class CollaborationRoom {
             replay(event.body)
             if let validatedKey {
                 idempotencyFingerprints[validatedKey] = fingerprint
+                idempotencyRevisions[validatedKey] = event.sequence
             }
             revision = event.sequence
             previousHash = event.hash
             committed = event
             let result = snapshotLocked()
-            if let validatedKey {
-                idempotencySnapshots[validatedKey] = result
-            }
             lock.unlock()
             if let committed { eventSink?(committed) }
             return result
@@ -1127,6 +1136,21 @@ final class CollaborationRoom {
                 if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
                 return $0.id < $1.id
             })
+    }
+
+    private func historicalSnapshotLocked(
+        through receiptRevision: Int
+    ) throws -> CollaborationSnapshot {
+        let records = try store.load()
+        let prefix = Array(records.prefix {
+            $0.sequence <= receiptRevision
+        })
+        let reconstructed = try CollaborationRoom(
+            store: MemoryCollaborationEventStore(records: prefix),
+            now: now,
+            idFactory: idFactory,
+            eventIDFactory: eventIDFactory)
+        return reconstructed.snapshot()
     }
 
     private func event(

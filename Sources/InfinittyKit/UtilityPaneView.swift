@@ -4,6 +4,7 @@ enum PaneType: Int, CaseIterable {
     case terminal
     case files
     case chat
+    case channel
     case browser
 
     var title: String {
@@ -11,6 +12,7 @@ enum PaneType: Int, CaseIterable {
         case .terminal: return "Terminal"
         case .files: return "Files"
         case .chat: return "Chat"
+        case .channel: return "Channel"
         case .browser: return "Browser"
         }
     }
@@ -20,6 +22,7 @@ enum PaneType: Int, CaseIterable {
         case .terminal: return "terminal"
         case .files: return "folder"
         case .chat: return "bubble.left.and.bubble.right"
+        case .channel: return "person.3.sequence"
         case .browser: return "globe"
         }
     }
@@ -28,6 +31,7 @@ enum PaneType: Int, CaseIterable {
 enum UtilityPanelKind: String, CaseIterable {
     case files
     case chat
+    case channel
     case browser
     /// Agent-requested display surface (markdown doc, MCP-UI HTML, or URL).
     case surface
@@ -36,6 +40,7 @@ enum UtilityPanelKind: String, CaseIterable {
         switch self {
         case .files: return "Files"
         case .chat: return "Chat"
+        case .channel: return "Channel"
         case .browser: return "Browser"
         case .surface: return "Surface"
         }
@@ -45,6 +50,7 @@ enum UtilityPanelKind: String, CaseIterable {
         switch self {
         case .files: return "folder"
         case .chat: return "bubble.left.and.bubble.right"
+        case .channel: return "person.3.sequence"
         case .browser: return "globe"
         case .surface: return "sparkles.rectangle.stack"
         }
