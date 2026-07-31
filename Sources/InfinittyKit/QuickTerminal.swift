@@ -650,6 +650,10 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         return displayTitle(for: tab)
     }
 
+    func displayTitle(containing session: TerminalSession) -> String? {
+        tab(containing: session).map(displayTitle(for:))
+    }
+
     func setCustomTitle(_ title: String?, for id: QuickTerminalTabID) {
         guard let tab = tabs.first(where: { $0.id == id }),
               tab.customTitle != title else { return }

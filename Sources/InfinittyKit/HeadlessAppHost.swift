@@ -225,6 +225,59 @@ public final class HeadlessAppHost: @unchecked Sendable {
         stateLock.unlock()
 
         let session = HeadlessTerminalSession(id: id, workingDirectory: cwd)
+        let channelBridge = TerminalChannelSessionBridge(
+            coordinator: collaborationCoordinator,
+            queue: collaborationQueue,
+            endpointProvider: { [weak self, weak session] in
+                guard let self, let session else { return nil }
+                return self.channelEndpoint(for: session)
+            },
+            registrationProvider: { [weak session] in
+                session?.channelRegistration
+            },
+            registrationSetter: { [weak session] value in
+                session?.setChannelRegistration(value)
+            },
+            systemActor: CollaborationActor(
+                id: "system:\(instanceID)",
+                kind: .system,
+                displayName: "Infinitty headless host"),
+            onRegistered: { [weak self, weak session] registration in
+                guard let self, let session else { return }
+                self.appControl.broadcast([
+                    "event": "agent-registered",
+                    "pane": session.id,
+                    "name": registration.displayName,
+                    "provider": registration.provider ?? "",
+                    "headless": true,
+                ])
+            },
+            onUnregistered: { [weak self, weak session] in
+                guard let self, let session else { return }
+                self.appControl.broadcast([
+                    "event": "agent-unregistered",
+                    "pane": session.id,
+                    "headless": true,
+                ])
+            },
+            onMessage: { [weak self, weak session] channelID, messageID in
+                guard let self, let session else { return }
+                self.appControl.broadcast([
+                    "event": "channel-message",
+                    "channelId": channelID,
+                    "messageId": messageID,
+                    "pane": session.id,
+                    "headless": true,
+                ])
+            })
+        session.control.channelContextHandler = { channelBridge.context() }
+        session.control.channelRegisterHandler = {
+            channelBridge.register($0, peerProcessID: $1)
+        }
+        session.control.channelPostHandler = { channelBridge.post($0) }
+        session.control.channelUnregisterHandler = {
+            channelBridge.unregister($0, peerProcessID: $1)
+        }
         session.onTitleChanged = { [weak self] session, title in
             self?.appControl.broadcast([
                 "event": "title",
@@ -476,6 +529,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 "capabilities": [
                     "terminal",
                     "terminal.run",
+                    "terminal.channel",
                     "chat",
                     "channel",
                     "channel.panel",
@@ -501,6 +555,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
                         "id": endpoint.id,
                         "kind": endpoint.kind.rawValue,
                         "label": endpoint.label,
+                        "participantID": endpoint.participantID ?? "",
                         "instanceID": endpoint.instanceID ?? "",
                     ],
                 ]
@@ -1231,10 +1286,15 @@ public final class HeadlessAppHost: @unchecked Sendable {
     private func channelEndpoint(
         for session: HeadlessTerminalSession
     ) -> CollaborationEndpoint {
-        CollaborationEndpoint(
-            id: "\(instanceID)/terminal:\(session.id)",
+        let registration = session.channelRegistration
+        let endpointID = "\(instanceID)/terminal:\(session.id)"
+        return CollaborationEndpoint(
+            id: endpointID,
             kind: .terminal,
             label: session.title,
+            participantID: registration.map { _ in
+                TerminalAgentRegistration.participantID(endpointID: endpointID)
+            },
             instanceID: instanceID)
     }
 
@@ -1840,6 +1900,7 @@ private final class HeadlessTerminalSession: @unchecked Sendable {
     private let promptCondition = NSCondition()
     private let runQueue = RunCommandQueue()
     private var storedTitle = "infinitty"
+    private var storedChannelRegistration: TerminalAgentRegistration?
     private var todos: [PaneTodo] = []
     private var launched = false
     private var stopped = false
@@ -1849,7 +1910,19 @@ private final class HeadlessTerminalSession: @unchecked Sendable {
     var title: String {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return storedTitle
+        return storedChannelRegistration?.displayName ?? storedTitle
+    }
+
+    var channelRegistration: TerminalAgentRegistration? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return storedChannelRegistration
+    }
+
+    func setChannelRegistration(_ value: TerminalAgentRegistration?) {
+        stateLock.lock()
+        storedChannelRegistration = value
+        stateLock.unlock()
     }
 
     init(id: Int, workingDirectory: String?) {

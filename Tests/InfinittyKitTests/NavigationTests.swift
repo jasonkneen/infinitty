@@ -1959,6 +1959,89 @@ final class NavigationTests: XCTestCase {
             [])
     }
 
+    func testConnectedTerminalAgentsShowUniqueNamesAndChannelBadge() throws {
+        _ = NSApplication.shared
+        let delegate = AppDelegate()
+        let (_, first) = try XCTUnwrap(
+            delegate.ensureQuickTerminalForTesting())
+        let second = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: first.view,
+            vertical: true))
+        defer {
+            delegate.sessionDidExitForTesting(second)
+            delegate.sessionDidExitForTesting(first)
+        }
+
+        func register(
+            _ name: String,
+            provider: String,
+            session: TerminalSession
+        ) throws {
+            let encoded = try XCTUnwrap(BrowserControlCodec.encode([
+                "v": 1,
+                "displayName": name,
+                "role": "terminal agent",
+                "provider": provider,
+            ]))
+            let response = try XCTUnwrap(AppSocketClient.request(
+                "channel-register \(encoded)",
+                socketPath: session.control.path))
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(response.utf8))
+                    as? [String: Any])
+            XCTAssertEqual(envelope["ok"] as? Bool, true, response)
+        }
+
+        try register("Claude \(first.id)", provider: "claude", session: first)
+        try register("Amp \(second.id)", provider: "amp", session: second)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        let linked = expectation(description: "terminal Channel link committed")
+        delegate.linkCollaborationPanesForTesting(
+            source: first.view,
+            target: second.view
+        ) { result in
+            if case .failure(let error) = result {
+                XCTFail("Channel link failed: \(error)")
+            }
+            linked.fulfill()
+        }
+        wait(for: [linked], timeout: 3)
+
+        XCTAssertEqual(first.view.paneHeader.title, "Claude \(first.id)")
+        XCTAssertEqual(second.view.paneHeader.title, "Amp \(second.id)")
+        XCTAssertEqual(
+            delegate.quickTerminalTitleForTesting(containing: first),
+            "Amp \(second.id) (2)")
+        XCTAssertEqual(
+            first.view.paneHeader.channelBadgeTextForTesting,
+            "Channel 1 · 2")
+        XCTAssertEqual(
+            second.view.paneHeader.channelBadgeTextForTesting,
+            "Channel 1 · 2")
+
+        let contextText = try XCTUnwrap(AppSocketClient.request(
+            "channel-context",
+            socketPath: first.control.path))
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contextText.utf8))
+                as? [String: Any])
+        let result = try XCTUnwrap(envelope["result"] as? [String: Any])
+        XCTAssertEqual(envelope["ok"] as? Bool, true)
+        XCTAssertEqual(result["connected"] as? Bool, true)
+        XCTAssertEqual(
+            ((result["peers"] as? [[String: Any]])?.first)?["displayName"]
+                as? String,
+            "Amp \(second.id)")
+
+        second.terminal.onTitle?("shell-overwrite-attempt")
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        XCTAssertEqual(second.view.paneHeader.title, "Amp \(second.id)")
+        XCTAssertEqual(
+            delegate.quickTerminalTitleForTesting(containing: first),
+            "Amp \(second.id) (2)")
+    }
+
     func testTerminalExitThenMiddleChatClosePreservesRealChatPanesAndOwners() throws {
         _ = NSApplication.shared
         ShadcnChatFeature.overrideForTesting = true

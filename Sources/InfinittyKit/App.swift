@@ -640,11 +640,89 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         s.control.reloadHandler = { [weak self] in
             DispatchQueue.main.async { self?.reloadConfig() }
         }
+        let channelBridge = TerminalChannelSessionBridge(
+            coordinator: collaborationCoordinator,
+            queue: collaborationQueue,
+            endpointProvider: { [weak self, weak s] in
+                guard let self, let s else { return nil }
+                return self.terminalChannelEndpoint(for: s)
+            },
+            registrationProvider: { [weak s] in s?.channelRegistration },
+            registrationSetter: { [weak s] value in
+                s?.setChannelRegistration(value)
+            },
+            systemActor: CollaborationActor(
+                id: "system:\(collaborationInstanceID)",
+                kind: .system,
+                displayName: "Infinitty"),
+            onSnapshot: { [weak self] snapshot in
+                DispatchQueue.main.async {
+                    self?.applyCollaborationProjection(snapshot)
+                }
+            },
+            onRegistered: { [weak self, weak s] registration in
+                DispatchQueue.main.async {
+                    guard let self, let s,
+                          self.sessions.contains(where: { $0 === s })
+                    else { return }
+                    s.view.paneTitle = self.paneHeaderTitle(for: s)
+                    self.quickTerminal.setTitle(
+                        self.paneHeaderTitle(for: s),
+                        for: s)
+                    if let window = s.view.window {
+                        self.updateTitle(for: window)
+                        self.refreshTabStrips(in: window)
+                    }
+                    self.appControl.broadcast([
+                        "event": "agent-registered",
+                        "pane": s.id,
+                        "name": registration.displayName,
+                        "provider": registration.provider ?? "",
+                    ])
+                }
+            },
+            onUnregistered: { [weak self, weak s] in
+                DispatchQueue.main.async {
+                    guard let self, let s else { return }
+                    s.view.paneTitle = self.paneHeaderTitle(for: s)
+                    self.quickTerminal.setTitle(
+                        self.paneHeaderTitle(for: s),
+                        for: s)
+                    if let window = s.view.window {
+                        self.updateTitle(for: window)
+                        self.refreshTabStrips(in: window)
+                    }
+                    self.appControl.broadcast([
+                        "event": "agent-unregistered",
+                        "pane": s.id,
+                    ])
+                }
+            },
+            onMessage: { [weak self, weak s] channelID, messageID in
+                DispatchQueue.main.async {
+                    guard let self, let s else { return }
+                    self.appControl.broadcast([
+                        "event": "channel-message",
+                        "channelId": channelID,
+                        "messageId": messageID,
+                        "pane": s.id,
+                    ])
+                }
+            })
+        s.control.channelContextHandler = { channelBridge.context() }
+        s.control.channelRegisterHandler = {
+            channelBridge.register($0, peerProcessID: $1)
+        }
+        s.control.channelPostHandler = { channelBridge.post($0) }
+        s.control.channelUnregisterHandler = {
+            channelBridge.unregister($0, peerProcessID: $1)
+        }
         s.onExited = { [weak self] session in self?.sessionDidExit(session) }
         s.onTitleChanged = { [weak self] session in
             guard let win = session.view.window else { return }
-            session.view.paneTitle = self?.paneHeaderTitle(for: session) ?? session.title
-            self?.quickTerminal.setTitle(session.title, for: session)
+            let title = self?.paneHeaderTitle(for: session) ?? session.title
+            session.view.paneTitle = title
+            self?.quickTerminal.setTitle(title, for: session)
             self?.updateTitle(for: win)
             self?.appControl.broadcast(["event": "title", "pane": session.id, "title": session.title])
         }
@@ -818,6 +896,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func paneHeaderTitle(for session: TerminalSession) -> String {
         if let override = session.paneTitleOverride, !override.isEmpty {
             return override
+        }
+        if let registered = session.channelRegistration {
+            return registered.displayName
         }
         if let agentName = session.agentSessionName { return agentName }
         guard let process = session.processTracker?.current,
@@ -1457,11 +1538,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard !inWindow.isEmpty else { return }
         if win === quickTerminal.window {
             let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
-            quickTerminal.setTitle(focused.title, for: focused)
+            let focusedTitle = paneHeaderTitle(for: focused)
+            quickTerminal.setTitle(focusedTitle, for: focused)
             quickTerminal.setShowsShortcutHints(showTabShortcutHints)
             win.title = quickTerminal.activeTabID
                 .flatMap { quickTerminal.displayTitle(for: $0) }
-                ?? focused.title
+                ?? focusedTitle
             win.subtitle = foregroundProcessInfo(for: win)?.displayName ?? ""
             return
         }
@@ -2654,8 +2736,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let participantID: String?
         if let terminal = view as? TerminalView {
             kind = .terminal
-            label = terminal.paneTitle
-            participantID = nil
+            if let session = sessions.first(where: { $0.view === terminal }),
+               let registration = session.channelRegistration
+            {
+                label = registration.displayName
+                participantID = TerminalAgentRegistration.participantID(
+                    endpointID: "\(collaborationInstanceID)/\(paneID)")
+            } else {
+                label = terminal.paneTitle
+                participantID = nil
+            }
         } else if let utility = view as? UtilityPaneView {
             switch utility.kind {
             case .chat: kind = .chat
@@ -2685,6 +2775,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func collaborationParticipant(for view: NSView)
         -> CollaborationParticipant?
     {
+        if let terminal = view as? TerminalView,
+           let session = sessions.first(where: { $0.view === terminal }),
+           let registration = session.channelRegistration
+        {
+            let endpointID = "\(collaborationInstanceID)/"
+                + paneLedgerTerminalID(session)
+            return registration.participant(endpointID: endpointID)
+        }
         guard let utility = view as? UtilityPaneView,
               utility.kind == .chat,
               let participantID = collaborationEndpoint(for: utility).participantID
@@ -2699,6 +2797,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             capabilities:
                 utilityRecord(forPane: utility)?.participantCapabilities
                 ?? ["channel.receive", "channel.send"])
+    }
+
+    private func terminalChannelEndpoint(
+        for session: TerminalSession
+    ) -> CollaborationEndpoint {
+        let endpointID = "\(collaborationInstanceID)/"
+            + paneLedgerTerminalID(session)
+        let registration = session.channelRegistration
+        let label: String
+        if let registration {
+            label = registration.displayName
+        } else if Thread.isMainThread {
+            label = paneHeaderTitle(for: session)
+        } else {
+            label = DispatchQueue.main.sync {
+                self.paneHeaderTitle(for: session)
+            }
+        }
+        return CollaborationEndpoint(
+            id: endpointID,
+            kind: .terminal,
+            label: label,
+            participantID: registration.map { _ in
+                TerminalAgentRegistration.participantID(endpointID: endpointID)
+            },
+            instanceID: collaborationInstanceID)
     }
 
     private func paneHeader(for view: NSView) -> PaneHeaderView? {
@@ -4406,6 +4530,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// native tab bar stays hidden; reference chrome keeps our strip visible
     /// even for a single tab.
     private func refreshTabStrips(in win: NSWindow) {
+        // The quick terminal renders its own QuickTerminalTabStripView in a
+        // borderless panel. Querying AppKit titlebar accessories on that panel
+        // raises an NSInternalInconsistencyException.
+        guard win !== quickTerminal.window else { return }
         let tabs = win.tabbedWindows ?? [win]
         let titles = tabs.map { self.tabTitle(for: $0) }
         let presentation = tabPresentation(for: tabs)
@@ -4635,6 +4763,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         quickTerminal.tabCount
     }
 
+    func quickTerminalTitleForTesting(
+        containing session: TerminalSession
+    ) -> String? {
+        quickTerminal.displayTitle(containing: session)
+    }
+
     @discardableResult
     func splitTerminalForTesting(
         relativeTo source: NSView, vertical: Bool
@@ -4736,6 +4870,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return override
         }
         let inWindow = activeSessions(in: win)
+        if let registeredName = inWindow.compactMap({
+            $0.channelRegistration?.displayName
+        }).first {
+            return registeredName
+        }
         if let agentName = inWindow.compactMap(\.agentSessionName).first {
             return agentName
         }

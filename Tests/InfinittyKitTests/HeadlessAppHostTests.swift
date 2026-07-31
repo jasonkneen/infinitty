@@ -31,7 +31,8 @@ final class HeadlessAppHostTests: XCTestCase {
         XCTAssertEqual(
             Set(instance["capabilities"] as? [String] ?? []),
             Set([
-                "terminal", "terminal.run", "chat", "channel", "channel.panel",
+                "terminal", "terminal.run", "terminal.channel",
+                "chat", "channel", "channel.panel",
                 "events",
             ]))
 
@@ -697,6 +698,182 @@ final class HeadlessAppHostTests: XCTestCase {
                 as? [[String: Any]])
         XCTAssertEqual(panesAfterPanelClose.count, 1)
         XCTAssertEqual(panesAfterPanelClose.first?["id"] as? Int, 1)
+    }
+
+    func testTerminalAgentsRegisterAndShareDynamicChannelContext() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let host = try HeadlessAppHost(
+            instanceID: "terminal-agents",
+            socketPath: fixture.socketPath,
+            applicationSupportDirectory: fixture.support,
+            publishesCurrentLink: false)
+        try host.start(
+            initialWorkingDirectory: fixture.support.path,
+            launchInitialTerminal: true)
+        defer { host.stop() }
+
+        XCTAssertEqual(
+            AppSocketClient.request(
+                "new-tab \(fixture.support.path)",
+                socketPath: fixture.socketPath),
+            "2")
+
+        func panes() throws -> [[String: Any]] {
+            let text = try XCTUnwrap(AppSocketClient.request(
+                "list", socketPath: fixture.socketPath))
+            return try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(text.utf8))
+                    as? [[String: Any]])
+        }
+
+        func paneRequest(
+            _ command: String,
+            socket: String
+        ) throws -> [String: Any] {
+            let text = try XCTUnwrap(AppSocketClient.request(
+                command, socketPath: socket))
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(text.utf8))
+                    as? [String: Any],
+                "response=\(text)")
+            XCTAssertEqual(envelope["ok"] as? Bool, true, "response=\(text)")
+            return try XCTUnwrap(envelope["result"] as? [String: Any])
+        }
+
+        func encoded(_ payload: [String: Any]) throws -> String {
+            try XCTUnwrap(BrowserControlCodec.encode(payload))
+        }
+
+        let initial = try panes()
+        let adaSocket = try XCTUnwrap(initial[0]["socket"] as? String)
+        let turingSocket = try XCTUnwrap(initial[1]["socket"] as? String)
+
+        let beforeRegistration = try paneRequest(
+            "channel-context", socket: adaSocket)
+        XCTAssertEqual(beforeRegistration["connected"] as? Bool, false)
+        XCTAssertEqual(beforeRegistration["registered"] as? Bool, false)
+        XCTAssertEqual(
+            (beforeRegistration["endpoint"] as? [String: Any])?["id"]
+                as? String,
+            "terminal-agents/terminal:1")
+
+        let adaRegister = try encoded([
+            "v": 1,
+            "displayName": "Ada",
+            "role": "implementation lead",
+            "provider": "claude",
+            "modelID": "provider-owned-model",
+            "sessionID": "claude-session-1",
+            "capabilities": ["code", "review"],
+        ])
+        let turingRegister = try encoded([
+            "v": 1,
+            "displayName": "Turing",
+            "role": "test lead",
+            "provider": "amp",
+            "sessionID": "amp-session-1",
+            "capabilities": ["test"],
+        ])
+        let adaDisconnected = try paneRequest(
+            "channel-register \(adaRegister)", socket: adaSocket)
+        let turingDisconnected = try paneRequest(
+            "channel-register \(turingRegister)", socket: turingSocket)
+        XCTAssertEqual(adaDisconnected["registered"] as? Bool, true)
+        XCTAssertEqual(adaDisconnected["connected"] as? Bool, false)
+        XCTAssertEqual(turingDisconnected["registered"] as? Bool, true)
+
+        let registeredPanes = try panes()
+        XCTAssertEqual(registeredPanes.map { $0["title"] as? String }, ["Ada", "Turing"])
+        let adaEndpoint = try XCTUnwrap(
+            registeredPanes[0]["channelEndpoint"] as? [String: Any])
+        let turingEndpoint = try XCTUnwrap(
+            registeredPanes[1]["channelEndpoint"] as? [String: Any])
+        let adaParticipantID = try XCTUnwrap(
+            adaEndpoint["participantID"] as? String)
+        let turingParticipantID = try XCTUnwrap(
+            turingEndpoint["participantID"] as? String)
+        XCTAssertNotEqual(adaParticipantID, turingParticipantID)
+
+        let actor = CollaborationActor(
+            id: "human:test",
+            kind: .human,
+            displayName: "Test")
+        let link = CollaborationControlRequest(
+            op: .link,
+            actor: actor,
+            idempotencyKey: "terminal-agent-link",
+            source: CollaborationEndpoint(
+                id: "terminal-agents/terminal:1",
+                kind: .terminal,
+                label: "Ada",
+                participantID: adaParticipantID,
+                instanceID: "terminal-agents"),
+            target: CollaborationEndpoint(
+                id: "terminal-agents/terminal:2",
+                kind: .terminal,
+                label: "Turing",
+                participantID: turingParticipantID,
+                instanceID: "terminal-agents"))
+        let linkEncoded = try XCTUnwrap(CollaborationControlCodec.encode(link))
+        let linkedText = try XCTUnwrap(AppSocketClient.request(
+            "channel \(linkEncoded)", socketPath: fixture.socketPath))
+        XCTAssertTrue(linkedText.contains("\"ok\":true"), linkedText)
+
+        let adaContext = try paneRequest("channel-context", socket: adaSocket)
+        XCTAssertEqual(adaContext["connected"] as? Bool, true)
+        XCTAssertEqual(
+            (adaContext["channel"] as? [String: Any])?["name"] as? String,
+            "Channel 1")
+        XCTAssertEqual(
+            (adaContext["self"] as? [String: Any])?["displayName"] as? String,
+            "Ada")
+        XCTAssertEqual(
+            ((adaContext["peers"] as? [[String: Any]])?.first)?["displayName"]
+                as? String,
+            "Turing")
+        XCTAssertTrue(
+            (adaContext["modelContext"] as? String)?
+                .contains("Connection status: CONNECTED") == true)
+
+        let post = try encoded([
+            "v": 1,
+            "text": "Implementation is ready for verification.",
+            "authorID": "human:forged",
+            "channelID": "forged-channel",
+        ])
+        let posted = try paneRequest(
+            "channel-post \(post)", socket: adaSocket)
+        XCTAssertEqual(posted["posted"] as? Bool, true)
+
+        let turingContext = try paneRequest(
+            "channel-context", socket: turingSocket)
+        let messages = try XCTUnwrap(
+            turingContext["recentMessages"] as? [[String: Any]])
+        XCTAssertEqual(messages.last?["authorID"] as? String, adaParticipantID)
+        XCTAssertEqual(messages.last?["authorName"] as? String, "Ada")
+        XCTAssertEqual(
+            messages.last?["text"] as? String,
+            "Implementation is ready for verification.")
+
+        let beforeUnregisterRevision = try XCTUnwrap(
+            (turingContext["channel"] as? [String: Any])?["revision"] as? Int)
+        let unregistered = try paneRequest(
+            "channel-unregister", socket: adaSocket)
+        XCTAssertEqual(unregistered["registered"] as? Bool, false)
+        let afterUnregister = try paneRequest(
+            "channel-context", socket: turingSocket)
+        let afterUnregisterRevision = try XCTUnwrap(
+            (afterUnregister["channel"] as? [String: Any])?["revision"] as? Int)
+        XCTAssertEqual(afterUnregisterRevision, beforeUnregisterRevision + 1)
+
+        _ = try paneRequest("channel-unregister", socket: adaSocket)
+        let afterRepeatedUnregister = try paneRequest(
+            "channel-context", socket: turingSocket)
+        XCTAssertEqual(
+            (afterRepeatedUnregister["channel"] as? [String: Any])?["revision"]
+                as? Int,
+            afterUnregisterRevision)
     }
 
     func testHeadlessChannelJournalReplaysAfterHostRestart() throws {
