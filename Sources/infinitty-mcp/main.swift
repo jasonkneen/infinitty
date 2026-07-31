@@ -56,9 +56,8 @@ var appSocketPath: String {
     return "/tmp/infinitty-current.sock"
 }
 
-/// Connect to the app control socket. Returns -1 on failure.
-func openAppSocket() -> Int32 {
-    let path = appSocketPath
+/// Connect to one local Infinitty control socket. Returns -1 on failure.
+func openSocket(path: String) -> Int32 {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { return -1 }
 
@@ -89,10 +88,19 @@ func openAppSocket() -> Int32 {
     return fd
 }
 
-func infinittyRequest(_ line: String, timeout: Int32 = 130) -> String {
-    let fd = openAppSocket()
+func openAppSocket() -> Int32 {
+    openSocket(path: appSocketPath)
+}
+
+func socketRequest(
+    _ line: String,
+    path: String,
+    unavailableMessage: String,
+    timeout: Int32
+) -> String {
+    let fd = openSocket(path: path)
     guard fd >= 0 else {
-        return "error: infinitty is not running (no socket at \(appSocketPath))"
+        return "error: \(unavailableMessage) (no socket at \(path))"
     }
     defer { close(fd) }
     var readTimeout = timeval(tv_sec: time_t(timeout), tv_usec: 0)
@@ -137,6 +145,31 @@ func infinittyRequest(_ line: String, timeout: Int32 = 130) -> String {
     var text = String(decoding: response, as: UTF8.self)
     if text.hasSuffix("\n") { text.removeLast() }
     return text
+}
+
+func infinittyRequest(_ line: String, timeout: Int32 = 130) -> String {
+    socketRequest(
+        line,
+        path: appSocketPath,
+        unavailableMessage: "infinitty is not running",
+        timeout: timeout)
+}
+
+var paneSocketPath: String? {
+    let value = ProcessInfo.processInfo.environment["INFINITTY_SOCKET"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return value?.isEmpty == false ? value : nil
+}
+
+func infinittyPaneRequest(_ line: String, timeout: Int32 = 10) -> String {
+    guard let path = paneSocketPath else {
+        return "error: this MCP server is not running inside an Infinitty terminal pane"
+    }
+    return socketRequest(
+        line,
+        path: path,
+        unavailableMessage: "the owning Infinitty pane is unavailable",
+        timeout: timeout)
 }
 
 // MARK: - event stream
@@ -312,6 +345,163 @@ func channelCall(
     return infinittyRequest("channel \(encoded)")
 }
 
+func paneChannelCall(
+    _ operation: String,
+    arguments: [String: Any] = [:]
+) -> String {
+    if operation == "context"
+        || (operation == "unregister" && arguments.isEmpty)
+    {
+        return infinittyPaneRequest("channel-\(operation)")
+    }
+    var payload = arguments
+    payload["v"] = 1
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload)
+    else { return "error: could not encode terminal Channel request" }
+    guard data.count <= maximumChannelRequestBytes else {
+        return "error: terminal Channel request exceeds \(maximumChannelRequestBytes) bytes"
+    }
+    let encoded = data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return infinittyPaneRequest("channel-\(operation) \(encoded)")
+}
+
+private let knownTerminalAgents: [(match: String, provider: String, display: String)] = [
+    ("claude", "claude", "Claude"),
+    ("codex", "codex", "Codex"),
+    ("opencode", "opencode", "OpenCode"),
+    ("gemini", "gemini", "Gemini"),
+    ("amp", "amp", "Amp"),
+    ("grok", "grok", "Grok"),
+    ("aider", "aider", "Aider"),
+]
+
+func inferredTerminalAgent() -> (
+    provider: String,
+    display: String,
+    sessionID: String?
+)? {
+    let environment = ProcessInfo.processInfo.environment
+    let explicitProvider = environment["INFINITTY_AGENT_PROVIDER"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let parentPathCapacity = 4_096
+    var parentPath = [CChar](repeating: 0, count: parentPathCapacity)
+    let parentEvidence = proc_pidpath(
+        getppid(), &parentPath, UInt32(parentPathCapacity)) > 0
+        ? String(cString: parentPath).lowercased()
+        : ""
+    if let explicitProvider, !explicitProvider.isEmpty {
+        let known = knownTerminalAgents.first {
+            explicitProvider.lowercased().contains($0.match)
+        }
+        return (
+            explicitProvider,
+            known?.display ?? explicitProvider.capitalized,
+            environment["INFINITTY_AGENT_SESSION_ID"]
+                ?? (known?.provider == "codex"
+                    ? environment["CODEX_THREAD_ID"] : nil))
+    }
+    // AI_AGENT and the direct MCP parent describe the current client. Ambient
+    // provider variables may be inherited from the process that launched
+    // Infinitty, so consult those only as a fallback.
+    let declaredAgent = environment["AI_AGENT"]?.lowercased() ?? ""
+    let known = knownTerminalAgents.first {
+        declaredAgent.contains($0.match)
+    } ?? knownTerminalAgents.first {
+        parentEvidence.contains($0.match)
+    } ?? {
+        if environment["CLAUDE_CODE_ENTRYPOINT"] != nil {
+            return knownTerminalAgents.first { $0.match == "claude" }
+        }
+        if environment.keys.contains(where: { $0.hasPrefix("AMP_") }) {
+            return knownTerminalAgents.first { $0.match == "amp" }
+        }
+        if environment["CODEX_THREAD_ID"] != nil {
+            return knownTerminalAgents.first { $0.match == "codex" }
+        }
+        return nil
+    }()
+    guard let known else { return nil }
+    let sessionID = environment["INFINITTY_AGENT_SESSION_ID"]
+        ?? (known.provider == "codex"
+            ? environment["CODEX_THREAD_ID"] : nil)
+    return (known.provider, known.display, sessionID)
+}
+
+func terminalEndpointOrdinal(from response: String) -> String? {
+    guard let data = response.data(using: .utf8),
+          let envelope = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any],
+          let result = envelope["result"] as? [String: Any],
+          let endpoint = result["endpoint"] as? [String: Any],
+          let endpointID = endpoint["id"] as? String,
+          let suffix = endpointID.split(separator: ":").last,
+          Int(suffix) != nil
+    else { return nil }
+    return String(suffix)
+}
+
+let terminalAgentLifetimeToken = UUID().uuidString.lowercased()
+var terminalAgentHasManagedRegistration = false
+
+func managedTerminalRegistration(
+    _ arguments: [String: Any]
+) -> String {
+    var payload = arguments
+    payload["managedLifetime"] = true
+    payload["lifetimeToken"] = terminalAgentLifetimeToken
+    let response = paneChannelCall("register", arguments: payload)
+    if !isToolError(response) {
+        terminalAgentHasManagedRegistration = true
+    }
+    return response
+}
+
+func managedTerminalUnregistration() -> String {
+    let response = paneChannelCall(
+        "unregister",
+        arguments: ["lifetimeToken": terminalAgentLifetimeToken])
+    if !isToolError(response) {
+        terminalAgentHasManagedRegistration = false
+    }
+    return response
+}
+
+func bootstrapTerminalChannel() -> String? {
+    guard paneSocketPath != nil else { return nil }
+    let current = paneChannelCall("context")
+    guard let agent = inferredTerminalAgent() else { return current }
+    let environment = ProcessInfo.processInfo.environment
+    let ordinal = terminalEndpointOrdinal(from: current)
+    let explicitName = environment["INFINITTY_AGENT_NAME"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let generatedName = ordinal.map { "\(agent.display) \($0)" }
+        ?? "\(agent.display) Agent"
+    let name = explicitName?.isEmpty == false
+        ? explicitName!
+        : generatedName
+    var registration: [String: Any] = [
+        "displayName": name,
+        "role": environment["INFINITTY_AGENT_ROLE"] ?? "terminal agent",
+        "provider": agent.provider,
+        "capabilities": ["channel.receive", "channel.send"],
+    ]
+    if let sessionID = agent.sessionID { registration["sessionID"] = sessionID }
+    if let modelID = environment["INFINITTY_AGENT_MODEL"] {
+        registration["modelID"] = modelID
+    }
+    return managedTerminalRegistration(registration)
+}
+
+func terminalChannelInstructions() -> String {
+    """
+    This agent is running inside an Infinitty terminal pane. At the start of every user turn, call infinitty_channel_self with action=context before making claims about room membership, identity, peers, responsibilities, or messages. If connected, use infinitty_channel_post for messages intended for Channel peers. Pane identity and message authorship are bound by Infinitty; never invent or override them.
+    """
+}
+
 private let maximumAuditRequestBytes = 16_000
 
 func auditCall(
@@ -475,6 +665,77 @@ let tools: [Tool] = [
             + "participants and roles, responsibility claims, plans, and recent messages.",
         schema: ["type": "object", "properties": [:]],
         invoke: { _ in channelCall("snapshot") }
+    ),
+    Tool(
+        name: "infinitty_channel_self",
+        description: "Read or register the agent identity and live Channel bound to this "
+            + "terminal pane. Call action=context at the start of every user turn so room "
+            + "name, your unique participant name, peers, roles, plan, and recent messages "
+            + "stay current. The pane socket determines the endpoint; callers cannot select "
+            + "or impersonate another pane.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "action": [
+                    "type": "string",
+                    "enum": ["context", "register", "unregister"],
+                ] as [String: Any],
+                "displayName": ["type": "string"],
+                "role": ["type": "string"],
+                "provider": [
+                    "type": "string",
+                    "description": "Opaque provider identifier such as claude, codex, or amp.",
+                ],
+                "modelID": [
+                    "type": "string",
+                    "description": "Opaque provider-owned model identifier.",
+                ],
+                "sessionID": ["type": "string"],
+                "capabilities": [
+                    "type": "array",
+                    "items": ["type": "string"],
+                ],
+            ],
+        ],
+        invoke: { args in
+            let action = args["action"] as? String ?? "context"
+            switch action {
+            case "context":
+                return paneChannelCall(action)
+            case "unregister":
+                return managedTerminalUnregistration()
+            case "register":
+                var payload = args
+                payload.removeValue(forKey: "action")
+                return managedTerminalRegistration(payload)
+            default:
+                return "error: action must be context, register, or unregister"
+            }
+        }
+    ),
+    Tool(
+        name: "infinitty_channel_post",
+        description: "Post a message to the live Channel bound to this terminal pane. "
+            + "Registration is required. Infinitty derives the Channel and author from the "
+            + "owning pane socket; supplied actor, author, endpoint, or Channel IDs are never "
+            + "accepted.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "text": ["type": "string"],
+                "threadID": ["type": "string"],
+            ],
+            "required": ["text"],
+        ],
+        invoke: { args in
+            var payload: [String: Any] = [
+                "text": args["text"] as? String ?? "",
+            ]
+            if let threadID = args["threadID"] as? String {
+                payload["threadID"] = threadID
+            }
+            return paneChannelCall("post", arguments: payload)
+        }
     ),
     Tool(
         name: "infinitty_audit_query",
@@ -1447,6 +1708,11 @@ func isToolError(_ text: String) -> Bool {
     return !ok
 }
 
+_ = bootstrapTerminalChannel()
+let terminalBootstrapInstructions = paneSocketPath.map { _ in
+    terminalChannelInstructions()
+}
+
 startEventSubscriber()
 
 while let line = readLine(strippingNewline: true) {
@@ -1459,12 +1725,16 @@ while let line = readLine(strippingNewline: true) {
     switch method {
     case "initialize":
         guard let id else { break }
-        reply(id: id, result: [
+        var result: [String: Any] = [
             "protocolVersion": (msg["params"] as? [String: Any])?["protocolVersion"] as? String
                 ?? "2024-11-05",
             "capabilities": ["tools": [:] as [String: Any]],
             "serverInfo": ["name": "infinitty", "version": "0.1"],
-        ])
+        ]
+        if let terminalBootstrapInstructions {
+            result["instructions"] = terminalBootstrapInstructions
+        }
+        reply(id: id, result: result)
     case "notifications/initialized", "notifications/cancelled":
         break
     case "ping":
@@ -1493,4 +1763,8 @@ while let line = readLine(strippingNewline: true) {
     default:
         if let id { replyError(id: id, code: -32601, message: "method not found: \(method)") }
     }
+}
+
+if terminalAgentHasManagedRegistration {
+    _ = managedTerminalUnregistration()
 }

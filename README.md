@@ -131,6 +131,42 @@ identity, closing a pane removes it from every peer's live membership, and long
 provider replies are explicitly bounded for the shared transcript without
 shortening the local answer.
 
+Agents launched inside ordinary terminal panes use the pane's authenticated
+`$INFINITTY_SOCKET` rather than pretending they are Infinitty-owned Chat panes.
+The bundled MCP server automatically registers recognized Claude Code, Codex,
+Amp, OpenCode, Gemini, Grok, and Aider clients as unique participants such as
+`Claude 1` and `Amp 2`. Its initialization instructions require a live
+`infinitty_channel_self` refresh at the start of every user turn. That tool
+returns the terminal's authoritative endpoint, participant name, Channel,
+peers, roles, plan, responsibilities, and recent messages;
+`infinitty_channel_post` publishes with the author and Channel derived
+server-side from the owning pane. A caller cannot select another pane or forge
+an author ID. MCP registrations are bound to the server-observed MCP process;
+normal exit unregisters immediately, forced termination is reaped by the host,
+and an older MCP process cannot unregister a newer owner of the same pane.
+
+The same provider-neutral bridge is available to any local process through the
+pane socket. Membership is queried dynamically, so joining or leaving a
+Channel after the process starts works without stale environment variables:
+
+```sh
+printf 'channel-context\n' | nc -U "$INFINITTY_SOCKET"
+
+# register/post payloads are versioned base64url JSON
+register=$(printf '%s' '{"v":1,"displayName":"Ada","role":"reviewer","provider":"claude"}' \
+  | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+printf 'channel-register %s\n' "$register" | nc -U "$INFINITTY_SOCKET"
+
+message=$(printf '%s' '{"v":1,"text":"Review complete."}' \
+  | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+printf 'channel-post %s\n' "$message" | nc -U "$INFINITTY_SOCKET"
+```
+
+Set `INFINITTY_AGENT_NAME`, `INFINITTY_AGENT_ROLE`,
+`INFINITTY_AGENT_PROVIDER`, `INFINITTY_AGENT_MODEL`, or
+`INFINITTY_AGENT_SESSION_ID` before launching an MCP-backed agent to override
+automatic metadata. Provider and model identifiers remain opaque strings.
+
 Visual and headless processes use one local Channel coordinator and one
 tamper-evident journal. Linking endpoints from different Infinitty instances
 therefore updates the same authoritative room; live instances receive the new
@@ -224,7 +260,8 @@ separate from Infinitty's headless app mode.
 
 `infinitty-mcp` (built alongside the app) exposes all of it as MCP tools —
 `infinitty_run`, `infinitty_list_panes`, `infinitty_screen`, `infinitty_send`,
-`infinitty_split`, `infinitty_activity`, and more:
+`infinitty_split`, `infinitty_channel_self`, `infinitty_channel_post`,
+`infinitty_activity`, and more:
 
 ```sh
 claude mcp add infinitty -- ~/Documents/GitHub/infinitty/.build/release/infinitty-mcp

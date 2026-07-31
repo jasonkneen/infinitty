@@ -1,6 +1,6 @@
 ---
 name: infinitty-control
-description: Use when controlling infinitty, driving/automating/testing terminal or TUI apps running inside it (vim, htop, REPLs), reading its screen or scrollback, sending keystrokes, publishing agent todo lists or surfaces, or checking a command's output/exit code — via the infinitty_* MCP tools or the Unix control sockets ($INFINITTY_SOCKET, /tmp/infinitty-*.sock).
+description: Use when controlling infinitty, reading or posting to the current Channel, driving/automating/testing terminal or TUI apps running inside it (vim, htop, REPLs), reading its screen or scrollback, sending keystrokes, publishing agent todo lists or surfaces, or checking a command's output/exit code — via the infinitty_* MCP tools or the Unix control sockets ($INFINITTY_SOCKET, /tmp/infinitty-*.sock).
 ---
 
 # infinitty Control Socket
@@ -16,6 +16,19 @@ Same engine, three front doors — use the highest one available:
 3. **Pane socket** — `$INFINITTY_SOCKET`, the id-less per-pane protocol below. Always available from inside a pane's shell; the fallback when MCP isn't loaded.
 
 MCP tools map 1:1 onto socket commands (`infinitty_todos` ⇄ `todos`, `infinitty_send` ⇄ `send`/`send-line`, `infinitty_run` ⇄ `run`), so every recipe below works through either door. The wait-for-prompt rule applies to all three.
+
+When running as an agent inside an Infinitty terminal, call
+`infinitty_channel_self` with `action=context` at the start of every user turn.
+Its result is authoritative for whether this pane is connected, your unique
+participant identity, Channel name, peers, roles, work, and recent messages.
+Use `infinitty_channel_post` for messages intended for those peers. Never infer
+membership from environment variables or supply an author/Channel ID: the pane
+socket binds both server-side.
+
+MCP-owned registration lifetime is process-bound. Forced client termination is
+reaped by the host, and cleanup from an older MCP process cannot clear a newer
+registration in the same pane. Raw socket clients own their explicit
+`channel-unregister` lifecycle.
 
 ## Socket discovery
 
@@ -61,6 +74,10 @@ def infinitty(cmd, path):
 | `send TEXT` | types TEXT (no return); everything after the first space, verbatim |
 | `send-line TEXT` | types TEXT then return (CR `0x0D`) |
 | `todos [json]` | set (or read, with no argument) the pane's agent todo list shown behind the pane-header checklist icon; array of strings or `{content, status: pending\|in_progress\|completed}` / `{text, done}` objects; `[]` clears |
+| `channel-context` | versioned JSON with live connected status, endpoint, registered identity, Channel, peers, work, and recent messages |
+| `channel-register BASE64URL_JSON` | register this pane's agent name, role, provider, model/session metadata, and capabilities |
+| `channel-post BASE64URL_JSON` | post `{v:1,text,threadID?}` as this pane's server-bound participant |
+| `channel-unregister` | release the terminal agent identity while leaving the pane itself connected |
 | `reload` | re-applies the config file |
 | `ping` | `pong` — liveness check |
 
