@@ -16,6 +16,16 @@ struct CollaborationActor: Codable, Equatable, Sendable {
     let displayName: String
 }
 
+/// An out-of-band assertion from trusted host UI. It is intentionally not
+/// Codable and cannot be supplied in a socket/MCP request alongside `actor`.
+struct CollaborationHumanDecisionAuthority: Equatable, Sendable {
+    fileprivate let actorID: String
+
+    static func confirmed(actorID: String) -> CollaborationHumanDecisionAuthority {
+        CollaborationHumanDecisionAuthority(actorID: actorID)
+    }
+}
+
 struct CollaborationEndpoint: Codable, Equatable, Sendable {
     /// Extensible rather than an enum so new pane and remote endpoint types do
     /// not require a switch edit in the room kernel.
@@ -391,9 +401,266 @@ struct CollaborationChannelState: Codable, Equatable, Sendable {
     var messages: [CollaborationMessage]
 }
 
+enum CollaborationAgentRuntime: String, Codable, Sendable {
+    case local
+    case cloud
+}
+
+enum CollaborationWorkspaceStrategy: String, Codable, Sendable {
+    case sharedCheckout = "shared_checkout"
+    case worktrees
+}
+
+enum CollaborationRoomPresentation: String, Codable, Sendable {
+    case visual
+    case headless
+}
+
+struct CollaborationAgentSpec: Codable, Equatable, Sendable {
+    let id: String
+    let displayName: String
+    let role: String
+    let runtime: CollaborationAgentRuntime
+    let provider: String
+    let modelID: String?
+    let responsibilityScopes: [String]
+    let capabilities: [String]
+
+    init(
+        id: String,
+        displayName: String,
+        role: String,
+        runtime: CollaborationAgentRuntime,
+        provider: String,
+        modelID: String? = nil,
+        responsibilityScopes: [String] = [],
+        capabilities: [String] = []
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.role = role
+        self.runtime = runtime
+        self.provider = provider
+        self.modelID = modelID
+        self.responsibilityScopes = responsibilityScopes.sorted()
+        self.capabilities = capabilities.sorted()
+    }
+
+    fileprivate var canonicalized: CollaborationAgentSpec {
+        CollaborationAgentSpec(
+            id: id,
+            displayName: displayName,
+            role: role,
+            runtime: runtime,
+            provider: provider,
+            modelID: modelID,
+            responsibilityScopes: responsibilityScopes,
+            capabilities: capabilities)
+    }
+}
+
+struct CollaborationRoomProposalSpec: Codable, Equatable, Sendable {
+    let id: String
+    let channelID: String
+    let roomName: String
+    let objective: String
+    let workspaceRoot: String
+    let agents: [CollaborationAgentSpec]
+    let workspaceStrategy: CollaborationWorkspaceStrategy
+    let presentation: CollaborationRoomPresentation
+    let targetInstanceID: String?
+    let requestedCapabilities: [String]
+    let expiresAt: Date
+
+    init(
+        id: String,
+        channelID: String,
+        roomName: String,
+        objective: String,
+        workspaceRoot: String,
+        agents: [CollaborationAgentSpec],
+        workspaceStrategy: CollaborationWorkspaceStrategy,
+        presentation: CollaborationRoomPresentation = .visual,
+        targetInstanceID: String? = nil,
+        requestedCapabilities: [String] = [],
+        expiresAt: Date
+    ) {
+        self.id = id
+        self.channelID = channelID
+        self.roomName = roomName
+        self.objective = objective
+        self.workspaceRoot = workspaceRoot
+        self.agents = agents.map(\.canonicalized).sorted { $0.id < $1.id }
+        self.workspaceStrategy = workspaceStrategy
+        self.presentation = presentation
+        self.targetInstanceID = targetInstanceID
+        self.requestedCapabilities = requestedCapabilities.sorted()
+        self.expiresAt = expiresAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case channelID
+        case roomName
+        case objective
+        case workspaceRoot
+        case agents
+        case workspaceStrategy
+        case presentation
+        case targetInstanceID
+        case requestedCapabilities
+        case expiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            channelID: try container.decode(String.self, forKey: .channelID),
+            roomName: try container.decode(String.self, forKey: .roomName),
+            objective: try container.decode(String.self, forKey: .objective),
+            workspaceRoot: try container.decode(String.self, forKey: .workspaceRoot),
+            agents: try container.decode(
+                [CollaborationAgentSpec].self, forKey: .agents),
+            workspaceStrategy: try container.decode(
+                CollaborationWorkspaceStrategy.self,
+                forKey: .workspaceStrategy),
+            presentation: try container.decodeIfPresent(
+                CollaborationRoomPresentation.self,
+                forKey: .presentation) ?? .visual,
+            targetInstanceID: try container.decodeIfPresent(
+                String.self, forKey: .targetInstanceID),
+            requestedCapabilities: try container.decodeIfPresent(
+                [String].self, forKey: .requestedCapabilities) ?? [],
+            expiresAt: try container.decode(Date.self, forKey: .expiresAt))
+    }
+
+    func canonicalDigest() throws -> String {
+        let value = canonicalized
+        let milliseconds = (value.expiresAt.timeIntervalSince1970 * 1_000)
+            .rounded(.towardZero)
+        guard milliseconds.isFinite,
+              milliseconds >= Double(Int64.min),
+              milliseconds <= Double(Int64.max)
+        else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal expiry", reason: "cannot be canonicalized")
+        }
+        var canonical = Data()
+        func append(_ string: String) {
+            let bytes = Data(string.utf8)
+            canonical.append(Data("\(bytes.count):".utf8))
+            canonical.append(bytes)
+        }
+        func append(_ strings: [String]) {
+            append(String(strings.count))
+            strings.forEach { append($0) }
+        }
+
+        append("infinitty-room-proposal-v1")
+        append(value.id)
+        append(value.channelID)
+        append(value.roomName)
+        append(value.objective)
+        append(value.workspaceRoot)
+        append(value.workspaceStrategy.rawValue)
+        append(value.presentation.rawValue)
+        if let targetInstanceID = value.targetInstanceID {
+            append("1")
+            append(targetInstanceID)
+        } else {
+            append("0")
+        }
+        append(value.requestedCapabilities)
+        append(String(value.agents.count))
+        for agent in value.agents {
+            append(agent.id)
+            append(agent.displayName)
+            append(agent.role)
+            append(agent.runtime.rawValue)
+            append(agent.provider)
+            if let modelID = agent.modelID {
+                append("1")
+                append(modelID)
+            } else {
+                append("0")
+            }
+            append(agent.responsibilityScopes)
+            append(agent.capabilities)
+        }
+        append(String(Int64(milliseconds)))
+        return SHA256.hash(data: canonical)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    fileprivate var canonicalized: CollaborationRoomProposalSpec {
+        CollaborationRoomProposalSpec(
+            id: id,
+            channelID: channelID,
+            roomName: roomName,
+            objective: objective,
+            workspaceRoot: workspaceRoot,
+            agents: agents,
+            workspaceStrategy: workspaceStrategy,
+            presentation: presentation,
+            targetInstanceID: targetInstanceID,
+            requestedCapabilities: requestedCapabilities,
+            expiresAt: expiresAt)
+    }
+}
+
+enum CollaborationProposalState: String, Codable, Sendable {
+    case pending
+    case approved
+    case denied
+    case cancelled
+    case provisioning
+    case running
+    case failed
+    case completed
+}
+
+struct CollaborationRoomProposal: Codable, Equatable, Sendable {
+    let spec: CollaborationRoomProposalSpec
+    let digest: String
+    let state: CollaborationProposalState
+    let createdAt: Date
+    let updatedAt: Date
+    let decidedByActorID: String?
+    let decidedAt: Date?
+    let statusMessage: String?
+}
+
 struct CollaborationSnapshot: Codable, Equatable, Sendable {
     let revision: Int
     let channels: [CollaborationChannelState]
+    let proposals: [CollaborationRoomProposal]
+
+    init(
+        revision: Int,
+        channels: [CollaborationChannelState],
+        proposals: [CollaborationRoomProposal] = []
+    ) {
+        self.revision = revision
+        self.channels = channels
+        self.proposals = proposals
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case revision
+        case channels
+        case proposals
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        revision = try container.decode(Int.self, forKey: .revision)
+        channels = try container.decode(
+            [CollaborationChannelState].self, forKey: .channels)
+        proposals = try container.decodeIfPresent(
+            [CollaborationRoomProposal].self, forKey: .proposals) ?? []
+    }
 }
 
 enum CollaborationRoomCommand: Codable, Equatable, Sendable {
@@ -417,6 +684,14 @@ enum CollaborationRoomCommand: Codable, Equatable, Sendable {
     case releaseResponsibility(channelID: String, claimID: String)
     case replacePlan(channelID: String, items: [CollaborationPlanItem])
     case postMessage(channelID: String, message: CollaborationMessage)
+    case prepareProposal(CollaborationRoomProposalSpec)
+    case approveProposal(proposalID: String, digest: String)
+    case denyProposal(proposalID: String, digest: String, reason: String?)
+    case cancelProposal(proposalID: String, digest: String, reason: String?)
+    case startProvisioning(proposalID: String, digest: String)
+    case markProposalRunning(proposalID: String, digest: String)
+    case markProposalFailed(proposalID: String, digest: String, reason: String)
+    case completeProposal(proposalID: String, digest: String, summary: String?)
 }
 
 /// Versioned structured transport used by the app socket and MCP adapter.
@@ -436,6 +711,14 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
         case release
         case replacePlan = "replace_plan"
         case postMessage = "post_message"
+        case prepareProposal = "prepare_proposal"
+        case approveProposal = "approve_proposal"
+        case denyProposal = "deny_proposal"
+        case cancelProposal = "cancel_proposal"
+        case startProvisioning = "start_provisioning"
+        case markProposalRunning = "mark_proposal_running"
+        case markProposalFailed = "mark_proposal_failed"
+        case completeProposal = "complete_proposal"
     }
 
     let v: Int
@@ -457,6 +740,10 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
     var claimID: String?
     var plan: [CollaborationPlanItem]?
     var message: CollaborationMessage?
+    var proposal: CollaborationRoomProposalSpec?
+    var proposalID: String?
+    var proposalDigest: String?
+    var reason: String?
 
     init(
         v: Int = 1,
@@ -477,7 +764,11 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
         claim: CollaborationResponsibility? = nil,
         claimID: String? = nil,
         plan: [CollaborationPlanItem]? = nil,
-        message: CollaborationMessage? = nil
+        message: CollaborationMessage? = nil,
+        proposal: CollaborationRoomProposalSpec? = nil,
+        proposalID: String? = nil,
+        proposalDigest: String? = nil,
+        reason: String? = nil
     ) {
         self.v = v
         self.op = op
@@ -498,6 +789,10 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
         self.claimID = claimID
         self.plan = plan
         self.message = message
+        self.proposal = proposal
+        self.proposalID = proposalID
+        self.proposalDigest = proposalDigest
+        self.reason = reason
     }
 
     func roomCommand() throws -> CollaborationRoomCommand? {
@@ -555,6 +850,40 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
             return .postMessage(
                 channelID: try require(channelID, "channelID"),
                 message: try require(message, "message"))
+        case .prepareProposal:
+            return .prepareProposal(try require(proposal, "proposal"))
+        case .approveProposal:
+            return .approveProposal(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(proposalDigest, "proposalDigest"))
+        case .denyProposal:
+            return .denyProposal(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(proposalDigest, "proposalDigest"),
+                reason: reason)
+        case .cancelProposal:
+            return .cancelProposal(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(proposalDigest, "proposalDigest"),
+                reason: reason)
+        case .startProvisioning:
+            return .startProvisioning(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(proposalDigest, "proposalDigest"))
+        case .markProposalRunning:
+            return .markProposalRunning(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(proposalDigest, "proposalDigest"))
+        case .markProposalFailed:
+            return .markProposalFailed(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(proposalDigest, "proposalDigest"),
+                reason: try require(reason, "reason"))
+        case .completeProposal:
+            return .completeProposal(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(proposalDigest, "proposalDigest"),
+                summary: reason)
         }
     }
 }
@@ -625,7 +954,8 @@ enum CollaborationControlCodec {
     /// envelopes must not drift between app hosts.
     static func execute(
         _ encoded: String,
-        in room: CollaborationRoom
+        in room: CollaborationRoom,
+        humanDecisionAuthority: CollaborationHumanDecisionAuthority? = nil
     ) -> (response: String, snapshot: CollaborationSnapshot?) {
         let request: CollaborationControlRequest
         switch decode(encoded) {
@@ -665,7 +995,8 @@ enum CollaborationControlCodec {
                 by: actor,
                 causationID: request.causationID,
                 idempotencyKey: request.idempotencyKey,
-                expectedRevision: request.expectedRevision)
+                expectedRevision: request.expectedRevision,
+                humanDecisionAuthority: humanDecisionAuthority)
             return (response(snapshot: snapshot), snapshot)
         } catch {
             return (
@@ -713,6 +1044,15 @@ enum CollaborationRoomError: Error, Equatable, CustomStringConvertible {
     case staleRevision(expected: Int, actual: Int)
     case idempotencyMismatch(String)
     case auditIntegrityFailure(sequence: Int)
+    case proposalNotFound(String)
+    case proposalDigestMismatch(String)
+    case proposalExpired(String)
+    case proposalDecisionRequiresHuman(String)
+    case proposalDecisionNotAuthorized(String)
+    case invalidProposalTransition(
+        proposalID: String,
+        from: CollaborationProposalState,
+        to: CollaborationProposalState)
 
     var description: String {
         switch self {
@@ -736,6 +1076,18 @@ enum CollaborationRoomError: Error, Equatable, CustomStringConvertible {
             return "idempotency key \(key) was already used for a different command"
         case let .auditIntegrityFailure(sequence):
             return "audit integrity check failed at sequence \(sequence)"
+        case let .proposalNotFound(id):
+            return "proposal not found: \(id)"
+        case let .proposalDigestMismatch(id):
+            return "proposal \(id) does not match the approved digest"
+        case let .proposalExpired(id):
+            return "proposal \(id) has expired"
+        case let .proposalDecisionRequiresHuman(action):
+            return "proposal \(action) requires a human actor"
+        case let .proposalDecisionNotAuthorized(action):
+            return "proposal \(action) requires trusted host confirmation"
+        case let .invalidProposalTransition(id, from, to):
+            return "proposal \(id) cannot transition from \(from.rawValue) to \(to.rawValue)"
         }
     }
 }
@@ -763,6 +1115,11 @@ enum CollaborationAuditBody: Codable, Equatable, Sendable {
     case responsibilityReleased(channelID: String, claimID: String)
     case planReplaced(channelID: String, items: [CollaborationPlanItem])
     case messagePosted(channelID: String, message: CollaborationMessage)
+    case proposalPrepared(CollaborationRoomProposal)
+    case proposalTransitioned(
+        proposalID: String,
+        from: CollaborationProposalState,
+        proposal: CollaborationRoomProposal)
     case commandNoOp(channelID: String, reason: String)
 }
 
@@ -994,6 +1351,9 @@ private enum CollaborationJSON {
 /// are adapters around this seam rather than alternate owners of room state.
 final class CollaborationRoom {
     static let maximumRetainedMessages = 500
+    static let maximumEncodedProposalBytes = 24 * 1_024
+    static let maximumEncodedProposalSnapshotBytes = 32 * 1_024
+    static let maximumRetainedProposals = 16
 
     typealias EventSink = (CollaborationAuditRecord) -> Void
 
@@ -1010,8 +1370,11 @@ final class CollaborationRoom {
     private let eventSink: EventSink?
 
     private var channels: [String: CollaborationChannelState] = [:]
+    private var proposals: [String: CollaborationRoomProposal] = [:]
+    private var knownProposalIDs = Set<String>()
     private var endpointChannels: [String: String] = [:]
     private var idempotencyFingerprints: [String: String] = [:]
+    private var idempotencyActors: [String: CollaborationActor] = [:]
     /// Compact exactly-once receipt index. Keeping a full room snapshot for
     /// every unique message key makes memory grow as O(events × room state).
     /// Store only the committed sequence; the uncommon delayed retry rebuilds
@@ -1042,12 +1405,13 @@ final class CollaborationRoom {
             else {
                 throw CollaborationRoomError.auditIntegrityFailure(sequence: expectedSequence)
             }
-            replay(record.body)
+            try replay(record)
             revision = record.sequence
             previousHash = record.hash
             if let key = record.idempotencyKey {
                 idempotencyFingerprints[key] = record.commandFingerprint
                 idempotencyRevisions[key] = record.sequence
+                idempotencyActors[key] = record.actor
             }
         }
     }
@@ -1058,17 +1422,27 @@ final class CollaborationRoom {
         by actor: CollaborationActor,
         causationID: String? = nil,
         idempotencyKey: String? = nil,
-        expectedRevision: Int? = nil
+        expectedRevision: Int? = nil,
+        humanDecisionAuthority: CollaborationHumanDecisionAuthority? = nil
     ) throws -> CollaborationSnapshot {
         lock.lock()
         var committed: CollaborationAuditRecord?
         do {
+            let actor = try validated(actor: actor)
+            try authorize(
+                command,
+                actor: actor,
+                humanDecisionAuthority: humanDecisionAuthority)
             let fingerprint = try commandFingerprint(command)
             let validatedKey = try idempotencyKey.map {
                 try validatedID($0, field: "idempotency key")
             }
             if let validatedKey, let previousFingerprint = idempotencyFingerprints[validatedKey] {
-                guard previousFingerprint == fingerprint else {
+                let originalActor = idempotencyActors[validatedKey]
+                guard previousFingerprint == fingerprint,
+                      originalActor?.id == actor.id,
+                      originalActor?.kind == actor.kind
+                else {
                     throw CollaborationRoomError.idempotencyMismatch(validatedKey)
                 }
                 let result: CollaborationSnapshot
@@ -1094,10 +1468,11 @@ final class CollaborationRoom {
                 idempotencyKey: validatedKey,
                 commandFingerprint: fingerprint)
             try store.append(event)
-            replay(event.body)
+            try replay(event)
             if let validatedKey {
                 idempotencyFingerprints[validatedKey] = fingerprint
                 idempotencyRevisions[validatedKey] = event.sequence
+                idempotencyActors[validatedKey] = actor
             }
             revision = event.sequence
             previousHash = event.hash
@@ -1117,7 +1492,12 @@ final class CollaborationRoom {
         defer { lock.unlock() }
         if let channelID {
             let values = channels[channelID].map { [$0] } ?? []
-            return CollaborationSnapshot(revision: revision, channels: values)
+            return CollaborationSnapshot(
+                revision: revision,
+                channels: values,
+                proposals: proposals.values
+                    .filter { $0.spec.channelID == channelID }
+                    .sorted { $0.spec.id < $1.spec.id })
         }
         return snapshotLocked()
     }
@@ -1135,6 +1515,10 @@ final class CollaborationRoom {
             channels: channels.values.sorted {
                 if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
                 return $0.id < $1.id
+            },
+            proposals: proposals.values.sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                return $0.spec.id < $1.spec.id
             })
     }
 
@@ -1161,6 +1545,7 @@ final class CollaborationRoom {
         commandFingerprint: String
     ) throws -> CollaborationAuditRecord {
         let timestamp = now()
+        let actor = try validated(actor: actor)
         let channelID: String
         let body: CollaborationAuditBody
 
@@ -1301,6 +1686,92 @@ final class CollaborationRoom {
             let message = try validated(message: message)
             channelID = id
             body = .messagePosted(channelID: id, message: message)
+
+        case let .prepareProposal(rawSpec):
+            let spec = try validated(proposal: rawSpec, timestamp: timestamp)
+            guard !knownProposalIDs.contains(spec.id) else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "proposal id", reason: "already exists")
+            }
+            let proposal = CollaborationRoomProposal(
+                spec: spec,
+                digest: try spec.canonicalDigest(),
+                state: .pending,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                decidedByActorID: nil,
+                decidedAt: nil,
+                statusMessage: nil)
+            _ = try prospectiveProposals(adding: proposal)
+            channelID = spec.channelID
+            body = .proposalPrepared(proposal)
+
+        case let .approveProposal(proposalID, digest):
+            (channelID, body) = try proposalTransitionEvent(
+                proposalID: proposalID,
+                digest: digest,
+                to: .approved,
+                statusMessage: nil,
+                actor: actor,
+                timestamp: timestamp,
+                humanAction: "approve",
+                requiresUnexpiredProposal: true)
+
+        case let .denyProposal(proposalID, digest, reason):
+            (channelID, body) = try proposalTransitionEvent(
+                proposalID: proposalID,
+                digest: digest,
+                to: .denied,
+                statusMessage: reason,
+                actor: actor,
+                timestamp: timestamp,
+                humanAction: "deny",
+                requiresUnexpiredProposal: true)
+
+        case let .cancelProposal(proposalID, digest, reason):
+            (channelID, body) = try proposalTransitionEvent(
+                proposalID: proposalID,
+                digest: digest,
+                to: .cancelled,
+                statusMessage: reason,
+                actor: actor,
+                timestamp: timestamp)
+
+        case let .startProvisioning(proposalID, digest):
+            (channelID, body) = try proposalTransitionEvent(
+                proposalID: proposalID,
+                digest: digest,
+                to: .provisioning,
+                statusMessage: nil,
+                actor: actor,
+                timestamp: timestamp)
+
+        case let .markProposalRunning(proposalID, digest):
+            (channelID, body) = try proposalTransitionEvent(
+                proposalID: proposalID,
+                digest: digest,
+                to: .running,
+                statusMessage: nil,
+                actor: actor,
+                timestamp: timestamp)
+
+        case let .markProposalFailed(proposalID, digest, reason):
+            (channelID, body) = try proposalTransitionEvent(
+                proposalID: proposalID,
+                digest: digest,
+                to: .failed,
+                statusMessage: reason,
+                actor: actor,
+                timestamp: timestamp)
+
+        case let .completeProposal(proposalID, digest, summary):
+            (channelID, body) = try proposalTransitionEvent(
+                proposalID: proposalID,
+                digest: digest,
+                to: .completed,
+                statusMessage: summary,
+                actor: actor,
+                timestamp: timestamp)
         }
 
         return try makeRecord(
@@ -1309,6 +1780,88 @@ final class CollaborationRoom {
             idempotencyKey: idempotencyKey,
             commandFingerprint: commandFingerprint,
             timestamp: timestamp)
+    }
+
+    private func proposalTransitionEvent(
+        proposalID rawProposalID: String,
+        digest: String,
+        to target: CollaborationProposalState,
+        statusMessage: String?,
+        actor: CollaborationActor,
+        timestamp: Date,
+        humanAction: String? = nil,
+        requiresUnexpiredProposal: Bool = false
+    ) throws -> (String, CollaborationAuditBody) {
+        if let humanAction, actor.kind != .human {
+            throw CollaborationRoomError.proposalDecisionRequiresHuman(humanAction)
+        }
+        let proposalID = try validatedID(rawProposalID, field: "proposal id")
+        guard let current = proposals[proposalID] else {
+            throw CollaborationRoomError.proposalNotFound(proposalID)
+        }
+        guard current.digest == digest else {
+            throw CollaborationRoomError.proposalDigestMismatch(proposalID)
+        }
+        guard timestamp >= current.updatedAt else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal timestamp",
+                reason: "cannot precede the current proposal state")
+        }
+        if requiresUnexpiredProposal, timestamp > current.spec.expiresAt {
+            throw CollaborationRoomError.proposalExpired(proposalID)
+        }
+        guard Self.canTransition(from: current.state, to: target) else {
+            throw CollaborationRoomError.invalidProposalTransition(
+                proposalID: proposalID, from: current.state, to: target)
+        }
+        let status = try statusMessage.map {
+            try bounded($0, field: "proposal status", maximum: 512)
+        }
+        let isDecision = target == .approved || target == .denied
+        let updated = CollaborationRoomProposal(
+            spec: current.spec,
+            digest: current.digest,
+            state: target,
+            createdAt: current.createdAt,
+            updatedAt: timestamp,
+            decidedByActorID: isDecision ? actor.id : current.decidedByActorID,
+            decidedAt: isDecision ? timestamp : current.decidedAt,
+            statusMessage: status)
+        _ = try prospectiveProposals(replacing: updated)
+        return (
+            current.spec.channelID,
+            .proposalTransitioned(
+                proposalID: proposalID,
+                from: current.state,
+                proposal: updated))
+    }
+
+    private static func canTransition(
+        from current: CollaborationProposalState,
+        to target: CollaborationProposalState
+    ) -> Bool {
+        switch (current, target) {
+        case (.pending, .approved),
+             (.pending, .denied),
+             (.pending, .cancelled),
+             (.approved, .provisioning),
+             (.approved, .cancelled),
+             (.provisioning, .running),
+             (.provisioning, .failed),
+             (.provisioning, .cancelled),
+             (.running, .completed),
+             (.running, .failed),
+             (.running, .cancelled),
+             (.failed, .provisioning),
+             (.failed, .cancelled):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isTerminal(_ state: CollaborationProposalState) -> Bool {
+        state == .denied || state == .cancelled || state == .completed
     }
 
     private func linkEvent(
@@ -1421,8 +1974,8 @@ final class CollaborationRoom {
             previousHash: previousHash)
     }
 
-    private func replay(_ body: CollaborationAuditBody) {
-        switch body {
+    private func replay(_ record: CollaborationAuditRecord) throws {
+        switch record.body {
         case let .channelCreated(channel), let .channelCreatedAndLinked(channel):
             channels[channel.id] = channel
             for endpoint in channel.endpoints {
@@ -1535,14 +2088,163 @@ final class CollaborationRoom {
             }
             channel.revision += 1
             channels[channelID] = channel
+        case let .proposalPrepared(proposal):
+            do {
+                let validatedSpec = try validated(
+                    proposal: proposal.spec,
+                    timestamp: proposal.createdAt)
+                guard !knownProposalIDs.contains(proposal.spec.id),
+                      validatedSpec == proposal.spec,
+                      proposal.digest == (try proposal.spec.canonicalDigest()),
+                      proposal.state == .pending,
+                      proposal.createdAt == record.timestamp,
+                      proposal.updatedAt == record.timestamp,
+                      proposal.decidedByActorID == nil,
+                      proposal.decidedAt == nil,
+                      proposal.statusMessage == nil,
+                      record.channelID == proposal.spec.channelID
+                else {
+                    throw CollaborationRoomError.auditIntegrityFailure(
+                        sequence: record.sequence)
+                }
+            } catch {
+                throw CollaborationRoomError.auditIntegrityFailure(
+                    sequence: record.sequence)
+            }
+            do {
+                proposals = try prospectiveProposals(adding: proposal)
+            } catch {
+                throw CollaborationRoomError.auditIntegrityFailure(
+                    sequence: record.sequence)
+            }
+            knownProposalIDs.insert(proposal.spec.id)
+        case let .proposalTransitioned(proposalID, from, proposal):
+            guard let current = proposals[proposalID],
+                  proposalID == proposal.spec.id,
+                  from == current.state,
+                  Self.canTransition(from: from, to: proposal.state),
+                  proposal.spec == current.spec,
+                  proposal.digest == current.digest,
+                  (try? proposal.spec.canonicalDigest()) == proposal.digest,
+                  proposal.createdAt == current.createdAt,
+                  proposal.updatedAt == record.timestamp,
+                  proposal.updatedAt >= current.updatedAt,
+                  record.channelID == current.spec.channelID
+            else {
+                throw CollaborationRoomError.auditIntegrityFailure(
+                    sequence: record.sequence)
+            }
+            let replacements: [String: CollaborationRoomProposal]
+            do {
+                replacements = try prospectiveProposals(replacing: proposal)
+            } catch {
+                throw CollaborationRoomError.auditIntegrityFailure(
+                    sequence: record.sequence)
+            }
+            let isDecision = proposal.state == .approved || proposal.state == .denied
+            if isDecision {
+                guard record.actor.kind == .human,
+                      proposal.decidedByActorID == record.actor.id,
+                      proposal.decidedAt == record.timestamp,
+                      record.timestamp <= proposal.spec.expiresAt
+                else {
+                    throw CollaborationRoomError.auditIntegrityFailure(
+                        sequence: record.sequence)
+                }
+            } else {
+                guard proposal.decidedByActorID == current.decidedByActorID,
+                      proposal.decidedAt == current.decidedAt
+                else {
+                    throw CollaborationRoomError.auditIntegrityFailure(
+                        sequence: record.sequence)
+                }
+            }
+            proposals = replacements
         case .commandNoOp:
             break
+        }
+    }
+
+    private func prospectiveProposals(
+        adding proposal: CollaborationRoomProposal
+    ) throws -> [String: CollaborationRoomProposal] {
+        var retained = proposals
+        if retained.count >= Self.maximumRetainedProposals {
+            guard let archivedID = retained.values
+                .filter({ Self.isTerminal($0.state) })
+                .sorted(by: {
+                    if $0.updatedAt != $1.updatedAt {
+                        return $0.updatedAt < $1.updatedAt
+                    }
+                    return $0.spec.id < $1.spec.id
+                })
+                .first?.spec.id
+            else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "proposals",
+                    reason: "too many active proposals")
+            }
+            retained.removeValue(forKey: archivedID)
+        }
+        retained[proposal.spec.id] = proposal
+        try validateProposalSnapshotSize(retained)
+        return retained
+    }
+
+    private func prospectiveProposals(
+        replacing proposal: CollaborationRoomProposal
+    ) throws -> [String: CollaborationRoomProposal] {
+        var retained = proposals
+        retained[proposal.spec.id] = proposal
+        try validateProposalSnapshotSize(retained)
+        return retained
+    }
+
+    private func validateProposalSnapshotSize(
+        _ retained: [String: CollaborationRoomProposal]
+    ) throws {
+        let ordered = retained.values.sorted {
+            if $0.createdAt != $1.createdAt {
+                return $0.createdAt < $1.createdAt
+            }
+            return $0.spec.id < $1.spec.id
+        }
+        let encoded = try CollaborationJSON.encoder.encode(ordered)
+        guard encoded.count <= Self.maximumEncodedProposalSnapshotBytes else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposals",
+                reason: "aggregate proposal snapshot exceeds \(Self.maximumEncodedProposalSnapshotBytes) bytes")
         }
     }
 
     private func commandFingerprint(_ command: CollaborationRoomCommand) throws -> String {
         let data = try CollaborationJSON.encoder.encode(command)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func authorize(
+        _ command: CollaborationRoomCommand,
+        actor: CollaborationActor,
+        humanDecisionAuthority: CollaborationHumanDecisionAuthority?
+    ) throws {
+        switch command {
+        case .approveProposal:
+            guard actor.kind == .human else {
+                throw CollaborationRoomError.proposalDecisionRequiresHuman("approve")
+            }
+            guard humanDecisionAuthority?.actorID == actor.id else {
+                throw CollaborationRoomError.proposalDecisionNotAuthorized("approve")
+            }
+        case .denyProposal:
+            guard actor.kind == .human else {
+                throw CollaborationRoomError.proposalDecisionRequiresHuman("deny")
+            }
+            guard humanDecisionAuthority?.actorID == actor.id else {
+                throw CollaborationRoomError.proposalDecisionNotAuthorized("deny")
+            }
+        default:
+            break
+        }
     }
 
     private static func sortedEndpoints(
@@ -1590,6 +2292,148 @@ final class CollaborationRoom {
             capabilities: try participant.capabilities.map {
                 try bounded($0, field: "participant capability", maximum: 120)
             })
+    }
+
+    private func validated(
+        proposal rawProposal: CollaborationRoomProposalSpec,
+        timestamp: Date
+    ) throws -> CollaborationRoomProposalSpec {
+        guard (1...64).contains(rawProposal.agents.count) else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal agents", reason: "must contain 1...64 agents")
+        }
+        let expiryMilliseconds =
+            (rawProposal.expiresAt.timeIntervalSince1970 * 1_000)
+            .rounded(.towardZero)
+        guard expiryMilliseconds.isFinite,
+              expiryMilliseconds >= Double(Int64.min),
+              expiryMilliseconds <= Double(Int64.max)
+        else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal expiry", reason: "must be in the future")
+        }
+        let expiresAt = Date(
+            timeIntervalSince1970:
+                Double(Int64(expiryMilliseconds)) / 1_000)
+        guard expiresAt > timestamp else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal expiry", reason: "must be in the future")
+        }
+        guard rawProposal.requestedCapabilities.count <= 128 else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal capabilities", reason: "contains more than 128 values")
+        }
+
+        var agentIDs = Set<String>()
+        var displayNames = Set<String>()
+        let agents = try rawProposal.agents.map { agent -> CollaborationAgentSpec in
+            let id = try validatedID(agent.id, field: "proposal agent id")
+            guard agentIDs.insert(id).inserted else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "proposal agents", reason: "duplicate agent id \(id)")
+            }
+            let displayName = try bounded(
+                agent.displayName,
+                field: "proposal agent display name",
+                maximum: 80)
+            guard displayNames.insert(displayName.lowercased()).inserted else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "proposal agents",
+                    reason: "duplicate agent display name \(displayName)")
+            }
+            guard agent.responsibilityScopes.count <= 128 else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "proposal responsibility scopes",
+                    reason: "agent \(id) contains more than 128 values")
+            }
+            guard agent.capabilities.count <= 128 else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "proposal agent capabilities",
+                    reason: "agent \(id) contains more than 128 values")
+            }
+            let scopes = try uniqueBoundedValues(
+                agent.responsibilityScopes,
+                field: "proposal responsibility scope",
+                maximum: 1_024)
+            let capabilities = try uniqueBoundedValues(
+                agent.capabilities,
+                field: "proposal agent capability",
+                maximum: 120)
+            return CollaborationAgentSpec(
+                id: id,
+                displayName: displayName,
+                role: try bounded(
+                    agent.role, field: "proposal agent role", maximum: 120),
+                runtime: agent.runtime,
+                provider: try bounded(
+                    agent.provider, field: "proposal agent provider", maximum: 80),
+                modelID: try agent.modelID.map {
+                    try bounded($0, field: "proposal agent model", maximum: 160)
+                },
+                responsibilityScopes: scopes,
+                capabilities: capabilities)
+        }
+        let capabilities = try uniqueBoundedValues(
+            rawProposal.requestedCapabilities,
+            field: "proposal capability",
+            maximum: 120)
+        let workspaceRoot = try bounded(
+            rawProposal.workspaceRoot,
+            field: "proposal workspace root",
+            maximum: 4_096)
+        guard (workspaceRoot as NSString).isAbsolutePath else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal workspace root",
+                reason: "must be an absolute path")
+        }
+        let targetInstanceID = try rawProposal.targetInstanceID.map {
+            try validatedID($0, field: "proposal target instance id")
+        }
+        if rawProposal.presentation == .headless,
+           targetInstanceID == nil
+        {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal target instance id",
+                reason: "is required for headless presentation")
+        }
+        let proposal = CollaborationRoomProposalSpec(
+            id: try validatedID(rawProposal.id, field: "proposal id"),
+            channelID: try validatedID(
+                rawProposal.channelID, field: "proposal channel id"),
+            roomName: try bounded(
+                rawProposal.roomName, field: "proposal room name", maximum: 80),
+            objective: try bounded(
+                rawProposal.objective, field: "proposal objective", maximum: 2_048),
+            workspaceRoot: workspaceRoot,
+            agents: agents,
+            workspaceStrategy: rawProposal.workspaceStrategy,
+            presentation: rawProposal.presentation,
+            targetInstanceID: targetInstanceID,
+            requestedCapabilities: capabilities,
+            expiresAt: expiresAt)
+        let encoded = try CollaborationJSON.encoder.encode(proposal)
+        guard encoded.count <= Self.maximumEncodedProposalBytes else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal",
+                reason: "encoded proposal exceeds \(Self.maximumEncodedProposalBytes) bytes")
+        }
+        return proposal
+    }
+
+    private func uniqueBoundedValues(
+        _ values: [String],
+        field: String,
+        maximum: Int
+    ) throws -> [String] {
+        var seen = Set<String>()
+        return try values.map { value in
+            let validated = try bounded(value, field: field, maximum: maximum)
+            guard seen.insert(validated).inserted else {
+                throw CollaborationRoomError.invalidValue(
+                    field: field, reason: "contains duplicate \(validated)")
+            }
+            return validated
+        }.sorted()
     }
 
     private func validated(
