@@ -377,6 +377,66 @@ public final class HeadlessAppHost: @unchecked Sendable {
             parts.count > 1 ? String(parts[1]) : "")
     }
 
+    private func controlHandleAndText(
+        _ argument: String
+    ) -> (String, String)? {
+        let parts = argument.split(
+            separator: " ",
+            maxSplits: 1,
+            omittingEmptySubsequences: false)
+        guard let first = parts.first, !first.isEmpty else { return nil }
+        return (
+            String(first),
+            parts.count > 1 ? String(parts[1]) : "")
+    }
+
+    private enum ControlPane {
+        case terminal(HeadlessTerminalSession)
+        case chat(HeadlessChatRuntime)
+        case channel(String)
+    }
+
+    private func controlPane(withHandle handle: String) -> ControlPane? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if let terminalID = Int(handle),
+           let terminal = sessions[terminalID]
+        {
+            return .terminal(terminal)
+        }
+        if let chat = chats[handle] {
+            return .chat(chat)
+        }
+        let prefix = "channel-panel-"
+        if handle.hasPrefix(prefix) {
+            let channelID = String(handle.dropFirst(prefix.count))
+            if channelPanels[channelID] != nil {
+                return .channel(channelID)
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func closeChat(_ chat: HeadlessChatRuntime) -> Bool {
+        stateLock.lock()
+        guard chats[chat.id] === chat else {
+            stateLock.unlock()
+            return false
+        }
+        chats[chat.id] = nil
+        if focusedChatID == chat.id { focusedChatID = nil }
+        stateLock.unlock()
+        leaveChannel(for: chat)
+        chat.stop()
+        appControl.broadcast([
+            "event": "chat-closed",
+            "chatId": chat.id,
+            "headless": true,
+        ])
+        return true
+    }
+
     private func workingDirectory(from argument: String) -> (
         path: String?,
         error: String?
@@ -508,7 +568,10 @@ public final class HeadlessAppHost: @unchecked Sendable {
             return createSession(cwd: directory.path).map(String.init)
                 ?? "error: could not create headless terminal"
         case "split":
-            guard let (target, directionText) = paneAndText(argument) else {
+            guard let (handle, directionText) =
+                    controlHandleAndText(argument),
+                  let target = controlPane(withHandle: handle)
+            else {
                 return "error: split <id> right|left|down|up"
             }
             let direction = directionText.trimmingCharacters(
@@ -516,29 +579,74 @@ public final class HeadlessAppHost: @unchecked Sendable {
             guard ["right", "left", "down", "up"].contains(direction) else {
                 return "error: split <id> right|left|down|up"
             }
-            return createSession(cwd: target.workingDirectory).map(String.init)
+            let workspace: String?
+            switch target {
+            case .terminal(let terminal):
+                workspace = terminal.workingDirectory
+            case .chat(let chat):
+                workspace = chat.metadata().workspace
+            case .channel:
+                workspace = nil
+            }
+            return createSession(cwd: workspace).map(String.init)
                 ?? "error: split failed"
         case "focus":
-            guard let (target, _) = paneAndText(argument) else {
+            guard let (handle, _) = controlHandleAndText(argument),
+                  let target = controlPane(withHandle: handle)
+            else {
                 return "error: focus <id>"
             }
             stateLock.lock()
-            focusedSessionID = target.id
-            focusedChatID = nil
-            focusedChannelID = nil
+            switch target {
+            case .terminal(let terminal):
+                focusedSessionID = terminal.id
+                focusedChatID = nil
+                focusedChannelID = nil
+            case .chat(let chat):
+                focusedSessionID = nil
+                focusedChatID = chat.id
+                focusedChannelID = nil
+            case .channel(let channelID):
+                focusedSessionID = nil
+                focusedChatID = nil
+                focusedChannelID = channelID
+            }
             stateLock.unlock()
             appControl.broadcast([
                 "event": "focus",
-                "pane": target.id,
+                "pane": handle,
                 "headless": true,
             ])
             return "ok"
         case "close":
-            guard let (target, _) = paneAndText(argument) else {
+            guard let (handle, _) = controlHandleAndText(argument),
+                  let target = controlPane(withHandle: handle)
+            else {
                 return "error: close <id>"
             }
-            target.terminate()
-            return "ok"
+            switch target {
+            case .terminal(let terminal):
+                terminal.terminate()
+                return "ok"
+            case .chat(let chat):
+                return closeChat(chat)
+                    ? "ok"
+                    : "error: close failed"
+            case .channel(let channelID):
+                stateLock.lock()
+                channelPanels[channelID] = nil
+                if focusedChannelID == channelID {
+                    focusedChannelID = nil
+                }
+                stateLock.unlock()
+                appControl.broadcast([
+                    "event": "channel-panel-closed",
+                    "channelId": channelID,
+                    "panelId": handle,
+                    "headless": true,
+                ])
+                return "ok"
+            }
         case "send", "send-line":
             guard let (target, text) = paneAndText(argument) else {
                 return "error: \(command) <id> <text>"
@@ -806,17 +914,11 @@ public final class HeadlessAppHost: @unchecked Sendable {
             focusedChannelID = nil
             stateLock.unlock()
         case "close":
-            stateLock.lock()
-            chats[chatID] = nil
-            if focusedChatID == chatID { focusedChatID = nil }
-            stateLock.unlock()
-            leaveChannel(for: chat)
-            chat.stop()
-            appControl.broadcast([
-                "event": "chat-closed",
-                "chatId": chatID,
-                "headless": true,
-            ])
+            guard closeChat(chat) else {
+                return BrowserControlCodec.response(
+                    error: "close_failed",
+                    message: "The Chat could not be closed.")
+            }
             var closed = headlessChatState(chat, isOpen: false)
             closed["focused"] = false
             return BrowserControlCodec.response(result: closed)
@@ -1031,6 +1133,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
             }
             focusedChannelID = channelID
             focusedSessionID = nil
+            focusedChatID = nil
             result = BrowserControlCodec.response(result:
                 ChannelPanelProjection(
                     channel: channel,
@@ -1046,6 +1149,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
             }
             focusedChannelID = channelID
             focusedSessionID = nil
+            focusedChatID = nil
             result = BrowserControlCodec.response(result:
                 ChannelPanelProjection(
                     channel: channel,

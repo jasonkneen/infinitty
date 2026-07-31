@@ -122,13 +122,14 @@ People / Room / Plan sections so the workspace remains usable beside Chats.
 
 For linked Chat panes, Channel membership is part of every real provider turn:
 the agent receives its own participant name, the Channel name, exact peer
-names, roles, and the bounded recent Channel transcript. Accepted user prompts
-and provider responses are appended to the durable room log, so a peer's next
-turn can read and reference the handoff. Amp participates through the same
-provider-facing context path; it is not the headless host. Renames update the
-stored participant identity, closing a pane removes it from every peer's live
-membership, and long provider replies are explicitly bounded for the shared
-transcript without shortening the local answer.
+names and roles, authoritative responsibility scopes and plan ownership, and
+the bounded recent Channel transcript. Accepted user prompts and provider
+responses are appended to the durable room log, so a peer's next turn can read
+and reference the handoff. Amp participates through the same provider-facing
+context path; it is not the headless host. Renames update the stored participant
+identity, closing a pane removes it from every peer's live membership, and long
+provider replies are explicitly bounded for the shared transcript without
+shortening the local answer.
 
 Visual and headless processes use one local Channel coordinator and one
 tamper-evident journal. Linking endpoints from different Infinitty instances
@@ -168,6 +169,10 @@ claude mcp add infinitty -- ~/Documents/GitHub/infinitty/.build/release/infinitt
 
 `infinitty_run` is the headline: it types the command, waits for the OSC 133
 done-marker, and returns `{"exitCode": …, "output": …}` in one tool call.
+`infinitty_list_panes` returns stable numeric terminal ids and string handles
+for Chat, Channel, Files, and Browser panes. The same handle works with
+`infinitty_focus`, `infinitty_split`, `infinitty_close`, and event filtering in
+both visual and headless instances.
 
 ## Open a folder from anywhere
 

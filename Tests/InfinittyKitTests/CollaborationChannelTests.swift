@@ -88,8 +88,31 @@ final class CollaborationChannelTests: XCTestCase {
                             role: "review", provider: "claude",
                             modelID: "claude-test"),
                     ],
-                    responsibilities: [],
-                    plan: [],
+                    responsibilities: [
+                        CollaborationResponsibility(
+                            id: "scope-implementation",
+                            scope: "Sources/**",
+                            summary: "implementation",
+                            ownerID: "participant-chat-1"),
+                        CollaborationResponsibility(
+                            id: "scope-review",
+                            scope: "Tests/**",
+                            summary: "review",
+                            ownerID: "participant-chat-2"),
+                    ],
+                    plan: [
+                        CollaborationPlanItem(
+                            id: "implement",
+                            title: "Implement the Channel",
+                            status: .inProgress,
+                            ownerID: "participant-chat-1"),
+                        CollaborationPlanItem(
+                            id: "verify",
+                            title: "Verify peer awareness",
+                            status: .pending,
+                            ownerID: "participant-chat-2",
+                            dependencyIDs: ["implement"]),
+                    ],
                     messages: [
                         CollaborationMessage(
                             id: "message-human", threadID: "thread-1",
@@ -112,6 +135,14 @@ final class CollaborationChannelTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Your participant name: \"Chat 2\""))
         XCTAssertTrue(prompt.contains("Channel: \"Release\""))
         XCTAssertTrue(prompt.contains("- \"Chat 1\" [chat]"))
+        XCTAssertTrue(prompt.contains(
+            "- scope \"Sources/**\" -> \"Chat 1\""))
+        XCTAssertTrue(prompt.contains(
+            "- scope \"Tests/**\" -> \"Chat 2\""))
+        XCTAssertTrue(prompt.contains(
+            "- plan [in_progress] \"Implement the Channel\" -> \"Chat 1\""))
+        XCTAssertTrue(prompt.contains(
+            "- plan [pending] \"Verify peer awareness\" -> \"Chat 2\""))
         XCTAssertTrue(prompt.contains(
             "- Human \"jason\": \"Compare the two changes.\""))
         XCTAssertTrue(prompt.contains(

@@ -2185,7 +2185,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @discardableResult
     private func splitTerminal(
-        relativeTo sourceView: NSView, vertical: Bool
+        relativeTo sourceView: NSView,
+        vertical: Bool,
+        newFirst: Bool = false
     ) -> TerminalSession? {
         restorePaneZoom(containing: sourceView, refocus: false)
         guard let win = sourceView.window else { return nil }
@@ -2194,7 +2196,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             usesSharedWindowSurface: terminalChromes[ObjectIdentifier(win)] != nil)
         session.workingDirectory = sourceSession(
             relativeTo: sourceView, in: win)?.currentDirectory()
-        guard insertPaneView(session.view, relativeTo: sourceView, vertical: vertical) else {
+        guard insertPaneView(
+            session.view,
+            relativeTo: sourceView,
+            vertical: vertical,
+            newFirst: newFirst)
+        else {
             recordPaneLedgerFailure(
                 in: win, paneID: paneLedgerTerminalID(session), reason: "split-insert-failed",
                 origin: "pane-header")
@@ -2219,6 +2226,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         updateTitle(for: win)
         refreshShortcutHints()
         return session
+    }
+
+    /// Resolves the stable handle returned by `list` for any pane kind. Legacy
+    /// numeric terminal ids remain valid, while utility panes can be addressed
+    /// by ledger id, Channel endpoint id, browser id, or Channel panel id.
+    private func controlPane(withHandle handle: String) -> NSView? {
+        if let terminalID = Int(handle),
+           let session = sessions.first(where: { $0.id == terminalID })
+        {
+            return session.view
+        }
+        for records in utilityPanels.values {
+            for record in records {
+                if record.ledgerID == handle
+                    || record.browser?.browserID == handle
+                    || collaborationEndpoint(for: record.pane).id == handle
+                {
+                    return record.pane
+                }
+            }
+        }
+        return liveCollaborationPanes().first {
+            collaborationEndpoint(for: $0).id == handle
+        }
     }
 
     @discardableResult
@@ -3962,9 +3993,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         split(session: session, vertical: vertical, newFirst: newFirst)
     }
 
-    private func split(session: TerminalSession, vertical: Bool, newFirst: Bool) {
+    @discardableResult
+    private func split(
+        session: TerminalSession,
+        vertical: Bool,
+        newFirst: Bool
+    ) -> TerminalSession? {
         restorePaneZoom(containing: session, refocus: false)
-        guard let win = session.view.window else { return }
+        guard let win = session.view.window else { return nil }
         let newSession = createSession(
             scale: win.backingScaleFactor,
             usesSharedWindowSurface: terminalChromes[ObjectIdentifier(win)] != nil)
@@ -3996,7 +4032,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 origin: "split-command")
             newSession.shutdown()
             sessions.removeAll { $0 === newSession }
-            return
+            return nil
         }
         old.autoresizingMask = []
         newSession.view.autoresizingMask = []
@@ -4024,6 +4060,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.refreshShortcutHints()
         }
         newSession.launch()
+        return newSession
     }
 
     @objc func closePane(_ sender: Any?) {
@@ -5244,12 +5281,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             appControl.broadcast(["event": "surface-closed", "surface": record.ledgerID])
         }
         if let assistant = record.assistant {
+            appControl.broadcast([
+                "event": "chat-closed",
+                "chatId": record.ledgerID,
+            ])
             let remainsOwnedByPet = petAssistants.values.contains { $0 === assistant }
             // A Chat pane may share the terminal's pet assistant. Closing only
             // that presentation must not cancel a turn still owned by the pet;
             // final-owner invalidation performs cancellation and backend release.
             if !remainsOwnedByPet { assistant.invalidate() }
             record.assistant = nil
+        }
+        if record.kind == .channel {
+            appControl.broadcast([
+                "event": "channel-panel-closed",
+                "channelId": record.channelID ?? "",
+                "panelId": record.ledgerID,
+            ])
         }
         removeUtilityRecord(record, windowKey: id)
         recordPaneLedgerUtilityRemoved(
@@ -6034,10 +6082,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                         error: "close_failed",
                         message: "The Chat could not be closed.")
                 }
-                self.appControl.broadcast([
-                    "event": "chat-closed",
-                    "chatId": chatID,
-                ])
                 return BrowserControlCodec.response(result: [
                     "chatId": chatID,
                     "open": false,
@@ -6411,6 +6455,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return (s, sub.count > 1 ? String(sub[1]) : "")
         }
 
+        func controlHandleAndText(_ arg: String) -> (String, String)? {
+            let sub = arg.split(
+                separator: " ",
+                maxSplits: 1,
+                omittingEmptySubsequences: false)
+            guard let first = sub.first, !first.isEmpty else { return nil }
+            return (
+                String(first),
+                sub.count > 1 ? String(sub[1]) : "")
+        }
+
         switch cmd {
         case "ping":
             return "pong"
@@ -6546,28 +6601,64 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             } ?? nil
             return id.map(String.init) ?? "error: no window to attach a tab to"
         case "split":
-            guard let (target, dir) = paneAndText(arg) else { return "error: split <id> right|left|down|up" }
+            guard let (handle, dir) = controlHandleAndText(arg) else {
+                return "error: split <id> right|left|down|up"
+            }
             let direction = dir.trimmingCharacters(in: .whitespaces).lowercased()
             guard ["right", "left", "down", "up"].contains(direction) else {
                 return "error: split <id> right|left|down|up"
             }
-            let before = onMain { self.sessions.map(\.id) } ?? []
-            _ = onMain {
-                self.split(
-                    session: target,
-                    vertical: direction == "right" || direction == "left",
-                    newFirst: direction == "left" || direction == "up"
-                )
-            }
-            let after = onMain { self.sessions.map(\.id) } ?? []
-            if let newID = after.first(where: { !before.contains($0) }) { return String(newID) }
+            let newID = onMain { () -> Int? in
+                guard let target = self.controlPane(withHandle: handle)
+                else { return nil }
+                let vertical =
+                    direction == "right" || direction == "left"
+                let newFirst =
+                    direction == "left" || direction == "up"
+                if let terminal = target as? TerminalView,
+                   let session = self.sessions.first(where: {
+                       $0.view === terminal
+                   })
+                {
+                    return self.split(
+                        session: session,
+                        vertical: vertical,
+                        newFirst: newFirst)?.id
+                }
+                return self.splitTerminal(
+                    relativeTo: target,
+                    vertical: vertical,
+                    newFirst: newFirst)?.id
+            } ?? nil
+            if let newID { return String(newID) }
             return "error: split failed"
         case "focus":
-            guard let (s, _) = paneAndText(arg) else { return "error: focus <id>" }
-            _ = onMain {
-                self.focusSession(s)
+            guard let (handle, _) = controlHandleAndText(arg) else {
+                return "error: focus <id>"
             }
-            return "ok"
+            let focused = onMain { () -> Bool in
+                if let surfaceWindow = self.surfaceWindows[handle] {
+                    surfaceWindow.makeKeyAndOrderFront(nil)
+                    return true
+                }
+                guard let pane = self.controlPane(withHandle: handle),
+                      let window = pane.window
+                else { return false }
+                if let terminal = pane as? TerminalView,
+                   let session = self.sessions.first(where: {
+                       $0.view === terminal
+                   })
+                {
+                    self.focusSession(session)
+                } else {
+                    self.restorePaneZoom(revealing: pane)
+                    window.makeKeyAndOrderFront(nil)
+                    window.makeFirstResponder(pane)
+                    self.updatePaneSelection(in: window, focused: pane)
+                }
+                return true
+            }
+            return focused == true ? "ok" : "error: no such pane: \(handle)"
         case "surface":
             guard let (s, json) = paneAndText(arg),
                   !json.trimmingCharacters(in: .whitespaces).isEmpty else {
@@ -6611,16 +6702,38 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             _ = onMain { s.setTodos(todos) }
             return "ok"
         case "close":
-            guard let (s, _) = paneAndText(arg) else { return "error: close <id>" }
-            _ = onMain {
-                if let win = s.view.window {
-                    self.recordPaneLedgerNote(
-                        in: win, paneID: self.paneLedgerTerminalID(s), reason: "close-requested",
-                        origin: "app-control-close")
-                }
-                s.terminate()
+            guard let (handle, _) = controlHandleAndText(arg) else {
+                return "error: close <id>"
             }
-            return "ok"
+            let closed = onMain { () -> Bool in
+                if let surfaceWindow = self.surfaceWindows[handle] {
+                    surfaceWindow.close()
+                    return true
+                }
+                guard let pane = self.controlPane(withHandle: handle)
+                else { return false }
+                if let terminal = pane as? TerminalView,
+                   let session = self.sessions.first(where: {
+                       $0.view === terminal
+                   })
+                {
+                    if let win = session.view.window {
+                        self.recordPaneLedgerNote(
+                            in: win,
+                            paneID: self.paneLedgerTerminalID(session),
+                            reason: "close-requested",
+                            origin: "app-control-close")
+                    }
+                    session.terminate()
+                    return true
+                }
+                guard let record = self.utilityRecord(forPane: pane),
+                      let window = pane.window ?? record.ownerWindow
+                else { return false }
+                return self.closeUtilityPanel(record, in: window)
+            }
+            if closed == true { return "ok" }
+            return "error: no such pane: \(handle)"
         case "send", "send-line":
             guard let (s, text) = paneAndText(arg) else { return "error: \(cmd) <id> <text>" }
             _ = onMain { s.view.showAgentGlow() }

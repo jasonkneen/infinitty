@@ -175,7 +175,12 @@ final class EventBuffer {
 
     /// Matching events with seq > since; blocks until `deadline` for the
     /// first match when none are pending.
-    func collect(since: Int, event: String?, pane: Int?, deadline: Date) -> [Entry] {
+    func collect(
+        since: Int,
+        event: String?,
+        pane: String?,
+        deadline: Date
+    ) -> [Entry] {
         condition.lock()
         defer { condition.unlock() }
         while true {
@@ -187,10 +192,20 @@ final class EventBuffer {
         }
     }
 
-    private static func matches(_ object: [String: Any], event: String?, pane: Int?) -> Bool {
+    private static func matches(
+        _ object: [String: Any],
+        event: String?,
+        pane: String?
+    ) -> Bool {
         if let event, !((object["event"] as? String) ?? "").contains(event) { return false }
-        if let pane, (object["pane"] as? Int) != pane { return false }
+        if let pane, paneHandle(object["pane"]) != pane { return false }
         return true
+    }
+
+    private static func paneHandle(_ value: Any?) -> String? {
+        if let value = value as? String { return value }
+        if let value = value as? NSNumber { return value.stringValue }
+        return nil
     }
 }
 
@@ -355,8 +370,18 @@ func paneArg(_ args: [String: Any]) -> String {
     return "0"
 }
 
-let paneProperty: [String: Any] = [
-    "pane": ["type": "integer", "description": "Pane id from infinitty_list_panes"],
+let allPaneProperty: [String: Any] = [
+    "pane": [
+        "type": ["integer", "string"],
+        "description": "Stable pane handle from infinitty_list_panes.",
+    ] as [String: Any],
+]
+
+let terminalPaneProperty: [String: Any] = [
+    "pane": [
+        "type": "integer",
+        "description": "Terminal pane id from infinitty_list_panes.",
+    ] as [String: Any],
 ]
 
 let browserIDProperty: [String: Any] = [
@@ -413,9 +438,11 @@ let tools: [Tool] = [
     ),
     Tool(
         name: "infinitty_list_panes",
-        description: "List every live infinitty pane, including terminals and named Chat "
-            + "participants, with focus state and the endpoint object used to link a "
-            + "collaboration Channel.",
+        description: "List every live infinitty pane, including terminals, named Chat "
+            + "participants, and Channel workspaces. The id is the stable handle accepted "
+            + "by infinitty_split, infinitty_focus, infinitty_close, and infinitty_events. "
+            + "Collaboration-capable panes also include the endpoint object used to link a "
+            + "Channel.",
         schema: ["type": "object", "properties": [:]],
         invoke: { _ in infinittyRequest("list") }
     ),
@@ -817,7 +844,7 @@ let tools: [Tool] = [
             + "Requires infinitty shell integration (OSC 133) in that pane.",
         schema: [
             "type": "object",
-            "properties": paneProperty.merging([
+            "properties": terminalPaneProperty.merging([
                 "command": ["type": "string", "description": "Shell command to run"],
             ]) { a, _ in a },
             "required": ["pane", "command"],
@@ -829,7 +856,11 @@ let tools: [Tool] = [
     Tool(
         name: "infinitty_screen",
         description: "Read a pane's visible screen as plain text.",
-        schema: ["type": "object", "properties": paneProperty, "required": ["pane"]],
+        schema: [
+            "type": "object",
+            "properties": terminalPaneProperty,
+            "required": ["pane"],
+        ],
         invoke: { args in infinittyRequest("screen \(paneArg(args))") }
     ),
     Tool(
@@ -837,7 +868,7 @@ let tools: [Tool] = [
         description: "Read the last N lines of a pane including scrollback.",
         schema: [
             "type": "object",
-            "properties": paneProperty.merging([
+            "properties": terminalPaneProperty.merging([
                 "lines": ["type": "integer", "description": "How many lines (default 100)"],
             ]) { a, _ in a },
             "required": ["pane"],
@@ -852,7 +883,7 @@ let tools: [Tool] = [
             + "(for TUIs, partial input, or control sequences).",
         schema: [
             "type": "object",
-            "properties": paneProperty.merging([
+            "properties": terminalPaneProperty.merging([
                 "text": ["type": "string"],
                 "submit": ["type": "boolean", "description": "Press return after (default true)"],
             ]) { a, _ in a },
@@ -883,7 +914,7 @@ let tools: [Tool] = [
             + "window. Returns a surface id.",
         schema: [
             "type": "object",
-            "properties": paneProperty.merging([
+            "properties": terminalPaneProperty.merging([
                 "kind": [
                     "type": "string", "enum": ["markdown", "html", "url", "ui"],
                     "description": "What the content is",
@@ -951,7 +982,7 @@ let tools: [Tool] = [
             + "an item's status changes; pass an empty list to clear it.",
         schema: [
             "type": "object",
-            "properties": paneProperty.merging([
+            "properties": terminalPaneProperty.merging([
                 "todos": [
                     "type": "array",
                     "description": "Full todo list, in order. Omit to read the current list.",
@@ -984,13 +1015,21 @@ let tools: [Tool] = [
     Tool(
         name: "infinitty_last_output",
         description: "Exact output of the last completed command in a pane (OSC 133).",
-        schema: ["type": "object", "properties": paneProperty, "required": ["pane"]],
+        schema: [
+            "type": "object",
+            "properties": terminalPaneProperty,
+            "required": ["pane"],
+        ],
         invoke: { args in infinittyRequest("last-output \(paneArg(args))") }
     ),
     Tool(
         name: "infinitty_exit_code",
         description: "Exit code of the last completed command in a pane (OSC 133).",
-        schema: ["type": "object", "properties": paneProperty, "required": ["pane"]],
+        schema: [
+            "type": "object",
+            "properties": terminalPaneProperty,
+            "required": ["pane"],
+        ],
         invoke: { args in infinittyRequest("exit-code \(paneArg(args))") }
     ),
     Tool(
@@ -1023,10 +1062,11 @@ let tools: [Tool] = [
     ),
     Tool(
         name: "infinitty_split",
-        description: "Split a pane. Returns the new pane id.",
+        description: "Create a real terminal beside any terminal, Chat, or Channel pane. "
+            + "For a Chat, the terminal inherits its workspace. Returns the new terminal id.",
         schema: [
             "type": "object",
-            "properties": paneProperty.merging([
+            "properties": allPaneProperty.merging([
                 "direction": [
                     "type": "string", "enum": ["right", "left", "down", "up"],
                 ],
@@ -1039,14 +1079,23 @@ let tools: [Tool] = [
     ),
     Tool(
         name: "infinitty_focus",
-        description: "Raise and focus a pane.",
-        schema: ["type": "object", "properties": paneProperty, "required": ["pane"]],
+        description: "Raise and focus any terminal, Chat, or Channel pane by its stable handle.",
+        schema: [
+            "type": "object",
+            "properties": allPaneProperty,
+            "required": ["pane"],
+        ],
         invoke: { args in infinittyRequest("focus \(paneArg(args))") }
     ),
     Tool(
         name: "infinitty_close",
-        description: "Close a pane (terminates its shell).",
-        schema: ["type": "object", "properties": paneProperty, "required": ["pane"]],
+        description: "Close any terminal, Chat, or Channel pane by its stable handle. "
+            + "Closing a terminal terminates its shell; closing a Chat stops its provider turn.",
+        schema: [
+            "type": "object",
+            "properties": allPaneProperty,
+            "required": ["pane"],
+        ],
         invoke: { args in infinittyRequest("close \(paneArg(args))") }
     ),
     Tool(
@@ -1078,8 +1127,8 @@ let tools: [Tool] = [
                         + "e.g. \"marker\" or \"process\"",
                 ] as [String: Any],
                 "pane": [
-                    "type": "integer",
-                    "description": "Only events for this pane id",
+                    "type": ["integer", "string"],
+                    "description": "Only events for this stable pane handle",
                 ] as [String: Any],
             ],
         ],
@@ -1089,7 +1138,7 @@ let tools: [Tool] = [
             let entries = eventBuffer.collect(
                 since: since,
                 event: args["event"] as? String,
-                pane: args["pane"] as? Int,
+                pane: args["pane"].map { paneArg(["pane": $0]) },
                 deadline: Date().addingTimeInterval(TimeInterval(wait)))
             let events = entries.map { entry -> [String: Any] in
                 var object = entry.object

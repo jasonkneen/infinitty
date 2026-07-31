@@ -88,6 +88,7 @@ final class HeadlessAppHostTests: XCTestCase {
             "workspace": fixture.support.path,
         ])
         let chatID = try XCTUnwrap(created["chatId"] as? String)
+        let paneID = try XCTUnwrap(created["paneId"] as? String)
         let threadID = try XCTUnwrap(
             created["activeThreadId"] as? String)
         XCTAssertEqual(created["title"] as? String, "Headless Architect")
@@ -131,7 +132,19 @@ final class HeadlessAppHostTests: XCTestCase {
             JSONSerialization.jsonObject(with: Data(panesText.utf8))
                 as? [[String: Any]])
         XCTAssertEqual(panes.first?["kind"] as? String, "chat")
+        XCTAssertEqual(panes.first?["id"] as? String, chatID)
         XCTAssertEqual(panes.first?["title"] as? String, "Headless Lead")
+        XCTAssertEqual(
+            AppSocketClient.request(
+                "focus \(chatID)",
+                socketPath: fixture.socketPath),
+            "ok")
+        XCTAssertEqual(paneID, "headless-chat/\(chatID)")
+        let splitText = try XCTUnwrap(AppSocketClient.request(
+            "split \(chatID) right",
+            socketPath: fixture.socketPath))
+        let terminalID = try XCTUnwrap(Int(splitText))
+        XCTAssertGreaterThan(terminalID, 0)
 
         let closed = try request([
             "v": 1,
@@ -139,10 +152,32 @@ final class HeadlessAppHostTests: XCTestCase {
             "chatId": chatID,
         ])
         XCTAssertEqual(closed["open"] as? Bool, false)
+
+        let disposable = try request([
+            "v": 1,
+            "op": "create",
+            "name": "Disposable Reviewer",
+            "role": "reviewer",
+            "provider": "amp",
+            "model": "smart",
+            "workspace": fixture.support.path,
+        ])
+        let disposableID = try XCTUnwrap(
+            disposable["chatId"] as? String)
         XCTAssertEqual(
             AppSocketClient.request(
-                "list", socketPath: fixture.socketPath),
-            "[]")
+                "close \(disposableID)",
+                socketPath: fixture.socketPath),
+            "ok")
+
+        let remainingText = try XCTUnwrap(AppSocketClient.request(
+            "list", socketPath: fixture.socketPath))
+        let remaining = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(remainingText.utf8))
+                as? [[String: Any]])
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?["id"] as? Int, terminalID)
+        XCTAssertNil(remaining.first?["kind"])
     }
 
     func testApprovedHeadlessProposalCreatesRealConnectedAgentRoom()
@@ -154,7 +189,41 @@ final class HeadlessAppHostTests: XCTestCase {
             "fake-amp")
         try """
         #!/bin/sh
-        printf '%s\n' '{"type":"result","result":"AMP_ROOM_READY"}'
+        prompt="$5"
+        case "$prompt" in
+          *'Your participant name: "Headless Architect"'*)
+            output='\(fixture.support.path)/architect-prompt.txt'
+            result='ARCHITECT_CONTEXT_MISSING'
+            if printf '%s' "$prompt" | grep -Fq 'Connection status: CONNECTED; this is not a solo Chat.' \
+              && printf '%s' "$prompt" | grep -Fq 'Channel: "Headless Delivery Room"' \
+              && printf '%s' "$prompt" | grep -Fq '"Headless Reviewer" [chat]' \
+              && printf '%s' "$prompt" | grep -Fq 'scope "Sources/**" -> "Headless Architect"' \
+              && printf '%s' "$prompt" | grep -Fq 'scope "Tests/**" -> "Headless Reviewer"' \
+              && printf '%s' "$prompt" | grep -Fq 'plan [in_progress] "Headless Reviewer: integration reviewer" -> "Headless Reviewer"'
+            then
+              result='ARCHITECT_CHANNEL_READY'
+            fi
+            ;;
+          *'Your participant name: "Headless Reviewer"'*)
+            output='\(fixture.support.path)/reviewer-prompt.txt'
+            result='REVIEWER_CONTEXT_MISSING'
+            if printf '%s' "$prompt" | grep -Fq 'Connection status: CONNECTED; this is not a solo Chat.' \
+              && printf '%s' "$prompt" | grep -Fq 'Channel: "Headless Delivery Room"' \
+              && printf '%s' "$prompt" | grep -Fq '"Headless Architect" [chat]' \
+              && printf '%s' "$prompt" | grep -Fq 'scope "Sources/**" -> "Headless Architect"' \
+              && printf '%s' "$prompt" | grep -Fq 'scope "Tests/**" -> "Headless Reviewer"' \
+              && printf '%s' "$prompt" | grep -Fq 'plan [in_progress] "Headless Architect: delivery owner" -> "Headless Architect"'
+            then
+              result='REVIEWER_CHANNEL_READY'
+            fi
+            ;;
+          *)
+            output='\(fixture.support.path)/unknown-prompt.txt'
+            result='UNKNOWN_PARTICIPANT_CONTEXT'
+            ;;
+        esac
+        printf '%s' "$prompt" > "$output"
+        printf '{"type":"result","result":"%s"}\n' "$result"
         """.write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
@@ -198,6 +267,15 @@ final class HeadlessAppHostTests: XCTestCase {
                     modelID: "smart",
                     responsibilityScopes: ["Sources/**"],
                     capabilities: ["workspace.write"]),
+                CollaborationAgentSpec(
+                    id: "agent-headless-reviewer",
+                    displayName: "Headless Reviewer",
+                    role: "integration reviewer",
+                    runtime: .local,
+                    provider: "amp",
+                    modelID: "smart",
+                    responsibilityScopes: ["Tests/**"],
+                    capabilities: ["workspace.read", "review"]),
             ],
             workspaceStrategy: .sharedCheckout,
             presentation: .headless,
@@ -229,7 +307,7 @@ final class HeadlessAppHostTests: XCTestCase {
             .snapshot)
 
         var finalSnapshot: CollaborationSnapshot?
-        var chatState: [String: Any]?
+        var chatStates: [[String: Any]] = []
         for _ in 0..<120 {
             finalSnapshot = coordinator.snapshot()
             if finalSnapshot?.proposals.first(where: {
@@ -244,18 +322,23 @@ final class HeadlessAppHostTests: XCTestCase {
                    socketPath: fixture.socketPath),
                let envelope = try? JSONSerialization.jsonObject(
                    with: Data(response.utf8)) as? [String: Any],
-               let result = envelope["result"] as? [String: Any],
-               let first = (result["chats"] as? [[String: Any]])?
-                   .first
+               let result = envelope["result"] as? [String: Any]
             {
-                chatState = first
-                let threads = first["threads"] as? [[String: Any]]
-                let messages = threads?.first?["messages"]
-                    as? [[String: Any]]
-                if messages?.contains(where: {
-                    ($0["text"] as? String)?
-                        .contains("AMP_ROOM_READY") == true
-                }) == true {
+                chatStates = result["chats"] as? [[String: Any]]
+                    ?? []
+                let results = Set(chatStates.flatMap { chat -> [String] in
+                    let threads = chat["threads"] as? [[String: Any]]
+                    let messages = threads?.first?["messages"]
+                        as? [[String: Any]]
+                    return messages?.compactMap {
+                        $0["text"] as? String
+                    } ?? []
+                })
+                if results.contains(where: {
+                    $0.contains("ARCHITECT_CHANNEL_READY")
+                }), results.contains(where: {
+                    $0.contains("REVIEWER_CHANNEL_READY")
+                }) {
                     break
                 }
             }
@@ -273,26 +356,72 @@ final class HeadlessAppHostTests: XCTestCase {
             }))
         XCTAssertEqual(
             channel.participants.map(\.displayName),
-            ["Headless Architect"])
+            ["Headless Architect", "Headless Reviewer"])
+        XCTAssertEqual(
+            channel.participants.map(\.role),
+            ["delivery owner", "integration reviewer"])
         XCTAssertEqual(
             channel.responsibilities.map(\.scope),
-            ["Sources/**"])
+            ["Sources/**", "Tests/**"])
         XCTAssertEqual(
             channel.plan.map(\.ownerID),
-            ["agent-headless-architect"])
+            ["agent-headless-architect", "agent-headless-reviewer"])
+        XCTAssertEqual(chatStates.count, 2)
+        let statesByParticipant: [String: [String: Any]] = Dictionary(
+            uniqueKeysWithValues: chatStates.compactMap {
+                state -> (String, [String: Any])? in
+                guard let participantID =
+                        state["participantId"] as? String
+                else { return nil }
+                return (participantID, state)
+            })
+        let architect = try XCTUnwrap(
+            statesByParticipant["agent-headless-architect"])
+        let reviewer = try XCTUnwrap(
+            statesByParticipant["agent-headless-reviewer"])
+        for state in [architect, reviewer] {
+            XCTAssertEqual(
+                state["channelId"] as? String,
+                proposalSpec.channelID)
+            XCTAssertEqual(state["provider"] as? String, "amp")
+            XCTAssertEqual(state["model"] as? String, "smart")
+        }
         XCTAssertEqual(
-            chatState?["channelId"] as? String,
-            proposalSpec.channelID)
+            architect["title"] as? String,
+            "Headless Architect")
         XCTAssertEqual(
-            chatState?["participantId"] as? String,
-            "agent-headless-architect")
-        let threads = chatState?["threads"] as? [[String: Any]]
-        let messages = threads?.first?["messages"]
-            as? [[String: Any]]
-        XCTAssertTrue(messages?.contains(where: {
-            ($0["text"] as? String)?
-                .contains("AMP_ROOM_READY") == true
-        }) == true)
+            reviewer["title"] as? String,
+            "Headless Reviewer")
+        func transcript(_ state: [String: Any]) -> [String] {
+            let threads = state["threads"] as? [[String: Any]]
+            let messages = threads?.first?["messages"]
+                as? [[String: Any]]
+            return messages?.compactMap {
+                $0["text"] as? String
+            } ?? []
+        }
+        XCTAssertTrue(transcript(architect).contains(where: {
+            $0.contains("ARCHITECT_CHANNEL_READY")
+        }))
+        XCTAssertTrue(transcript(reviewer).contains(where: {
+            $0.contains("REVIEWER_CHANNEL_READY")
+        }))
+        let architectPrompt = try String(
+            contentsOf: fixture.support.appendingPathComponent(
+                "architect-prompt.txt"),
+            encoding: .utf8)
+        let reviewerPrompt = try String(
+            contentsOf: fixture.support.appendingPathComponent(
+                "reviewer-prompt.txt"),
+            encoding: .utf8)
+        XCTAssertTrue(architectPrompt.contains(
+            "Your participant name: \"Headless Architect\""))
+        XCTAssertTrue(architectPrompt.contains(
+            "\"Headless Reviewer\" [chat]"))
+        XCTAssertTrue(reviewerPrompt.contains(
+            "Your participant name: \"Headless Reviewer\""))
+        XCTAssertTrue(reviewerPrompt.contains(
+            "\"Headless Architect\" [chat]"))
     }
 
     func testHeadlessRoomRecoversProvisioningAndRunningStatesAfterRestart()
@@ -535,6 +664,12 @@ final class HeadlessAppHostTests: XCTestCase {
                        "channel-panel-headless-channel")
         XCTAssertEqual(panel["title"] as? String, "Headless Channel")
         XCTAssertEqual(panel["open"] as? Bool, true)
+        let panelID = try XCTUnwrap(panel["panelId"] as? String)
+        XCTAssertEqual(
+            AppSocketClient.request(
+                "focus \(panelID)",
+                socketPath: fixture.socketPath),
+            "ok")
 
         let listWithPanelText = try XCTUnwrap(
             AppSocketClient.request("list", socketPath: fixture.socketPath))
@@ -544,6 +679,24 @@ final class HeadlessAppHostTests: XCTestCase {
         XCTAssertEqual(
             listWithPanel.compactMap { $0["kind"] as? String },
             ["channel"])
+        let listedPanel = try XCTUnwrap(listWithPanel.first(where: {
+            $0["kind"] as? String == "channel"
+        }))
+        XCTAssertEqual(listedPanel["focused"] as? Bool, true)
+        XCTAssertEqual(
+            AppSocketClient.request(
+                "close \(panelID)",
+                socketPath: fixture.socketPath),
+            "ok")
+        let listAfterPanelClose = try XCTUnwrap(
+            AppSocketClient.request(
+                "list", socketPath: fixture.socketPath))
+        let panesAfterPanelClose = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(listAfterPanelClose.utf8))
+                as? [[String: Any]])
+        XCTAssertEqual(panesAfterPanelClose.count, 1)
+        XCTAssertEqual(panesAfterPanelClose.first?["id"] as? Int, 1)
     }
 
     func testHeadlessChannelJournalReplaysAfterHostRestart() throws {

@@ -1278,6 +1278,7 @@ final class NavigationTests: XCTestCase {
             "workspace": FileManager.default.currentDirectoryPath,
         ])
         let chatID = try XCTUnwrap(created["chatId"] as? String)
+        let paneID = try XCTUnwrap(created["paneId"] as? String)
         let firstThread = try XCTUnwrap(
             created["activeThreadId"] as? String)
         XCTAssertEqual(created["title"] as? String, "Architect")
@@ -1312,6 +1313,20 @@ final class NavigationTests: XCTestCase {
             "name": "Architecture Lead",
         ])
         XCTAssertEqual(renamed["title"] as? String, "Architecture Lead")
+        let listedText = delegate.handleAppRequestForTesting("list")
+        let listed = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(listedText.utf8))
+                as? [[String: Any]])
+        XCTAssertTrue(listed.contains(where: {
+            $0["id"] as? String == paneID
+        }))
+        XCTAssertEqual(
+            delegate.handleAppRequestForTesting("focus \(paneID)"),
+            "ok")
+        let splitID = try XCTUnwrap(Int(
+            delegate.handleAppRequestForTesting(
+                "split \(paneID) right")))
+        XCTAssertGreaterThan(splitID, 0)
 
         let closed = try request([
             "v": 1,
@@ -1320,6 +1335,16 @@ final class NavigationTests: XCTestCase {
         ])
         XCTAssertEqual(closed["open"] as? Bool, false)
         XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 0)
+        let afterCloseText = delegate.handleAppRequestForTesting("list")
+        let afterClose = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(afterCloseText.utf8))
+                as? [[String: Any]])
+        XCTAssertFalse(afterClose.contains(where: {
+            $0["id"] as? String == paneID
+        }))
+        XCTAssertTrue(afterClose.contains(where: {
+            $0["id"] as? Int == splitID
+        }))
     }
 
     func testApprovedVisualProposalCreatesNamedConnectedProviderChat()
@@ -1662,8 +1687,14 @@ final class NavigationTests: XCTestCase {
                 in: window,
                 relativeTo: chat1))
         XCTAssertEqual(delegate.channelIDForTesting(reopenedChannelPane), channelID)
-        XCTAssertTrue(delegate.closeUtilityPaneForTesting(
-            reopenedChannelPane, in: window))
+        let panelID = "channel-panel-\(channelID)"
+        XCTAssertEqual(
+            delegate.handleAppRequestForTesting("focus \(panelID)"),
+            "ok")
+        XCTAssertEqual(
+            delegate.handleAppRequestForTesting("close \(panelID)"),
+            "ok")
+        XCTAssertNil(reopenedChannelPane.superview)
 
         let firstTranscript = assistant1.makeSidebarPanelView()
         assistant1.submitForQA("Tell the Channel what you completed.")
