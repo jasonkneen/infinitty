@@ -21,8 +21,22 @@ final class TerminalSession: NSObject {
     /// icon. Set via the pane socket (`todos <json>`), the app socket
     /// (`todos <id> <json>`), or the infinitty_todos MCP tool.
     private(set) var todos: [PaneTodo] = []
+    private let channelRegistrationLock = NSLock()
+    private var storedChannelRegistration: TerminalAgentRegistration?
     /// Broadcast hook for todo changes (wired by the app delegate).
     var onTodosChanged: ((TerminalSession) -> Void)?
+
+    var channelRegistration: TerminalAgentRegistration? {
+        channelRegistrationLock.lock()
+        defer { channelRegistrationLock.unlock() }
+        return storedChannelRegistration
+    }
+
+    func setChannelRegistration(_ value: TerminalAgentRegistration?) {
+        channelRegistrationLock.lock()
+        storedChannelRegistration = value
+        channelRegistrationLock.unlock()
+    }
 
     /// Replace the pane's todo list and refresh the header UI (main-safe).
     func setTodos(_ todos: [PaneTodo]) {

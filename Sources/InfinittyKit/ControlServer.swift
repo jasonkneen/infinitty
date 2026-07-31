@@ -13,6 +13,10 @@ import Foundation
 ///   exit-code           -> exit code of last completed command (OSC 133)
 ///   send <text>         -> type text into the terminal
 ///   send-line <text>    -> type text followed by return
+///   channel-context     -> live room, self, peers, plan, and recent messages
+///   channel-register    -> base64url JSON agent identity for this exact pane
+///   channel-post        -> base64url JSON message authored by this exact pane
+///   channel-unregister  -> release this pane's registered agent identity
 ///
 /// One command per connection; the response is the body, then close.
 final class ControlServer {
@@ -26,6 +30,12 @@ final class ControlServer {
     /// list. Wired by the session so hooks can publish via $INFINITTY_SOCKET
     /// without knowing pane ids.
     var todosHandler: ((String) -> String)?
+    /// Dynamic, pane-bound Channel operations. The host owns identity and room
+    /// lookup so a caller holding one pane socket cannot impersonate another.
+    var channelContextHandler: (() -> String)?
+    var channelRegisterHandler: ((String, pid_t) -> String)?
+    var channelPostHandler: ((String) -> String)?
+    var channelUnregisterHandler: ((String, pid_t) -> String)?
 
     private static var nextID = 0
     private static let idLock = NSLock()
@@ -150,7 +160,9 @@ final class ControlServer {
         }
         if line.last == 0x0D { line.removeLast() } // tolerate CRLF clients
         let request = String(decoding: line, as: UTF8.self)
-        let response = execute(request)
+        let response = execute(
+            request,
+            peerProcessID: Self.peerProcessID(for: fd))
         var out = Array(response.utf8)
         if out.count > ControlServer.maxResponseBytes {
             let kept = Array(out.suffix(ControlServer.maxResponseBytes))
@@ -166,7 +178,10 @@ final class ControlServer {
         }
     }
 
-    private func execute(_ request: String) -> String {
+    private func execute(
+        _ request: String,
+        peerProcessID: pid_t
+    ) -> String {
         // Split off the command word only; the argument is byte-exact so
         // `send` can transmit leading/trailing whitespace faithfully.
         let parts = request.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
@@ -205,10 +220,47 @@ final class ControlServer {
         case "todos":
             if let handler = todosHandler { return handler(arg) }
             return "error: todos not wired"
+        case "channel-context":
+            if let handler = channelContextHandler { return handler() }
+            return TerminalChannelControl.error(
+                "channel_unavailable",
+                "Channel context is not wired for this pane.")
+        case "channel-register":
+            if let handler = channelRegisterHandler {
+                return handler(arg, peerProcessID)
+            }
+            return TerminalChannelControl.error(
+                "channel_unavailable",
+                "Channel registration is not wired for this pane.")
+        case "channel-post":
+            if let handler = channelPostHandler { return handler(arg) }
+            return TerminalChannelControl.error(
+                "channel_unavailable",
+                "Channel posting is not wired for this pane.")
+        case "channel-unregister":
+            if let handler = channelUnregisterHandler {
+                return handler(arg, peerProcessID)
+            }
+            return TerminalChannelControl.error(
+                "channel_unavailable",
+                "Channel registration is not wired for this pane.")
         case "ping":
             return "pong"
         default:
-            return "error: unknown command '\(cmd)' (screen | history N | last-output | last-command | exit-code | send TEXT | send-line TEXT | ping)"
+            return "error: unknown command '\(cmd)' (screen | history N | last-output | last-command | exit-code | send TEXT | send-line TEXT | todos | channel-context | channel-register | channel-post | channel-unregister | ping)"
         }
+    }
+
+    private static func peerProcessID(for fd: Int32) -> pid_t {
+        var processID = pid_t(0)
+        var length = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(
+            fd,
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            &processID,
+            &length) == 0
+        else { return 0 }
+        return processID
     }
 }
