@@ -318,6 +318,28 @@ func channelPanelCall(
     return infinittyRequest("channel-panel \(encoded)")
 }
 
+func chatCall(
+    _ operation: String,
+    arguments: [String: Any] = [:]
+) -> String {
+    var payload = arguments
+    payload["v"] = 1
+    payload["op"] = operation
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload)
+    else {
+        return "error: could not encode Chat request"
+    }
+    guard data.count <= maximumChannelRequestBytes else {
+        return "error: Chat request exceeds \(maximumChannelRequestBytes) bytes"
+    }
+    let encoded = data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return infinittyRequest("chat \(encoded)")
+}
+
 // MARK: - tool definitions
 
 struct Tool {
@@ -466,6 +488,210 @@ let tools: [Tool] = [
             var payload = args
             let operation = payload.removeValue(forKey: "op") as? String ?? ""
             return channelCall(operation, arguments: payload)
+        }
+    ),
+    Tool(
+        name: "infinitty_room_propose",
+        description: "Prepare an inert, permission-first multi-agent room proposal. "
+            + "This records the exact objective, workspace, worktree policy, named "
+            + "agents, providers, models, roles, capabilities, and file scopes, then "
+            + "asks the human in native Infinitty UI. It does not create panes, "
+            + "provider processes, worktrees, or agents and cannot approve itself.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "proposalId": ["type": "string"],
+                "channelId": ["type": "string"],
+                "roomName": ["type": "string"],
+                "objective": ["type": "string"],
+                "workspaceRoot": [
+                    "type": "string",
+                    "description":
+                        "Absolute checkout path bound into the approval digest.",
+                ],
+                "workspaceStrategy": [
+                    "type": "string",
+                    "enum": ["shared_checkout", "worktrees"],
+                ] as [String: Any],
+                "presentation": [
+                    "type": "string",
+                    "enum": ["visual", "headless"],
+                    "description":
+                        "Where approved Chat agents must run. Defaults to the addressed instance mode.",
+                ] as [String: Any],
+                "targetInstanceId": [
+                    "type": "string",
+                    "description":
+                        "Exact live instance target; defaults to the instance addressed by this MCP server.",
+                ],
+                "agents": [
+                    "type": "array",
+                    "minItems": 1,
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "id": ["type": "string"],
+                            "displayName": ["type": "string"],
+                            "role": ["type": "string"],
+                            "runtime": [
+                                "type": "string",
+                                "enum": ["local", "cloud"],
+                            ] as [String: Any],
+                            "provider": [
+                                "type": "string",
+                                "enum": [
+                                    "auto", "claude", "codex",
+                                    "opencode", "hermes", "amp",
+                                    "apple",
+                                ],
+                            ] as [String: Any],
+                            "modelID": [
+                                "type": "string",
+                                "description":
+                                    "Opaque provider model identifier.",
+                            ],
+                            "responsibilityScopes": [
+                                "type": "array",
+                                "items": ["type": "string"],
+                            ],
+                            "capabilities": [
+                                "type": "array",
+                                "items": ["type": "string"],
+                            ],
+                        ],
+                        "required": [
+                            "id", "displayName", "role",
+                            "runtime", "provider",
+                        ],
+                    ] as [String: Any],
+                ],
+                "requestedCapabilities": [
+                    "type": "array",
+                    "items": ["type": "string"],
+                ],
+                "expiresInSeconds": [
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 3600,
+                    "description": "Approval lifetime; defaults to 600 seconds.",
+                ],
+                "actor": channelActorSchema,
+                "idempotencyKey": ["type": "string"],
+                "causationID": ["type": "string"],
+            ],
+            "required": [
+                "roomName", "objective", "workspaceRoot",
+                "workspaceStrategy", "agents", "actor",
+            ],
+        ],
+        invoke: { args in
+            let proposalID = args["proposalId"] as? String
+                ?? "proposal-\(UUID().uuidString.lowercased())"
+            let channelID = args["channelId"] as? String
+                ?? "channel-\(UUID().uuidString.lowercased())"
+            let lifetime = min(
+                max(args["expiresInSeconds"] as? Int ?? 600, 60),
+                3_600)
+            let instanceResponse = infinittyRequest("instance")
+            let instance = instanceResponse.data(using: .utf8)
+                .flatMap {
+                    try? JSONSerialization.jsonObject(with: $0)
+                        as? [String: Any]
+                }
+            let targetInstanceID =
+                args["targetInstanceId"] as? String
+                ?? instance?["id"] as? String
+            guard let targetInstanceID,
+                  !targetInstanceID.isEmpty
+            else {
+                return "error: could not resolve the target Infinitty instance"
+            }
+            let presentation =
+                args["presentation"] as? String
+                ?? ((instance?["mode"] as? String) == "headless"
+                    ? "headless"
+                    : "visual")
+            let proposal: [String: Any] = [
+                "id": proposalID,
+                "channelID": channelID,
+                "roomName": args["roomName"] as? String ?? "",
+                "objective": args["objective"] as? String ?? "",
+                "workspaceRoot": args["workspaceRoot"] as? String ?? "",
+                "agents": args["agents"] as? [[String: Any]] ?? [],
+                "workspaceStrategy":
+                    args["workspaceStrategy"] as? String
+                        ?? "shared_checkout",
+                "presentation": presentation,
+                "targetInstanceID": targetInstanceID,
+                "requestedCapabilities":
+                    args["requestedCapabilities"] as? [String] ?? [],
+                "expiresAt":
+                    Date().addingTimeInterval(TimeInterval(lifetime))
+                        .timeIntervalSince1970 * 1_000,
+            ]
+            // Keep the payload shape explicit so no approval-only field can
+            // accidentally cross this tool.
+            var payload: [String: Any] = [
+                "proposal": proposal,
+                "actor": args["actor"] as? [String: Any] ?? [:],
+                "idempotencyKey":
+                    args["idempotencyKey"] as? String
+                        ?? "prepare-\(proposalID)",
+            ]
+            if let causationID = args["causationID"] {
+                payload["causationID"] = causationID
+            }
+            return channelCall(
+                "prepare_proposal",
+                arguments: payload)
+        }
+    ),
+    Tool(
+        name: "infinitty_chat",
+        description: "Create and completely operate a named Chat pane. List, inspect, "
+            + "focus, close, submit, cancel, rename, bind a workspace, and create or "
+            + "select conversation threads. Provider model identifiers are passed "
+            + "through to the installed provider without a hard-coded release list.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "action": [
+                    "type": "string",
+                    "enum": [
+                        "list", "create", "snapshot", "focus", "close",
+                        "submit", "cancel", "new_thread", "select_thread",
+                        "rename", "set_workspace",
+                    ],
+                ] as [String: Any],
+                "chatId": [
+                    "type": "string",
+                    "description": "Stable Chat id returned by create or list.",
+                ],
+                "name": ["type": "string"],
+                "role": ["type": "string"],
+                "provider": [
+                    "type": "string",
+                    "enum": [
+                        "auto", "claude", "codex", "opencode", "hermes",
+                        "amp", "apple",
+                    ],
+                ] as [String: Any],
+                "model": [
+                    "type": "string",
+                    "description": "Opaque provider model id or visible model title.",
+                ],
+                "effort": ["type": "string"],
+                "workspace": ["type": "string"],
+                "threadId": ["type": "string"],
+                "text": ["type": "string"],
+            ],
+            "required": ["action"],
+        ],
+        invoke: { args in
+            var payload = args
+            let action = payload.removeValue(forKey: "action") as? String
+                ?? "list"
+            return chatCall(action, arguments: payload)
         }
     ),
     Tool(

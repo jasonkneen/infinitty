@@ -1,6 +1,12 @@
 import Darwin
 import Foundation
 
+struct AppControlRequestContext {
+    /// Kernel-reported PID for this Unix-domain socket peer. A request payload
+    /// cannot choose or forge this value.
+    let peerProcessID: pid_t
+}
+
 /// App-level control socket: one per infinitty process, discoverable at the
 /// stable path /tmp/infinitty-current.sock (symlink to the newest instance).
 /// This is the API other apps use to take control of infinitty as a whole —
@@ -41,6 +47,8 @@ import Foundation
 ///   browser <base64url-json> -> native browser automation request/reply JSON
 ///                               (use the infinitty_browser MCP tools rather
 ///                               than constructing this framing by hand)
+///   chat <base64url-json>    -> versioned Chat lifecycle, transcript, thread,
+///                               provider request, and workspace control
 ///   channel <base64url-json> -> versioned Channel snapshot or typed mutation
 ///                               (use the infinitty_channel MCP tools)
 ///   channel-panel <base64url-json> -> list/open/focus/close/snapshot/select
@@ -57,6 +65,9 @@ final class AppControlServer {
 
     /// Handles one request line, returns the response body.
     var handler: ((String) -> String)?
+    /// Reserved for host protocols that need kernel-attested peer identity.
+    /// Ordinary app control continues through `handler`.
+    var contextualHandler: ((AppControlRequestContext, String) -> String)?
 
     private var listenFD: Int32 = -1
     private var subscribers: [Int32] = []
@@ -274,6 +285,8 @@ final class AppControlServer {
     }
 
     private func handle(_ fd: Int32) {
+        let context = AppControlRequestContext(
+            peerProcessID: Self.peerProcessID(for: fd))
         var tv = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         // Also bound the response write: a client that requests a large
@@ -324,7 +337,10 @@ final class AppControlServer {
             return
         }
 
-        let response = handler?(request) ?? "error: not ready"
+        let response =
+            contextualHandler?(context, request)
+            ?? handler?(request)
+            ?? "error: not ready"
         var out = Array(response.utf8)
         if out.count > ControlServer.maxResponseBytes {
             let kept = Array(out.suffix(ControlServer.maxResponseBytes))
@@ -339,5 +355,29 @@ final class AppControlServer {
             }
         }
         close(fd)
+    }
+
+    private static func peerProcessID(for fd: Int32) -> pid_t {
+        var processID = pid_t(0)
+        var length = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(
+            fd,
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            &processID,
+            &length) == 0
+        else { return 0 }
+        return processID
+    }
+
+    static func executablePath(for processID: pid_t) -> String? {
+        guard processID > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let count = proc_pidpath(
+            processID,
+            &buffer,
+            UInt32(buffer.count))
+        guard count > 0 else { return nil }
+        return String(cString: buffer)
     }
 }

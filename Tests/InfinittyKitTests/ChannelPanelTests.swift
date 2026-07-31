@@ -116,6 +116,38 @@ final class ChannelPanelTests: XCTestCase {
         XCTAssertNil(controller.visibleCompactSectionForTesting)
     }
 
+    func testPendingProposalShowsExactAgentsAndRequiresExplicitDecision() {
+        let proposal = makeProposal()
+        let controller = ChannelPanelController(
+            channel: makeChannel(),
+            proposals: [proposal])
+        var decisions: [(String, String, Bool)] = []
+        controller.onProposalDecision = {
+            decisions.append(($0, $1, $2))
+        }
+
+        XCTAssertTrue(controller.renderedTextForTesting.contains(
+            "Build the release safely"))
+        XCTAssertTrue(controller.renderedTextForTesting.contains(
+            "Architecture Lead"))
+        XCTAssertTrue(controller.renderedTextForTesting.contains("worktrees"))
+        let proposals = controller.controlState()["proposals"]
+            as? [[String: Any]]
+        XCTAssertEqual(proposals?.first?["state"] as? String, "pending")
+        XCTAssertEqual(
+            (proposals?.first?["agents"] as? [[String: Any]])?
+                .first?["provider"] as? String,
+            "amp")
+
+        controller.decideProposalForTesting(
+            proposalID: proposal.spec.id,
+            approve: true)
+        XCTAssertEqual(decisions.count, 1)
+        XCTAssertEqual(decisions.first?.0, proposal.spec.id)
+        XCTAssertEqual(decisions.first?.1, proposal.digest)
+        XCTAssertEqual(decisions.first?.2, true)
+    }
+
     private func makeChannel() -> CollaborationChannelState {
         CollaborationChannelState(
             id: "channel-1",
@@ -195,5 +227,36 @@ final class ChannelPanelTests: XCTestCase {
                     authorID: "participant-2",
                     text: "Implementation started"),
             ])
+    }
+
+    private func makeProposal() -> CollaborationRoomProposal {
+        let spec = CollaborationRoomProposalSpec(
+            id: "proposal-1",
+            channelID: "channel-1",
+            roomName: "Launch Room",
+            objective: "Build the release safely",
+            workspaceRoot: "/tmp/project",
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent-architect",
+                    displayName: "Architecture Lead",
+                    role: "Own system design",
+                    runtime: .local,
+                    provider: "amp",
+                    modelID: "smart",
+                    responsibilityScopes: ["Sources/Architecture/**"]),
+            ],
+            workspaceStrategy: .worktrees,
+            requestedCapabilities: ["workspace.write"],
+            expiresAt: Date(timeIntervalSince1970: 5_000))
+        return CollaborationRoomProposal(
+            spec: spec,
+            digest: try! spec.canonicalDigest(),
+            state: .pending,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            decidedByActorID: nil,
+            decidedAt: nil,
+            statusMessage: nil)
     }
 }

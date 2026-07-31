@@ -31,7 +31,7 @@ final class HeadlessAppHostTests: XCTestCase {
         XCTAssertEqual(
             Set(instance["capabilities"] as? [String] ?? []),
             Set([
-                "terminal", "terminal.run", "channel", "channel.panel",
+                "terminal", "terminal.run", "chat", "channel", "channel.panel",
                 "events",
             ]))
 
@@ -48,6 +48,415 @@ final class HeadlessAppHostTests: XCTestCase {
             atPath: fixture.socketPath))
         XCTAssertTrue(AppInstanceRegistry.list(
             baseDirectory: fixture.support).isEmpty)
+    }
+
+    func testHeadlessStructuredChatLifecycleMatchesVisualControl()
+        throws
+    {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let host = try HeadlessAppHost(
+            instanceID: "headless-chat",
+            socketPath: fixture.socketPath,
+            applicationSupportDirectory: fixture.support,
+            publishesCurrentLink: false)
+        try host.start(launchInitialTerminal: false)
+        defer { host.stop() }
+
+        func request(_ value: [String: Any]) throws -> [String: Any] {
+            let encoded = try XCTUnwrap(BrowserControlCodec.encode(value))
+            let response = try XCTUnwrap(AppSocketClient.request(
+                "chat \(encoded)",
+                socketPath: fixture.socketPath))
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(response.utf8))
+                    as? [String: Any])
+            XCTAssertEqual(
+                envelope["ok"] as? Bool,
+                true,
+                "response=\(response)")
+            return try XCTUnwrap(envelope["result"] as? [String: Any])
+        }
+
+        let created = try request([
+            "v": 1,
+            "op": "create",
+            "name": "Headless Architect",
+            "role": "planning lead",
+            "provider": "amp",
+            "model": "smart",
+            "workspace": fixture.support.path,
+        ])
+        let chatID = try XCTUnwrap(created["chatId"] as? String)
+        let threadID = try XCTUnwrap(
+            created["activeThreadId"] as? String)
+        XCTAssertEqual(created["title"] as? String, "Headless Architect")
+        XCTAssertEqual(created["role"] as? String, "planning lead")
+        XCTAssertEqual(created["provider"] as? String, "amp")
+        XCTAssertEqual(created["model"] as? String, "smart")
+        XCTAssertEqual(created["headless"] as? Bool, true)
+
+        let listed = try request(["v": 1, "op": "list"])
+        XCTAssertEqual(
+            (listed["chats"] as? [[String: Any]])?.first?["chatId"]
+                as? String,
+            chatID)
+
+        let reset = try request([
+            "v": 1,
+            "op": "new_thread",
+            "chatId": chatID,
+        ])
+        XCTAssertEqual(
+            reset["activeThreadId"] as? String,
+            threadID,
+            "A blank Chat reuses its empty thread.")
+        _ = try request([
+            "v": 1,
+            "op": "select_thread",
+            "chatId": chatID,
+            "threadId": threadID,
+        ])
+        let renamed = try request([
+            "v": 1,
+            "op": "rename",
+            "chatId": chatID,
+            "name": "Headless Lead",
+        ])
+        XCTAssertEqual(renamed["title"] as? String, "Headless Lead")
+
+        let panesText = try XCTUnwrap(AppSocketClient.request(
+            "list", socketPath: fixture.socketPath))
+        let panes = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(panesText.utf8))
+                as? [[String: Any]])
+        XCTAssertEqual(panes.first?["kind"] as? String, "chat")
+        XCTAssertEqual(panes.first?["title"] as? String, "Headless Lead")
+
+        let closed = try request([
+            "v": 1,
+            "op": "close",
+            "chatId": chatID,
+        ])
+        XCTAssertEqual(closed["open"] as? Bool, false)
+        XCTAssertEqual(
+            AppSocketClient.request(
+                "list", socketPath: fixture.socketPath),
+            "[]")
+    }
+
+    func testApprovedHeadlessProposalCreatesRealConnectedAgentRoom()
+        throws
+    {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let executable = fixture.support.appendingPathComponent(
+            "fake-amp")
+        try """
+        #!/bin/sh
+        printf '%s\n' '{"type":"result","result":"AMP_ROOM_READY"}'
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path)
+        let previousAmp = getenv("INFINITTY_AMP_EXECUTABLE")
+            .map { String(cString: $0) }
+        setenv("INFINITTY_AMP_EXECUTABLE", executable.path, 1)
+        defer {
+            if let previousAmp {
+                setenv(
+                    "INFINITTY_AMP_EXECUTABLE",
+                    previousAmp,
+                    1)
+            } else {
+                unsetenv("INFINITTY_AMP_EXECUTABLE")
+            }
+        }
+
+        let host = try HeadlessAppHost(
+            instanceID: "headless-room",
+            socketPath: fixture.socketPath,
+            applicationSupportDirectory: fixture.support,
+            publishesCurrentLink: false)
+        try host.start(launchInitialTerminal: false)
+        defer { host.stop() }
+        let coordinator = CollaborationCoordinatorClient(
+            applicationSupportDirectory: fixture.support)
+        let proposalSpec = CollaborationRoomProposalSpec(
+            id: "proposal-headless-room",
+            channelID: "channel-headless-room",
+            roomName: "Headless Delivery Room",
+            objective: "Return a real provider result.",
+            workspaceRoot: fixture.support.path,
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent-headless-architect",
+                    displayName: "Headless Architect",
+                    role: "delivery owner",
+                    runtime: .local,
+                    provider: "amp",
+                    modelID: "smart",
+                    responsibilityScopes: ["Sources/**"],
+                    capabilities: ["workspace.write"]),
+            ],
+            workspaceStrategy: .sharedCheckout,
+            presentation: .headless,
+            targetInstanceID: "headless-room",
+            requestedCapabilities: ["workspace.write"],
+            expiresAt: Date().addingTimeInterval(300))
+        let prepare = CollaborationControlRequest(
+            op: .prepareProposal,
+            actor: CollaborationActor(
+                id: "agent:requester",
+                kind: .agent,
+                displayName: "Requesting agent"),
+            idempotencyKey: "prepare-headless-room",
+            proposal: proposalSpec)
+        let prepared = try XCTUnwrap(coordinator.execute(
+            try XCTUnwrap(CollaborationControlCodec.encode(prepare)))
+            .snapshot?.proposals.first)
+        let approve = CollaborationControlRequest(
+            op: .approveProposal,
+            actor: CollaborationActor(
+                id: "human:test",
+                kind: .human,
+                displayName: "Test human"),
+            idempotencyKey: "approve-headless-room",
+            proposalID: proposalSpec.id,
+            proposalDigest: prepared.digest)
+        XCTAssertNotNil(coordinator.executeHumanDecision(
+            try XCTUnwrap(CollaborationControlCodec.encode(approve)))
+            .snapshot)
+
+        var finalSnapshot: CollaborationSnapshot?
+        var chatState: [String: Any]?
+        for _ in 0..<120 {
+            finalSnapshot = coordinator.snapshot()
+            if finalSnapshot?.proposals.first(where: {
+                $0.spec.id == proposalSpec.id
+            })?.state == .running,
+               let encoded = BrowserControlCodec.encode([
+                   "v": 1,
+                   "op": "list",
+               ]),
+               let response = AppSocketClient.request(
+                   "chat \(encoded)",
+                   socketPath: fixture.socketPath),
+               let envelope = try? JSONSerialization.jsonObject(
+                   with: Data(response.utf8)) as? [String: Any],
+               let result = envelope["result"] as? [String: Any],
+               let first = (result["chats"] as? [[String: Any]])?
+                   .first
+            {
+                chatState = first
+                let threads = first["threads"] as? [[String: Any]]
+                let messages = threads?.first?["messages"]
+                    as? [[String: Any]]
+                if messages?.contains(where: {
+                    ($0["text"] as? String)?
+                        .contains("AMP_ROOM_READY") == true
+                }) == true {
+                    break
+                }
+            }
+            usleep(50_000)
+        }
+
+        XCTAssertEqual(
+            finalSnapshot?.proposals.first(where: {
+                $0.spec.id == proposalSpec.id
+            })?.state,
+            .running)
+        let channel = try XCTUnwrap(
+            finalSnapshot?.channels.first(where: {
+                $0.id == proposalSpec.channelID
+            }))
+        XCTAssertEqual(
+            channel.participants.map(\.displayName),
+            ["Headless Architect"])
+        XCTAssertEqual(
+            channel.responsibilities.map(\.scope),
+            ["Sources/**"])
+        XCTAssertEqual(
+            channel.plan.map(\.ownerID),
+            ["agent-headless-architect"])
+        XCTAssertEqual(
+            chatState?["channelId"] as? String,
+            proposalSpec.channelID)
+        XCTAssertEqual(
+            chatState?["participantId"] as? String,
+            "agent-headless-architect")
+        let threads = chatState?["threads"] as? [[String: Any]]
+        let messages = threads?.first?["messages"]
+            as? [[String: Any]]
+        XCTAssertTrue(messages?.contains(where: {
+            ($0["text"] as? String)?
+                .contains("AMP_ROOM_READY") == true
+        }) == true)
+    }
+
+    func testHeadlessRoomRecoversProvisioningAndRunningStatesAfterRestart()
+        throws
+    {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let executable = fixture.support.appendingPathComponent(
+            "fake-amp-recovery")
+        try """
+        #!/bin/sh
+        printf '%s\n' '{"type":"result","result":"AMP_RECOVERY_READY"}'
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path)
+        let previousAmp = getenv("INFINITTY_AMP_EXECUTABLE")
+            .map { String(cString: $0) }
+        setenv("INFINITTY_AMP_EXECUTABLE", executable.path, 1)
+        defer {
+            if let previousAmp {
+                setenv("INFINITTY_AMP_EXECUTABLE", previousAmp, 1)
+            } else {
+                unsetenv("INFINITTY_AMP_EXECUTABLE")
+            }
+        }
+
+        let coordinator = CollaborationCoordinatorClient(
+            applicationSupportDirectory: fixture.support)
+        let spec = CollaborationRoomProposalSpec(
+            id: "proposal-headless-recovery",
+            channelID: "channel-headless-recovery",
+            roomName: "Recovery Room",
+            objective: "Recover the real agent runtime.",
+            workspaceRoot: fixture.support.path,
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent-recovery",
+                    displayName: "Recovery Agent",
+                    role: "recovery owner",
+                    runtime: .local,
+                    provider: "amp",
+                    modelID: "smart",
+                    responsibilityScopes: ["Sources/**"],
+                    capabilities: ["workspace.write"]),
+            ],
+            workspaceStrategy: .sharedCheckout,
+            presentation: .headless,
+            targetInstanceID: "headless-recovery",
+            requestedCapabilities: ["workspace.write"],
+            expiresAt: Date().addingTimeInterval(300))
+        let prepare = CollaborationControlRequest(
+            op: .prepareProposal,
+            actor: CollaborationActor(
+                id: "agent:requester",
+                kind: .agent,
+                displayName: "Requesting agent"),
+            idempotencyKey: "prepare-headless-recovery",
+            proposal: spec)
+        let prepared = try XCTUnwrap(coordinator.execute(
+            try XCTUnwrap(CollaborationControlCodec.encode(prepare)))
+            .snapshot?.proposals.first)
+        let approve = CollaborationControlRequest(
+            op: .approveProposal,
+            actor: CollaborationActor(
+                id: "human:test",
+                kind: .human,
+                displayName: "Test human"),
+            idempotencyKey: "approve-headless-recovery",
+            proposalID: spec.id,
+            proposalDigest: prepared.digest)
+        XCTAssertNotNil(coordinator.executeHumanDecision(
+            try XCTUnwrap(CollaborationControlCodec.encode(approve)))
+            .snapshot)
+        let startProvisioning = CollaborationControlRequest(
+            op: .startProvisioning,
+            actor: CollaborationActor(
+                id: "system:orchestrator:headless-recovery",
+                kind: .system,
+                displayName: "Recovery orchestrator"),
+            idempotencyKey: "start-headless-recovery",
+            proposalID: spec.id,
+            proposalDigest: prepared.digest)
+        XCTAssertEqual(
+            coordinator.execute(try XCTUnwrap(
+                CollaborationControlCodec.encode(startProvisioning)))
+                .snapshot?.proposals.first?.state,
+            .provisioning)
+
+        func chatState() -> [String: Any]? {
+            guard let encoded = BrowserControlCodec.encode([
+                "v": 1,
+                "op": "list",
+            ]),
+                  let response = AppSocketClient.request(
+                    "chat \(encoded)",
+                    socketPath: fixture.socketPath),
+                  let envelope = try? JSONSerialization.jsonObject(
+                    with: Data(response.utf8)) as? [String: Any],
+                  let result = envelope["result"] as? [String: Any]
+            else { return nil }
+            return (result["chats"] as? [[String: Any]])?.first
+        }
+
+        var first: HeadlessAppHost? = try HeadlessAppHost(
+            instanceID: "headless-recovery",
+            socketPath: fixture.socketPath,
+            applicationSupportDirectory: fixture.support,
+            publishesCurrentLink: false)
+        try first?.start(launchInitialTerminal: false)
+        var firstChat: [String: Any]?
+        for _ in 0..<120 {
+            firstChat = chatState()
+            let messages =
+                (firstChat?["threads"] as? [[String: Any]])?
+                .first?["messages"] as? [[String: Any]]
+            if coordinator.snapshot()?.proposals.first?.state == .running,
+               messages?.contains(where: {
+                   ($0["text"] as? String)?
+                    .contains("AMP_RECOVERY_READY") == true
+               }) == true
+            {
+                break
+            }
+            usleep(50_000)
+        }
+        XCTAssertEqual(
+            coordinator.snapshot()?.proposals.first?.state,
+            .running)
+        let stableChatID = try XCTUnwrap(firstChat?["chatId"] as? String)
+        first?.stop()
+        first = nil
+
+        let second = try HeadlessAppHost(
+            instanceID: "headless-recovery",
+            socketPath: fixture.socketPath,
+            applicationSupportDirectory: fixture.support,
+            publishesCurrentLink: false)
+        try second.start(launchInitialTerminal: false)
+        defer { second.stop() }
+        var recoveredChat: [String: Any]?
+        for _ in 0..<120 {
+            recoveredChat = chatState()
+            let messages =
+                (recoveredChat?["threads"] as? [[String: Any]])?
+                .first?["messages"] as? [[String: Any]]
+            if recoveredChat?["channelId"] as? String == spec.channelID,
+               messages?.contains(where: {
+                ($0["text"] as? String)?
+                    .contains("AMP_RECOVERY_READY") == true
+            }) == true {
+                break
+            }
+            usleep(50_000)
+        }
+        XCTAssertEqual(
+            recoveredChat?["chatId"] as? String,
+            stableChatID)
+        XCTAssertEqual(
+            recoveredChat?["channelId"] as? String,
+            spec.channelID)
+        XCTAssertEqual(
+            coordinator.snapshot()?.proposals.first?.state,
+            .running)
     }
 
     func testHeadlessHostCreatesPTYTerminalAndExposesChannelTransport() throws {

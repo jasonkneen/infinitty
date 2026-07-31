@@ -38,6 +38,19 @@ struct ChannelPanelProjection: Equatable {
         let leaseExpiresAt: Date?
     }
 
+    struct ProposalRow: Equatable {
+        let id: String
+        let digest: String
+        let state: CollaborationProposalState
+        let objective: String
+        let workspaceStrategy: CollaborationWorkspaceStrategy
+        let presentation: CollaborationRoomPresentation
+        let targetInstanceID: String?
+        let agents: [CollaborationAgentSpec]
+        let expiresAt: Date
+        let statusMessage: String?
+    }
+
     let channelID: String
     let title: String
     let revision: Int
@@ -46,13 +59,18 @@ struct ChannelPanelProjection: Equatable {
     let threads: [ThreadRow]
     let plan: [PlanRow]
     let responsibilities: [ResponsibilityRow]
+    let proposals: [ProposalRow]
     let roomMessages: [CollaborationMessage]
     let visibleMessages: [CollaborationMessage]
     let selectedThreadID: String?
     let selectedThreadTitle: String
     let auditReceipt: String
 
-    init(channel: CollaborationChannelState, selectedThreadID: String?) {
+    init(
+        channel: CollaborationChannelState,
+        selectedThreadID: String?,
+        proposals: [CollaborationRoomProposal] = []
+    ) {
         let participantByID = Dictionary(
             uniqueKeysWithValues: channel.participants.map { ($0.id, $0) })
         let connectedParticipantIDs = Set(
@@ -140,6 +158,26 @@ struct ChannelPanelProjection: Equatable {
                     ?? $0.ownerID,
                 leaseExpiresAt: $0.leaseExpiresAt)
         }
+        self.proposals = proposals
+            .filter { $0.spec.channelID == channel.id }
+            .map {
+                ProposalRow(
+                    id: $0.spec.id,
+                    digest: $0.digest,
+                    state: $0.state,
+                    objective: $0.spec.objective,
+                    workspaceStrategy: $0.spec.workspaceStrategy,
+                    presentation: $0.spec.presentation,
+                    targetInstanceID: $0.spec.targetInstanceID,
+                    agents: $0.spec.agents,
+                    expiresAt: $0.spec.expiresAt,
+                    statusMessage: $0.statusMessage)
+            }
+            .sorted { lhs, rhs in
+                if lhs.state == .pending, rhs.state != .pending { return true }
+                if rhs.state == .pending, lhs.state != .pending { return false }
+                return lhs.id < rhs.id
+            }
         self.roomMessages = channel.messages.filter {
             $0.threadID == nil || $0.threadID?.isEmpty == true
         }
@@ -243,6 +281,42 @@ struct ChannelPanelProjection: Equatable {
                 }
                 return value
             },
+            "proposals": proposals.map { proposal in
+                var value: [String: Any] = [
+                    "id": proposal.id,
+                    "digest": proposal.digest,
+                    "state": proposal.state.rawValue,
+                    "objective": proposal.objective,
+                    "workspaceStrategy":
+                        proposal.workspaceStrategy.rawValue,
+                    "presentation": proposal.presentation.rawValue,
+                    "expiresAt": ISO8601DateFormatter().string(
+                        from: proposal.expiresAt),
+                    "agents": proposal.agents.map { agent in
+                        var value: [String: Any] = [
+                            "id": agent.id,
+                            "name": agent.displayName,
+                            "role": agent.role,
+                            "runtime": agent.runtime.rawValue,
+                            "provider": agent.provider,
+                            "responsibilityScopes":
+                                agent.responsibilityScopes,
+                            "capabilities": agent.capabilities,
+                        ]
+                        if let model = agent.modelID {
+                            value["model"] = model
+                        }
+                        return value
+                    },
+                ]
+                if let statusMessage = proposal.statusMessage {
+                    value["statusMessage"] = statusMessage
+                }
+                if let targetInstanceID = proposal.targetInstanceID {
+                    value["targetInstanceId"] = targetInstanceID
+                }
+                return value
+            },
             "roomMessages": roomMessages.map(messageState),
             "visibleMessages": visibleMessages.map(messageState),
             "auditReceipt": auditReceipt,
@@ -262,8 +336,14 @@ private final class ChannelPanelFlippedView: NSView {
 final class ChannelPanelController: NSViewController {
     var onSendMessage: ((String, String?) -> Void)?
     var onUpdateRole: ((String, String) -> Void)?
+    var onProposalDecision: ((
+        String,
+        String,
+        Bool
+    ) -> Void)?
 
     private var channel: CollaborationChannelState
+    private var proposals: [CollaborationRoomProposal]
     private(set) var selectedThreadID: String?
     private var projection: ChannelPanelProjection
 
@@ -288,17 +368,28 @@ final class ChannelPanelController: NSViewController {
     private(set) var isCompact = false
     private var threadButtons: [String: NSButton] = [:]
 
-    init(channel: CollaborationChannelState) {
+    init(
+        channel: CollaborationChannelState,
+        proposals: [CollaborationRoomProposal] = []
+    ) {
         self.channel = channel
+        self.proposals = proposals
         self.projection = ChannelPanelProjection(
-            channel: channel, selectedThreadID: nil)
+            channel: channel,
+            selectedThreadID: nil,
+            proposals: proposals)
         super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        let root = NSView()
+        // The controller is created before its UtilityPaneView joins the live
+        // split tree. Seed a usable canvas so the three column scroll views do
+        // not resolve their required width constraints against an
+        // autoresizing-mask width of zero during that hand-off.
+        let root = NSView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.clear.cgColor
         for stack in [
@@ -368,9 +459,13 @@ final class ChannelPanelController: NSViewController {
         updateCompactLayout(for: view.bounds.width)
     }
 
-    func update(channel: CollaborationChannelState) {
+    func update(
+        channel: CollaborationChannelState,
+        proposals: [CollaborationRoomProposal] = []
+    ) {
         guard channel.id == self.channel.id else { return }
         self.channel = channel
+        self.proposals = proposals
         if let selectedThreadID,
            !channel.messages.contains(where: {
                $0.threadID == selectedThreadID
@@ -379,7 +474,9 @@ final class ChannelPanelController: NSViewController {
             self.selectedThreadID = nil
         }
         projection = ChannelPanelProjection(
-            channel: channel, selectedThreadID: selectedThreadID)
+            channel: channel,
+            selectedThreadID: selectedThreadID,
+            proposals: proposals)
         guard isViewLoaded else { return }
         render()
     }
@@ -528,7 +625,9 @@ final class ChannelPanelController: NSViewController {
 
     private func render() {
         projection = ChannelPanelProjection(
-            channel: channel, selectedThreadID: selectedThreadID)
+            channel: channel,
+            selectedThreadID: selectedThreadID,
+            proposals: proposals)
         titleLabel.stringValue = projection.title
         subtitleLabel.stringValue =
             "\(projection.selectedThreadTitle) · revision \(projection.revision)"
@@ -610,6 +709,57 @@ final class ChannelPanelController: NSViewController {
         }
 
         clear(statusStack)
+        statusStack.addArrangedSubview(sectionLabel("Room proposals"))
+        if projection.proposals.isEmpty {
+            statusStack.addArrangedSubview(
+                NSTextField(labelWithString: "No room proposal"))
+        } else {
+            for proposal in projection.proposals {
+                let agents = proposal.agents.map {
+                    "\($0.displayName) — \($0.role) [\($0.provider)]"
+                }.joined(separator: "\n")
+                let status = proposal.state.rawValue
+                let workspace = proposal.workspaceStrategy.rawValue
+                    .replacingOccurrences(of: "_", with: " ")
+                let target = proposal.targetInstanceID.map {
+                    " · target \($0)"
+                } ?? ""
+                let label = NSTextField(wrappingLabelWithString:
+                    "\(status) · \(proposal.objective)\n"
+                    + "\(proposal.agents.count) agents · \(workspace) · "
+                    + "\(proposal.presentation.rawValue)\(target)\n"
+                    + agents)
+                label.font = .systemFont(ofSize: 11)
+                label.maximumNumberOfLines = 12
+                statusStack.addArrangedSubview(label)
+                if proposal.state == .pending {
+                    let actions = NSStackView()
+                    actions.orientation = .horizontal
+                    actions.spacing = 6
+                    let proposalActions: [
+                        (title: String, approved: Bool, style: NSButton.BezelStyle)
+                    ] = [
+                        ("Approve", true, .rounded),
+                        ("Deny", false, .recessed),
+                    ]
+                    for (title, approved, style) in proposalActions {
+                        let button = NSButton(
+                            title: title,
+                            target: self,
+                            action: #selector(decideProposal(_:)))
+                        button.bezelStyle = style
+                        button.identifier = NSUserInterfaceItemIdentifier(
+                            proposal.id)
+                        button.tag = approved ? 1 : 0
+                        button.setAccessibilityLabel(
+                            "\(title) room proposal \(proposal.id)")
+                        actions.addArrangedSubview(button)
+                    }
+                    statusStack.addArrangedSubview(actions)
+                }
+            }
+        }
+        statusStack.addArrangedSubview(separator())
         statusStack.addArrangedSubview(sectionLabel("Plan / Status"))
         if projection.plan.isEmpty {
             statusStack.addArrangedSubview(
@@ -718,6 +868,18 @@ final class ChannelPanelController: NSViewController {
         onUpdateRole?(participantID, role)
     }
 
+    @objc private func decideProposal(_ sender: NSButton) {
+        guard let proposalID = sender.identifier?.rawValue,
+              let proposal = projection.proposals.first(where: {
+                  $0.id == proposalID && $0.state == .pending
+              })
+        else { return }
+        onProposalDecision?(
+            proposal.id,
+            proposal.digest,
+            sender.tag == 1)
+    }
+
     func selectThreadForTesting(_ id: String?) {
         _ = selectThreadForControl(id)
     }
@@ -762,9 +924,25 @@ final class ChannelPanelController: NSViewController {
         let responsibilityText = projection.responsibilities.map {
             "\($0.scope) \($0.ownerName) \($0.summary)"
         }
+        let proposalText = projection.proposals.flatMap { proposal in
+            [
+                proposal.state.rawValue,
+                proposal.objective,
+                proposal.workspaceStrategy.rawValue,
+                proposal.presentation.rawValue,
+                proposal.targetInstanceID ?? "",
+            ] + proposal.agents.flatMap {
+                [
+                    $0.displayName,
+                    $0.role,
+                    $0.provider,
+                    $0.modelID ?? "",
+                ]
+            }
+        }
         return ([projection.title, projection.auditReceipt]
             + participantText + threadText + planText
-            + responsibilityText
+            + responsibilityText + proposalText
             + projection.visibleMessages.map(\.text))
             .joined(separator: "\n")
     }
@@ -776,12 +954,24 @@ final class ChannelPanelController: NSViewController {
         }
         selectedThreadID = id
         projection = ChannelPanelProjection(
-            channel: channel, selectedThreadID: selectedThreadID)
+            channel: channel,
+            selectedThreadID: selectedThreadID,
+            proposals: proposals)
         if isViewLoaded { render() }
         return true
     }
 
     func controlState(isOpen: Bool = true) -> [String: Any] {
         projection.controlState(isOpen: isOpen)
+    }
+
+    func decideProposalForTesting(
+        proposalID: String,
+        approve: Bool
+    ) {
+        guard let proposal = projection.proposals.first(where: {
+            $0.id == proposalID && $0.state == .pending
+        }) else { return }
+        onProposalDecision?(proposal.id, proposal.digest, approve)
     }
 }

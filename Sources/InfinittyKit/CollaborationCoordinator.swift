@@ -41,26 +41,18 @@ final class CollaborationCoordinatorClient {
         response: String,
         snapshot: CollaborationSnapshot?
     ) {
-        if let response = AppSocketClient.request(
-            "channel-local \(encoded)", socketPath: socketPath)
-        {
-            return (
-                response,
-                CollaborationControlCodec.snapshot(fromResponse: response))
-        }
-        guard ensureAuthority(),
-              let response = AppSocketClient.request(
-                  "channel-local \(encoded)", socketPath: socketPath)
-        else {
-            return (
-                CollaborationControlCodec.response(
-                    error: "coordinator_unavailable",
-                    message: "The shared Channel coordinator could not start."),
-                nil)
-        }
-        return (
-            response,
-            CollaborationControlCodec.snapshot(fromResponse: response))
+        request("channel-local \(encoded)")
+    }
+
+    /// Native UI confirmation crosses a distinct host-only transport. The
+    /// coordinator validates the Unix peer PID against its own executable
+    /// before minting the non-Codable domain authority. App control and MCP
+    /// callers stay on `execute` and cannot self-assert this privilege.
+    func executeHumanDecision(_ encoded: String) -> (
+        response: String,
+        snapshot: CollaborationSnapshot?
+    ) {
+        request("channel-local-human \(encoded)")
     }
 
     func snapshot() -> CollaborationSnapshot? {
@@ -105,7 +97,8 @@ final class CollaborationCoordinatorClient {
             path: socketPath,
             publishesCurrentLink: false,
             replacesExistingSocket: false)
-        server.handler = { [weak self, weak room] request in
+        server.contextualHandler = {
+            [weak self, weak room] context, request in
             guard let self, let room else {
                 return CollaborationControlCodec.response(
                     error: "coordinator_stopping",
@@ -116,13 +109,48 @@ final class CollaborationCoordinatorClient {
                 separator: " ",
                 maxSplits: 1,
                 omittingEmptySubsequences: false)
-            guard parts.first == "channel-local", parts.count == 2 else {
+            guard parts.count == 2 else {
                 return CollaborationControlCodec.response(
                     error: "invalid_request",
                     message: "Unknown coordinator request.")
             }
             let encoded = String(parts[1])
-            let result = CollaborationControlCodec.execute(encoded, in: room)
+            let result: (
+                response: String,
+                snapshot: CollaborationSnapshot?
+            )
+            if parts.first == "channel-local" {
+                result = CollaborationControlCodec.execute(
+                    encoded,
+                    in: room)
+            } else if parts.first == "channel-local-human" {
+                guard Self.isTrustedHostPeer(context.peerProcessID) else {
+                    return CollaborationControlCodec.response(
+                        error: "human_decision_not_authorized",
+                        message:
+                            "Human decisions require a native Infinitty UI peer.")
+                }
+                guard case let .success(decoded) =
+                        CollaborationControlCodec.decode(encoded),
+                      decoded.op == .approveProposal
+                        || decoded.op == .denyProposal,
+                      let actor = decoded.actor,
+                      actor.kind == .human
+                else {
+                    return CollaborationControlCodec.response(
+                        error: "invalid_human_decision",
+                        message:
+                            "The trusted decision path accepts only human approve or deny.")
+                }
+                result = CollaborationControlCodec.execute(
+                    encoded,
+                    in: room,
+                    humanDecisionAuthority: .confirmed(actorID: actor.id))
+            } else {
+                return CollaborationControlCodec.response(
+                    error: "invalid_request",
+                    message: "Unknown coordinator request.")
+            }
             if result.snapshot != nil,
                case .success(let decoded) =
                    CollaborationControlCodec.decode(encoded),
@@ -136,6 +164,47 @@ final class CollaborationCoordinatorClient {
         ownedRoom = room
         ownedServer = server
         return true
+    }
+
+    private func request(_ command: String) -> (
+        response: String,
+        snapshot: CollaborationSnapshot?
+    ) {
+        if let response = AppSocketClient.request(
+            command,
+            socketPath: socketPath)
+        {
+            return (
+                response,
+                CollaborationControlCodec.snapshot(fromResponse: response))
+        }
+        guard ensureAuthority(),
+              let response = AppSocketClient.request(
+                  command,
+                  socketPath: socketPath)
+        else {
+            return (
+                CollaborationControlCodec.response(
+                    error: "coordinator_unavailable",
+                    message: "The shared Channel coordinator could not start."),
+                nil)
+        }
+        return (
+            response,
+            CollaborationControlCodec.snapshot(fromResponse: response))
+    }
+
+    private static func isTrustedHostPeer(_ processID: pid_t) -> Bool {
+        guard let peerPath = AppControlServer.executablePath(
+                  for: processID),
+              let ownPath = AppControlServer.executablePath(
+                  for: getpid())
+        else { return false }
+        let peer = URL(fileURLWithPath: peerPath)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let own = URL(fileURLWithPath: ownPath)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        return peer == own
     }
 
     private func notifyInstances(response: String) {

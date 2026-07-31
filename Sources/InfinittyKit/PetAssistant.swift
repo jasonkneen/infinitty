@@ -115,6 +115,59 @@ struct ChatThread: Identifiable {
     }
 }
 
+struct AssistantChatControlState: Equatable, Sendable {
+    struct Message: Equatable, Sendable {
+        let role: String
+        let text: String
+        let createdAt: Date
+        let tokenCount: Int?
+    }
+
+    struct Thread: Equatable, Sendable {
+        let id: String
+        let title: String
+        let messages: [Message]
+        let updatedAt: Date
+    }
+
+    let activeThreadID: String
+    let threads: [Thread]
+    let queuedRequests: [String]
+    let requestInFlight: Bool
+    let streamingThreadID: String?
+    let workspaceDirectory: String
+
+    func jsonObject() -> [String: Any] {
+        [
+            "activeThreadId": activeThreadID,
+            "threads": threads.map { thread in
+                [
+                    "id": thread.id,
+                    "title": thread.title,
+                    "updatedAt": ISO8601DateFormatter().string(
+                        from: thread.updatedAt),
+                    "messages": thread.messages.map { message in
+                        var value: [String: Any] = [
+                            "role": message.role,
+                            "text": message.text,
+                            "createdAt": ISO8601DateFormatter().string(
+                                from: message.createdAt),
+                        ]
+                        if let tokenCount = message.tokenCount {
+                            value["tokenCount"] = tokenCount
+                        }
+                        return value
+                    },
+                ] as [String: Any]
+            },
+            "queuedRequests": queuedRequests,
+            "requestInFlight": requestInFlight,
+            "streamingThreadId": streamingThreadID ?? NSNull(),
+            "workspaceDirectory": workspaceDirectory,
+        ]
+    }
+}
+
 /// One chat message row spanning the full transcript width. User turns show a
 /// right-aligned rounded accent bubble (≤78% width); assistant turns render as
 /// full-width flowing text on the transparent surface — the ChatGPT/Stream
@@ -1972,6 +2025,58 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         return NSHomeDirectory()
     }
 
+    /// Binds a chat-only agent to an explicit checkout/worktree without
+    /// manufacturing a terminal pane. The provisioning layer validates and
+    /// creates the directory before this is called.
+    func setWorkspaceDirectory(_ path: String) {
+        let value = path.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        guard !invalidated, !value.isEmpty else { return }
+        lastWorkspaceDirectory = value
+    }
+
+    /// Versioned app-control projection. This intentionally exposes the
+    /// transcript already visible in this Chat and no backend secrets.
+    func controlState() -> AssistantChatControlState {
+        AssistantChatControlState(
+            activeThreadID: activeThreadId.uuidString.lowercased(),
+            threads: threads.map { thread in
+                AssistantChatControlState.Thread(
+                    id: thread.id.uuidString.lowercased(),
+                    title: thread.title,
+                    messages: thread.messages.map {
+                        AssistantChatControlState.Message(
+                            role: $0.role,
+                            text: $0.text,
+                            createdAt: $0.createdAt,
+                            tokenCount: $0.tokenCount)
+                    },
+                    updatedAt: thread.updatedAt)
+            },
+            queuedRequests: pendingRequests.map(\.text),
+            requestInFlight: requestInFlight,
+            streamingThreadID:
+                streamingThreadId?.uuidString.lowercased(),
+            workspaceDirectory: workspaceDirectoryForChat())
+    }
+
+    func submitFromControl(
+        _ request: String,
+        model: String = "Auto",
+        effort: String = "Auto"
+    ) {
+        submitFromPanel(request, model: model, effort: effort)
+    }
+
+    @discardableResult
+    func selectThreadFromControl(_ id: String) -> Bool {
+        guard let threadID = UUID(uuidString: id),
+              threads.contains(where: { $0.id == threadID })
+        else { return false }
+        selectThread(threadID)
+        return true
+    }
+
     /// Panel for embedding in a Chat leaf. Never reuses a panel that is already
     /// in another host — doing so would empty the first Chat pane (black).
     func makeSidebarPanelView() -> PetAssistantPanelView {
@@ -2246,7 +2351,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// QA seam: submits a request as though it came from the composer, so a
     /// screenshot pass can drive a real turn.
     func submitForQA(_ request: String) {
-        submitFromPanel(request, model: "Auto", effort: "Auto")
+        submitFromControl(request)
     }
 
     private func submitFromPanel(_ request: String, model: String, effort: String = "Auto") {
@@ -3391,7 +3496,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
     func selectThreadForTesting(_ id: UUID) { selectThread(id) }
     func setWorkspaceDirectoryForTesting(_ path: String) {
-        lastWorkspaceDirectory = path
+        setWorkspaceDirectory(path)
     }
 
     // MARK: - AI backends (mirrors HintEngine's smart-source resolution)
@@ -3567,6 +3672,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                    onPartial: onPartial, timeout: timeout, done: done)
         case .amp(let model):
             askAmp(model: model, system: system, user: user, cwd: cwd,
+                   conversationID: conversationID,
                    onPartial: onPartial, timeout: timeout, done: done)
         case .foundation:
             #if canImport(FoundationModels)
@@ -3583,11 +3689,20 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
     }
 
-    private static func releaseBackendConversation(_ conversationID: String) {
+    static func cancelBackendConversation(_ conversationID: String) {
+        CodexAppServer.shared.cancelConversation(conversationID)
+        ClaudeBridge.shared.cancelConversation(conversationID)
+        ACPBridge.opencode.cancelConversation(conversationID)
+        ACPBridge.hermes.cancelConversation(conversationID)
+        AmpBridge.shared.cancelConversation(conversationID)
+    }
+
+    static func releaseBackendConversation(_ conversationID: String) {
         CodexAppServer.shared.releaseConversation(conversationID)
         ClaudeBridge.shared.releaseConversation(conversationID)
         ACPBridge.opencode.releaseConversation(conversationID)
         ACPBridge.hermes.releaseConversation(conversationID)
+        AmpBridge.shared.cancelConversation(conversationID)
     }
 
     /// Codex CLI via the persistent `codex app-server` bridge. One-time cold
@@ -3683,6 +3798,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Amp one-shot through its supported non-interactive execute contract.
     private static func askAmp(
         model: String?, system: String, user: String, cwd: String,
+        conversationID: String? = nil,
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -3693,6 +3809,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                     let reply = try await AmpBridge.shared.turn(
                         prompt: user, system: system, model: model,
                         cwd: cwd,
+                        conversationID: conversationID,
                         timeout: timeout ?? defaultTurnTimeout,
                         onPartial: onPartial)
                     done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))

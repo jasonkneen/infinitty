@@ -10,6 +10,9 @@ final class AmpBridge: @unchecked Sendable {
     static let shared = AmpBridge()
 
     private let executableURLOverride: URL?
+    private let processLock = NSLock()
+    private var processes: [String: Process] = [:]
+    private var conversationGenerations: [String: UInt64] = [:]
     private static let turnTimeoutSeconds: TimeInterval = 90
 
     init(executableURL: URL? = nil) {
@@ -21,10 +24,26 @@ final class AmpBridge: @unchecked Sendable {
         system: String = "",
         model: String? = nil,
         cwd: String? = nil,
+        conversationID: String? = nil,
         timeout: TimeInterval = AmpBridge.turnTimeoutSeconds,
         onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+        let conversationGeneration: UInt64?
+        if let conversationID {
+            let (generation, previous) = processLock.withLock {
+                let generation =
+                    (conversationGenerations[conversationID] ?? 0) &+ 1
+                conversationGenerations[conversationID] = generation
+                return (
+                    generation,
+                    processes.removeValue(forKey: conversationID))
+            }
+            if previous?.isRunning == true { previous?.terminate() }
+            conversationGeneration = generation
+        } else {
+            conversationGeneration = nil
+        }
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 guard let executable = self.executableURLOverride
                         ?? CLIExecutableResolver.resolve(.amp) else {
@@ -77,9 +96,28 @@ final class AmpBridge: @unchecked Sendable {
                 do {
                     try process.run()
                 } catch {
+                    if let conversationID, let conversationGeneration {
+                        self.finishConversation(
+                            conversationID,
+                            generation: conversationGeneration,
+                            process: nil)
+                    }
                     cont.resume(throwing: AmpBridgeError.processUnavailable(
                         "Failed to launch amp: \(error.localizedDescription)"))
                     return
+                }
+                if let conversationID, let conversationGeneration {
+                    self.processLock.lock()
+                    let wasCancelled =
+                        self.conversationGenerations[conversationID]
+                            != conversationGeneration
+                    if !wasCancelled {
+                        self.processes[conversationID] = process
+                    }
+                    self.processLock.unlock()
+                    if wasCancelled, process.isRunning {
+                        process.terminate()
+                    }
                 }
 
                 // Watchdog: never hang. Terminate at the deadline — that
@@ -98,6 +136,12 @@ final class AmpBridge: @unchecked Sendable {
                 let data = stdout.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 watchdog.cancel()
+                if let conversationID, let conversationGeneration {
+                    self.finishConversation(
+                        conversationID,
+                        generation: conversationGeneration,
+                        process: process)
+                }
                 stderr.fileHandleForReading.readabilityHandler = nil
 
                 let raw = String(data: data, encoding: .utf8) ?? ""
@@ -115,6 +159,30 @@ final class AmpBridge: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    func cancelConversation(_ conversationID: String) {
+        processLock.lock()
+        conversationGenerations[conversationID] =
+            (conversationGenerations[conversationID] ?? 0) &+ 1
+        let process = processes.removeValue(forKey: conversationID)
+        processLock.unlock()
+        if process?.isRunning == true { process?.terminate() }
+    }
+
+    private func finishConversation(
+        _ conversationID: String,
+        generation: UInt64,
+        process: Process?
+    ) {
+        processLock.lock()
+        if let process, processes[conversationID] === process {
+            processes[conversationID] = nil
+        }
+        if conversationGenerations[conversationID] == generation {
+            conversationGenerations[conversationID] = nil
+        }
+        processLock.unlock()
     }
 
     /// Strip ANSI escape sequences (CSI/OSC) that a TUI writes even to a

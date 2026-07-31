@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import XCTest
 
 @testable import InfinittyKit
@@ -1221,6 +1222,289 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(firstFrame.intersection(thirdFrame).isEmpty)
         XCTAssertGreaterThan(firstFrame.width, 10)
         XCTAssertGreaterThan(thirdFrame.width, 10)
+    }
+
+    func testStructuredChatControlCreatesNamesThreadsAndClosesRealPane()
+        throws
+    {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.tabbingIdentifier = "infinitty"
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(
+            frame: window.contentView?.bounds ?? .zero)
+        chrome.autoresizingMask = [.width, .height]
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification,
+                object: window))
+            window.close()
+        }
+
+        func request(_ value: [String: Any]) throws -> [String: Any] {
+            let encoded = try XCTUnwrap(BrowserControlCodec.encode(value))
+            let response = delegate.handleAppRequestForTesting(
+                "chat \(encoded)")
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(response.utf8))
+                    as? [String: Any])
+            XCTAssertEqual(
+                envelope["ok"] as? Bool,
+                true,
+                "response=\(response)")
+            return try XCTUnwrap(envelope["result"] as? [String: Any])
+        }
+
+        let created = try request([
+            "v": 1,
+            "op": "create",
+            "name": "Architect",
+            "role": "planning lead",
+            "provider": "amp",
+            "model": "smart",
+            "workspace": FileManager.default.currentDirectoryPath,
+        ])
+        let chatID = try XCTUnwrap(created["chatId"] as? String)
+        let firstThread = try XCTUnwrap(
+            created["activeThreadId"] as? String)
+        XCTAssertEqual(created["title"] as? String, "Architect")
+        XCTAssertEqual(created["role"] as? String, "planning lead")
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 1)
+
+        let fresh = try request([
+            "v": 1,
+            "op": "new_thread",
+            "chatId": chatID,
+        ])
+        XCTAssertEqual(
+            fresh["activeThreadId"] as? String,
+            firstThread,
+            "A blank Chat reuses its empty thread.")
+        XCTAssertEqual((fresh["threads"] as? [[String: Any]])?.count, 1)
+
+        let selected = try request([
+            "v": 1,
+            "op": "select_thread",
+            "chatId": chatID,
+            "threadId": firstThread,
+        ])
+        XCTAssertEqual(
+            selected["activeThreadId"] as? String,
+            firstThread)
+
+        let renamed = try request([
+            "v": 1,
+            "op": "rename",
+            "chatId": chatID,
+            "name": "Architecture Lead",
+        ])
+        XCTAssertEqual(renamed["title"] as? String, "Architecture Lead")
+
+        let closed = try request([
+            "v": 1,
+            "op": "close",
+            "chatId": chatID,
+        ])
+        XCTAssertEqual(closed["open"] as? Bool, false)
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 0)
+    }
+
+    func testApprovedVisualProposalCreatesNamedConnectedProviderChat()
+        throws
+    {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "infinitty-visual-room-\(UUID().uuidString)",
+                isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: workspace,
+            withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let executable = workspace.appendingPathComponent("fake-amp")
+        try """
+        #!/bin/sh
+        printf '%s\n' '{"type":"result","result":"VISUAL_ROOM_READY"}'
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path)
+        let previousAmp = getenv("INFINITTY_AMP_EXECUTABLE")
+            .map { String(cString: $0) }
+        setenv("INFINITTY_AMP_EXECUTABLE", executable.path, 1)
+        defer {
+            if let previousAmp {
+                setenv(
+                    "INFINITTY_AMP_EXECUTABLE",
+                    previousAmp,
+                    1)
+            } else {
+                unsetenv("INFINITTY_AMP_EXECUTABLE")
+            }
+        }
+
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(
+                x: 0, y: 0, width: 1_100, height: 720),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.tabbingIdentifier = "infinitty"
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(
+            frame: window.contentView?.bounds ?? .zero)
+        chrome.autoresizingMask = [.width, .height]
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        let anchor = UtilityPaneView(
+            kind: .files,
+            contentView: NSView(),
+            background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification,
+                object: window))
+            window.close()
+        }
+
+        let spec = CollaborationRoomProposalSpec(
+            id: "proposal-visual-room",
+            channelID: "channel-visual-room",
+            roomName: "Visual Delivery Room",
+            objective: "Return a real visual provider result.",
+            workspaceRoot: workspace.path,
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent-visual-architect",
+                    displayName: "Visual Architect",
+                    role: "architecture owner",
+                    runtime: .local,
+                    provider: "amp",
+                    modelID: "smart",
+                    responsibilityScopes: ["Sources/**"],
+                    capabilities: ["workspace.write"]),
+            ],
+            workspaceStrategy: .sharedCheckout,
+            presentation: .visual,
+            targetInstanceID:
+                delegate.collaborationInstanceIDForTesting,
+            requestedCapabilities: ["workspace.write"],
+            expiresAt: Date().addingTimeInterval(300))
+        let prepare = CollaborationControlRequest(
+            op: .prepareProposal,
+            actor: CollaborationActor(
+                id: "agent:requester",
+                kind: .agent,
+                displayName: "Requesting agent"),
+            idempotencyKey: "prepare-visual-room",
+            proposal: spec)
+        let prepared = try XCTUnwrap(
+            delegate.executeCollaborationForTesting(
+                try XCTUnwrap(
+                    CollaborationControlCodec.encode(prepare)))?
+                .proposals.first)
+        delegate.decideChannelProposalForTesting(
+            proposalID: spec.id,
+            digest: prepared.digest,
+            approved: true)
+
+        var snapshot = delegate.collaborationSnapshotForTesting()
+        var controlledChat: [String: Any]?
+        for _ in 0..<120 {
+            RunLoop.current.run(
+                until: Date().addingTimeInterval(0.05))
+            snapshot =
+                delegate.collaborationSnapshotForTesting()
+            guard snapshot.proposals.first(where: {
+                $0.spec.id == spec.id
+            })?.state == .running else { continue }
+            let request = try XCTUnwrap(BrowserControlCodec.encode([
+                "v": 1,
+                "op": "list",
+            ]))
+            let response = delegate.handleAppRequestForTesting(
+                "chat \(request)")
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(response.utf8))
+                    as? [String: Any])
+            let chats = (envelope["result"] as? [String: Any])?[
+                "chats"] as? [[String: Any]]
+            controlledChat = chats?.first
+            let threads = controlledChat?["threads"]
+                as? [[String: Any]]
+            let messages = threads?.first?["messages"]
+                as? [[String: Any]]
+            if messages?.contains(where: {
+                ($0["text"] as? String)?
+                    .contains("VISUAL_ROOM_READY") == true
+            }) == true {
+                break
+            }
+        }
+
+        XCTAssertEqual(
+            snapshot.proposals.first(where: {
+                $0.spec.id == spec.id
+            })?.state,
+            .running)
+        let channel = try XCTUnwrap(snapshot.channels.first {
+            $0.id == spec.channelID
+        })
+        XCTAssertEqual(
+            channel.participants.map(\.displayName),
+            ["Visual Architect"])
+        XCTAssertEqual(
+            channel.responsibilities.map(\.scope),
+            ["Sources/**"])
+        XCTAssertEqual(
+            channel.plan.map(\.ownerID),
+            ["agent-visual-architect"])
+        XCTAssertEqual(
+            controlledChat?["title"] as? String,
+            "Visual Architect")
+        XCTAssertEqual(
+            controlledChat?["role"] as? String,
+            "architecture owner")
+        XCTAssertEqual(
+            controlledChat?["provider"] as? String,
+            "amp")
+        XCTAssertEqual(
+            controlledChat?["model"] as? String,
+            "smart")
+        XCTAssertEqual(
+            controlledChat?["channelId"] as? String,
+            spec.channelID)
+        let threads = controlledChat?["threads"]
+            as? [[String: Any]]
+        let messages = threads?.first?["messages"]
+            as? [[String: Any]]
+        XCTAssertTrue(messages?.contains(where: {
+            ($0["text"] as? String)?
+                .contains("VISUAL_ROOM_READY") == true
+        }) == true)
+        XCTAssertEqual(
+            delegate.utilityPaneCountForTesting(in: window),
+            2,
+            "The approved room owns one Channel pane and one named Chat.")
     }
 
     func testConnectedChatPanesReceiveNamesMembershipAndPeerMessages() throws {

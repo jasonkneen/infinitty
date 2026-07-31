@@ -720,6 +720,48 @@ sys.exit(1)
         XCTAssertLessThan(Date().timeIntervalSince(start), 4)
     }
 
+    func testAmpBridgeCancelsOnlyTheTargetedConversation() async throws {
+        let executable = try makePythonExecutable(#"""
+import os
+import sys
+import time
+
+started = os.path.join(os.path.dirname(sys.argv[0]), "started")
+with open(started, "w", encoding="utf-8") as marker:
+    marker.write("ready")
+time.sleep(30)
+sys.stdout.write("should not complete")
+sys.stdout.flush()
+"""#)
+        let directory = executable.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("started")
+        let bridge = AmpBridge(executableURL: executable)
+        let turn = Task {
+            try await bridge.turn(
+                prompt: "wait",
+                conversationID: "amp-conversation-to-cancel",
+                timeout: 10)
+        }
+
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: marker.path) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+
+        let cancelledAt = Date()
+        bridge.cancelConversation("amp-conversation-to-cancel")
+        do {
+            _ = try await turn.value
+            XCTFail("A cancelled Amp turn must not complete successfully.")
+        } catch {
+            XCTAssertTrue(
+                error.localizedDescription.contains("provider execution failed"),
+                "got: \(error.localizedDescription)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 2)
+    }
+
     func testAmpStripANSIRemovesEscapeSequences() {
         XCTAssertEqual(
             AmpBridge.stripANSI("\u{1B}[31mred\u{1B}[0m plain"),

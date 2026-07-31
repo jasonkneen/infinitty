@@ -3,6 +3,41 @@ import AppKit
 @testable import InfinittyKit
 
 final class PetAssistantTests: XCTestCase {
+    func testAppControlStateCanSubmitSelectAndCancelRealChatWork() throws {
+        let completed = expectation(description: "control turn completed")
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { request, _, _, done in
+                done("answer to \(request)", [], nil)
+                completed.fulfill()
+            })
+        assistant.setWorkspaceDirectory("/tmp/control-workspace")
+
+        let initial = assistant.controlState()
+        XCTAssertEqual(initial.threads.count, 1)
+        XCTAssertEqual(initial.workspaceDirectory, "/tmp/control-workspace")
+
+        assistant.submitFromControl("controlled request")
+        wait(for: [completed], timeout: 2)
+        let answered = assistant.controlState()
+        XCTAssertEqual(
+            answered.threads.first?.messages.map(\.text),
+            ["controlled request", "answer to controlled request"])
+        XCTAssertFalse(answered.requestInFlight)
+
+        let firstThread = answered.activeThreadID
+        assistant.startNewChat()
+        let fresh = assistant.controlState()
+        XCTAssertNotEqual(fresh.activeThreadID, firstThread)
+        XCTAssertEqual(fresh.threads.count, 2)
+        XCTAssertTrue(assistant.selectThreadFromControl(firstThread))
+        XCTAssertEqual(assistant.controlState().activeThreadID, firstThread)
+        XCTAssertFalse(assistant.selectThreadFromControl("not-a-thread"))
+
+        assistant.cancelConversationWork()
+        XCTAssertFalse(assistant.controlState().requestInFlight)
+    }
+
 
     func testPetSizePresetsChooseNearestMenuSize() {
         XCTAssertEqual(PetSizePreset.nearest(to: 0.22), .tiny)

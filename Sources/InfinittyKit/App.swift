@@ -114,6 +114,23 @@ private final class UtilityPanelRecord {
     /// Chat is a pane-level surface. Each Chat leaf owns its assistant; keep
     /// it alive if the terminal it started from exits while the leaf remains.
     var assistant: PetAssistant?
+    /// Durable room membership is projected from the Channel journal. Before
+    /// first link, an orchestrator-created Chat carries its requested role
+    /// here so the atomic link-and-join publishes the exact approved role.
+    var participantRole = "coding agent"
+    /// Registry ownership is authoritative even while a test host or an
+    /// off-screen AppKit window has not attached the pane to a visible screen.
+    /// Structured control must still be able to target and close that pane.
+    weak var ownerWindow: NSWindow?
+    /// Preserve the exact configured provider/model for unlinked Chats.
+    /// Channel membership later projects the same provenance durably.
+    var configuredProvider: String?
+    var configuredModel: String?
+    /// Stable logical agent identity from an approved room proposal. This is
+    /// also the durable Channel participant id, independent of pane numbering.
+    var proposedAgentID: String?
+    var proposalID: String?
+    var participantCapabilities = ["channel.receive", "channel.send"]
 
     var kind: UtilityPanelKind { pane.kind }
 
@@ -285,8 +302,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         socketPath: appControl.path)
     private let collaborationQueue = DispatchQueue(
         label: "com.infinitty.collaboration", qos: .userInitiated)
+    private let orchestrationQueue = DispatchQueue(
+        label: "com.infinitty.orchestration", qos: .userInitiated)
     private lazy var collaborationCoordinator = CollaborationCoordinatorClient(
         applicationSupportDirectory: collaborationSupportDirectory)
+    private var presentedProposalIDs = Set<String>()
+    private var provisioningProposalIDs = Set<String>()
+    private let agentWorkspaceProvisioner = AgentWorkspaceProvisioner()
     private var collaborationSupportDirectory: URL? {
         if let configured = ProcessInfo.processInfo.environment[
             "INFINITTY_COLLABORATION_SUPPORT_DIR"],
@@ -2608,7 +2630,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
             label = utility.paneHeader.title
             participantID = utility.kind == .chat
-                ? "\(collaborationInstanceID)/participant/\(paneID)"
+                ? utilityRecord(forPane: utility)?.proposedAgentID
+                    ?? "\(collaborationInstanceID)/participant/\(paneID)"
                 : nil
         } else {
             kind = CollaborationEndpoint.Kind(rawValue: "pane")
@@ -2633,8 +2656,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return CollaborationParticipant(
             id: participantID,
             displayName: utility.paneHeader.title,
-            role: "coding agent",
-            capabilities: ["channel.receive", "channel.send"])
+            role: utilityRecord(forPane: utility)?.participantRole
+                ?? "coding agent",
+            provider: utilityRecord(forPane: utility)?.configuredProvider,
+            modelID: utilityRecord(forPane: utility)?.configuredModel,
+            capabilities:
+                utilityRecord(forPane: utility)?.participantCapabilities
+                ?? ["channel.receive", "channel.send"])
     }
 
     private func paneHeader(for view: NSView) -> PaneHeaderView? {
@@ -2808,7 +2836,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     color: color,
                     memberCount: state.endpoints.count)
                 utility.setPaneAccent(color)
-                record.channelController?.update(channel: state)
+                record.channelController?.update(
+                    channel: state,
+                    proposals: snapshot.proposals)
                 continue
             }
             let endpointID = collaborationEndpoint(for: pane).id
@@ -2824,6 +2854,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     name: state?.name, color: color, memberCount: memberCount)
                 utility.setPaneAccent(color ?? CodePalette.paneFocusAccent)
             }
+        }
+        presentPendingProposalConsents(snapshot)
+        for proposal in snapshot.proposals
+        where [.approved, .provisioning].contains(proposal.state)
+            && proposal.spec.presentation == .visual
+            && (proposal.spec.targetInstanceID == nil
+                || proposal.spec.targetInstanceID
+                    == collaborationInstanceID)
+        {
+            provisionApprovedProposal(proposal)
         }
     }
 
@@ -3175,6 +3215,499 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             ])
             DispatchQueue.main.async { [weak self] in
                 self?.applyCollaborationProjection(snapshot)
+            }
+        }
+    }
+
+    private func presentPendingProposalConsents(
+        _ snapshot: CollaborationSnapshot
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let window = standardKeyWindow()
+                ?? NSApp.windows.first(where: {
+                    $0.tabbingIdentifier == "infinitty"
+                        && $0 !== quickTerminal.window
+                })
+        else { return }
+        for proposal in snapshot.proposals
+        where proposal.state == .pending
+            && !presentedProposalIDs.contains(proposal.spec.id)
+        {
+            presentedProposalIDs.insert(proposal.spec.id)
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText =
+                "Create “\(proposal.spec.roomName)” with "
+                + "\(proposal.spec.agents.count) agents?"
+            let agentDetails = proposal.spec.agents.map { agent in
+                let model = agent.modelID.map { " / \($0)" } ?? ""
+                let scopes = agent.responsibilityScopes.isEmpty
+                    ? "no file scope declared"
+                    : agent.responsibilityScopes.joined(separator: ", ")
+                return
+                    "\(agent.displayName) — \(agent.role)\n"
+                    + "\(agent.runtime.rawValue) · \(agent.provider)\(model)\n"
+                    + "Owns: \(scopes)"
+            }.joined(separator: "\n\n")
+            let workspace = proposal.spec.workspaceStrategy.rawValue
+                .replacingOccurrences(of: "_", with: " ")
+            let target = proposal.spec.targetInstanceID.map {
+                "\nTarget instance: \($0)"
+            } ?? ""
+            alert.informativeText =
+                "\(proposal.spec.objective)\n\n"
+                + "Workspace: \(proposal.spec.workspaceRoot)\n"
+                + "Workspace mode: \(workspace)\n"
+                + "Presentation: \(proposal.spec.presentation.rawValue)"
+                + "\(target)\n\n"
+                + agentDetails
+                + "\n\nNothing is created until you approve."
+            alert.addButton(withTitle: "Create room and agents")
+            alert.addButton(withTitle: "Deny")
+            alert.beginSheetModal(for: window) {
+                [weak self] response in
+                self?.decideChannelProposal(
+                    proposalID: proposal.spec.id,
+                    digest: proposal.digest,
+                    approved:
+                        response == .alertFirstButtonReturn)
+            }
+        }
+    }
+
+    private func decideChannelProposal(
+        proposalID: String,
+        digest: String,
+        approved: Bool
+    ) {
+        let actor = CollaborationActor(
+            id: "local-user:\(NSUserName())",
+            kind: .human,
+            displayName: NSFullUserName().isEmpty
+                ? NSUserName()
+                : NSFullUserName())
+        collaborationQueue.async { [weak self] in
+            guard let self else { return }
+            let request = CollaborationControlRequest(
+                op: approved ? .approveProposal : .denyProposal,
+                actor: actor,
+                idempotencyKey:
+                    "proposal-decision:\(proposalID):"
+                    + "\(approved ? "approve" : "deny")",
+                proposalID: proposalID,
+                proposalDigest: digest,
+                reason: approved
+                    ? nil
+                    : "Denied by the local user")
+            guard let encoded =
+                    CollaborationControlCodec.encode(request)
+            else { return }
+            let result = self.collaborationCoordinator
+                .executeHumanDecision(encoded)
+            guard let snapshot = result.snapshot else {
+                self.appControl.broadcast([
+                    "event": "channel-proposal-error",
+                    "proposalId": proposalID,
+                    "message": result.response,
+                ])
+                return
+            }
+            self.appControl.broadcast([
+                "event": approved
+                    ? "channel-proposal-approved"
+                    : "channel-proposal-denied",
+                "proposalId": proposalID,
+            ])
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.applyCollaborationProjection(snapshot)
+            }
+        }
+    }
+
+    private func provisionApprovedProposal(
+        _ proposal: CollaborationRoomProposal
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard [.approved, .provisioning].contains(proposal.state),
+              proposal.spec.presentation == .visual,
+              proposal.spec.targetInstanceID == nil
+                || proposal.spec.targetInstanceID
+                    == collaborationInstanceID,
+              provisioningProposalIDs.insert(proposal.spec.id).inserted
+        else { return }
+        orchestrationQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                var snapshot: CollaborationSnapshot
+                if proposal.state == .approved {
+                    snapshot = try self.executeOrchestrationMutation(
+                        CollaborationControlRequest(
+                            op: .startProvisioning,
+                            actor: self.orchestrationActor(),
+                            idempotencyKey:
+                                "proposal:\(proposal.spec.id):provision:"
+                                + "\(proposal.updatedAt.timeIntervalSince1970)",
+                            proposalID: proposal.spec.id,
+                            proposalDigest: proposal.digest))
+                } else {
+                    guard let current =
+                            self.collaborationCoordinator.snapshot(),
+                          current.proposals.contains(where: {
+                              $0.spec.id == proposal.spec.id
+                                  && $0.digest == proposal.digest
+                                  && $0.state == .provisioning
+                          })
+                    else {
+                        throw CollaborationRoomError.invalidValue(
+                            field: "proposal state",
+                            reason:
+                                "the approved room is no longer provisioning")
+                    }
+                    snapshot = current
+                }
+
+                let workspaceMode: AgentWorkspaceMode =
+                    proposal.spec.workspaceStrategy == .worktrees
+                    ? .worktree
+                    : .shared
+                var workspaces: [String: ProvisionedAgentWorkspace] = [:]
+                for agent in proposal.spec.agents {
+                    if agent.runtime == .cloud,
+                       agent.provider != "codex",
+                       agent.provider != "claude"
+                    {
+                        throw CollaborationRoomError.invalidValue(
+                            field: "cloud provider",
+                            reason:
+                                "cloud agents currently require the real Codex "
+                                + "or Claude server adapter")
+                    }
+                    workspaces[agent.id] =
+                        try self.agentWorkspaceProvisioner.provision(
+                            repositoryRoot: proposal.spec.workspaceRoot,
+                            channelID: proposal.spec.channelID,
+                            participantID: agent.id,
+                            mode: workspaceMode)
+                }
+
+                if !snapshot.channels.contains(where: {
+                    $0.id == proposal.spec.channelID
+                }) {
+                    snapshot = try self.executeOrchestrationMutation(
+                        CollaborationControlRequest(
+                            op: .create,
+                            actor: self.orchestrationActor(),
+                            idempotencyKey:
+                                "proposal:\(proposal.spec.id):create-channel",
+                            channelID: proposal.spec.channelID,
+                            name: proposal.spec.roomName))
+                }
+                let visual = try self.makeApprovedVisualAgents(
+                    proposal: proposal,
+                    snapshot: snapshot,
+                    workspaces: workspaces)
+                snapshot = visual.snapshot
+
+                for agent in visual.agents {
+                    if snapshot.channels.first(where: {
+                        $0.id == proposal.spec.channelID
+                    })?.endpoints.contains(where: {
+                        $0.id == agent.endpoint.id
+                    }) != true {
+                        snapshot = try self.executeOrchestrationMutation(
+                            CollaborationControlRequest(
+                                op: .linkAndJoin,
+                                actor: self.orchestrationActor(),
+                                idempotencyKey:
+                                    "proposal:\(proposal.spec.id):link:"
+                                    + agent.spec.id,
+                                channelID: proposal.spec.channelID,
+                                source: visual.channelEndpoint,
+                                target: agent.endpoint,
+                                participants: [agent.participant]))
+                    }
+                }
+
+                for agent in proposal.spec.agents {
+                    for (index, scope) in
+                        agent.responsibilityScopes.enumerated()
+                    {
+                        let claimID =
+                            "\(proposal.spec.id)-\(agent.id)-scope-\(index)"
+                        let channel = snapshot.channels.first {
+                            $0.id == proposal.spec.channelID
+                        }
+                        if channel?.responsibilities.contains(where: {
+                            $0.id == claimID
+                        }) == true {
+                            continue
+                        }
+                        snapshot = try self.executeOrchestrationMutation(
+                            CollaborationControlRequest(
+                                op: .claim,
+                                actor: self.orchestrationActor(),
+                                idempotencyKey:
+                                    "proposal:\(proposal.spec.id):claim:"
+                                    + "\(agent.id):\(index)",
+                                channelID: proposal.spec.channelID,
+                                claim: CollaborationResponsibility(
+                                    id: claimID,
+                                    scope: scope,
+                                    summary: agent.role,
+                                    ownerID: agent.id)))
+                    }
+                }
+
+                let plan = proposal.spec.agents.enumerated().map {
+                    index, agent in
+                    CollaborationPlanItem(
+                        id: "\(proposal.spec.id)-agent-\(index)",
+                        title: "\(agent.displayName): \(agent.role)",
+                        status: .inProgress,
+                        ownerID: agent.id)
+                }
+                snapshot = try self.executeOrchestrationMutation(
+                    CollaborationControlRequest(
+                        op: .replacePlan,
+                        actor: self.orchestrationActor(),
+                        idempotencyKey:
+                            "proposal:\(proposal.spec.id):publish-plan",
+                        channelID: proposal.spec.channelID,
+                        plan: plan))
+
+                let kickoffID = "\(proposal.spec.id)-kickoff"
+                snapshot = try self.executeOrchestrationMutation(
+                    CollaborationControlRequest(
+                        op: .postMessage,
+                        actor: self.orchestrationActor(),
+                        idempotencyKey:
+                            "proposal:\(proposal.spec.id):room-kickoff",
+                        channelID: proposal.spec.channelID,
+                        message: CollaborationMessage(
+                            id: kickoffID,
+                            threadID: nil,
+                            authorID: self.orchestrationActor().id,
+                            text:
+                                "Approved objective: "
+                                + proposal.spec.objective)))
+
+                guard self.onMain({
+                    self.applyCollaborationProjection(snapshot)
+                    for agent in visual.agents {
+                        let peers = proposal.spec.agents
+                            .filter { $0.id != agent.spec.id }
+                            .map { "\($0.displayName) — \($0.role)" }
+                            .joined(separator: "\n")
+                        let scopes =
+                            agent.spec.responsibilityScopes.isEmpty
+                            ? "No exclusive file scope was assigned."
+                            : "Your exclusive scopes:\n"
+                                + agent.spec.responsibilityScopes
+                                    .joined(separator: "\n")
+                        let prompt =
+                            "You are \(agent.spec.displayName), "
+                            + "\(agent.spec.role), in Channel "
+                            + "\(proposal.spec.roomName).\n\n"
+                            + "Objective:\n\(proposal.spec.objective)\n\n"
+                            + "\(scopes)\n\n"
+                            + "Peers:\n\(peers.isEmpty ? "None" : peers)\n\n"
+                            + "Use the shared Channel plan and messages to "
+                            + "coordinate. Do not modify another participant's "
+                            + "claimed scope. Report only work and tool results "
+                            + "you actually observed."
+                        agent.record.assistant?.submitFromControl(
+                            prompt,
+                            model: "Auto",
+                            effort: "Auto")
+                    }
+                    return true
+                }) == true else {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "visual host",
+                        reason: "timed out while starting approved agents")
+                }
+
+                snapshot = try self.executeOrchestrationMutation(
+                    CollaborationControlRequest(
+                        op: .markProposalRunning,
+                        actor: self.orchestrationActor(),
+                        idempotencyKey:
+                            "proposal:\(proposal.spec.id):running",
+                        proposalID: proposal.spec.id,
+                        proposalDigest: proposal.digest))
+                self.appControl.broadcast([
+                    "event": "channel-room-running",
+                    "proposalId": proposal.spec.id,
+                    "channelId": proposal.spec.channelID,
+                    "agentCount": proposal.spec.agents.count,
+                ])
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.provisioningProposalIDs.remove(
+                        proposal.spec.id)
+                    self.applyCollaborationProjection(snapshot)
+                }
+            } catch {
+                self.markProposalProvisioningFailed(
+                    proposal,
+                    error: error)
+            }
+        }
+    }
+
+    private struct ApprovedVisualAgent {
+        let spec: CollaborationAgentSpec
+        let record: UtilityPanelRecord
+        let endpoint: CollaborationEndpoint
+        let participant: CollaborationParticipant
+    }
+
+    private struct ApprovedVisualRoom {
+        let snapshot: CollaborationSnapshot
+        let channelEndpoint: CollaborationEndpoint
+        let agents: [ApprovedVisualAgent]
+    }
+
+    private func makeApprovedVisualAgents(
+        proposal: CollaborationRoomProposal,
+        snapshot: CollaborationSnapshot,
+        workspaces: [String: ProvisionedAgentWorkspace]
+    ) throws -> ApprovedVisualRoom {
+        guard let result = onMain({ () -> ApprovedVisualRoom? in
+            self.applyCollaborationProjection(snapshot)
+            guard let window = self.standardKeyWindow()
+                    ?? NSApp.windows.first(where: {
+                        $0.tabbingIdentifier == "infinitty"
+                            && $0 !== self.quickTerminal.window
+                    }),
+                  let channelRecord = self.openUtilityPanel(
+                    .channel,
+                    in: window,
+                    forceNewInstance: true,
+                    channelID: proposal.spec.channelID)
+            else { return nil }
+            var anchor: NSView = channelRecord.pane
+            var agents: [ApprovedVisualAgent] = []
+            for spec in proposal.spec.agents {
+                guard let workspace = workspaces[spec.id] else {
+                    return nil
+                }
+                let record: UtilityPanelRecord
+                if let existing = self.utilityPanels.values
+                    .flatMap({ $0 })
+                    .first(where: {
+                        $0.proposalID == proposal.spec.id
+                            && $0.proposedAgentID == spec.id
+                    })
+                {
+                    record = existing
+                } else {
+                    let chatConfig: AppConfig
+                    switch self.configuredChat(
+                        provider: spec.provider,
+                        model: spec.modelID)
+                    {
+                    case .success(let value):
+                        chatConfig = value
+                    case .failure:
+                        return nil
+                    }
+                    guard let created = self.openUtilityPanel(
+                        .chat,
+                        in: window,
+                        relativeTo: anchor,
+                        vertical: true,
+                        forceNewInstance: true,
+                        chatConfiguration: chatConfig,
+                        chatWorkspaceDirectory: workspace.path,
+                        chatTitle: spec.displayName,
+                        chatRole: spec.role)
+                    else { return nil }
+                    created.proposalID = proposal.spec.id
+                    created.proposedAgentID = spec.id
+                    created.participantCapabilities = Array(Set(
+                        spec.capabilities
+                            + ["channel.receive", "channel.send"]))
+                        .sorted()
+                    record = created
+                }
+                anchor = record.pane
+                let endpoint = self.collaborationEndpoint(
+                    for: record.pane)
+                guard let participant =
+                        self.collaborationParticipant(for: record.pane)
+                else { return nil }
+                agents.append(ApprovedVisualAgent(
+                    spec: spec,
+                    record: record,
+                    endpoint: endpoint,
+                    participant: participant))
+            }
+            return ApprovedVisualRoom(
+                snapshot: snapshot,
+                channelEndpoint: self.collaborationEndpoint(
+                    for: channelRecord.pane),
+                agents: agents)
+        }), let result else {
+            throw CollaborationRoomError.invalidValue(
+                field: "visual host",
+                reason:
+                    "could not create the approved Channel and Chat panes")
+        }
+        return result
+    }
+
+    private func executeOrchestrationMutation(
+        _ request: CollaborationControlRequest
+    ) throws -> CollaborationSnapshot {
+        guard let encoded = CollaborationControlCodec.encode(request)
+        else {
+            throw CollaborationRoomError.invalidValue(
+                field: "orchestration request",
+                reason: "could not encode")
+        }
+        let result = collaborationCoordinator.execute(encoded)
+        guard let snapshot = result.snapshot else {
+            throw CollaborationRoomError.invalidValue(
+                field: "orchestration request",
+                reason: result.response)
+        }
+        return snapshot
+    }
+
+    private func orchestrationActor() -> CollaborationActor {
+        CollaborationActor(
+            id: "system:orchestrator:\(collaborationInstanceID)",
+            kind: .system,
+            displayName: "Infinitty room orchestrator")
+    }
+
+    private func markProposalProvisioningFailed(
+        _ proposal: CollaborationRoomProposal,
+        error: Error
+    ) {
+        let reason = String(describing: error)
+        let request = CollaborationControlRequest(
+            op: .markProposalFailed,
+            actor: orchestrationActor(),
+            idempotencyKey:
+                "proposal:\(proposal.spec.id):failed:"
+                + UUID().uuidString.lowercased(),
+            proposalID: proposal.spec.id,
+            proposalDigest: proposal.digest,
+            reason: reason)
+        let snapshot = try? executeOrchestrationMutation(request)
+        appControl.broadcast([
+            "event": "channel-room-failed",
+            "proposalId": proposal.spec.id,
+            "message": reason,
+        ])
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.provisioningProposalIDs.remove(proposal.spec.id)
+            if let snapshot {
+                self.applyCollaborationProjection(snapshot)
             }
         }
     }
@@ -3582,6 +4115,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return nil
     }
 
+    private func chatRecord(withID chatID: String) -> UtilityPanelRecord? {
+        for records in utilityPanels.values {
+            if let record = records.first(where: {
+                $0.kind == .chat && $0.ledgerID == chatID
+            }) {
+                return record
+            }
+        }
+        return nil
+    }
+
     private func channelRecord(
         withID channelID: String,
         in window: NSWindow? = nil
@@ -3885,6 +4429,33 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     func utilityPaneCountForTesting(in window: NSWindow) -> Int {
         utilityRecords(in: window).count
+    }
+
+    var collaborationInstanceIDForTesting: String {
+        collaborationInstanceID
+    }
+
+    func executeCollaborationForTesting(
+        _ encoded: String
+    ) -> CollaborationSnapshot? {
+        collaborationQueue.sync {
+            collaborationCoordinator.execute(encoded).snapshot
+        }
+    }
+
+    func decideChannelProposalForTesting(
+        proposalID: String,
+        digest: String,
+        approved: Bool
+    ) {
+        decideChannelProposal(
+            proposalID: proposalID,
+            digest: digest,
+            approved: approved)
+    }
+
+    func collaborationSnapshotForTesting() -> CollaborationSnapshot {
+        authoritativeCollaborationSnapshot()
     }
 
     func utilityPaneCountForTesting(in window: NSWindow, rootedAt root: NSView) -> Int {
@@ -4217,7 +4788,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         relativeTo requestedSource: NSView? = nil,
         vertical: Bool = true,
         forceNewInstance: Bool = false,
-        channelID: String? = nil
+        channelID: String? = nil,
+        chatConfiguration: AppConfig? = nil,
+        chatWorkspaceDirectory: String? = nil,
+        chatTitle: String? = nil,
+        chatRole: String? = nil
     ) -> UtilityPanelRecord? {
         let id = ObjectIdentifier(win)
         // Files stays one-per-window. Chat, Channel, and Browser support extra
@@ -4253,6 +4828,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let anchorView = requestedSource
                 ?? focusedPaneLeaf(in: win)
                 ?? activeSessions(in: win).first?.view
+                ?? paneLeafViews(in: win, rootedAt: requestedRoot).first
                 ?? terminalRoot(of: win),
               anchorView.window === win else { return nil }
 
@@ -4276,7 +4852,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                   let state = authoritativeCollaborationSnapshot()
                     .channels.first(where: { $0.id == channelID })
             else { return nil }
-            let controller = ChannelPanelController(channel: state)
+            let snapshot = authoritativeCollaborationSnapshot()
+            let controller = ChannelPanelController(
+                channel: state,
+                proposals: snapshot.proposals)
             codeController = nil
             browserController = nil
             channelController = controller
@@ -4328,6 +4907,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else {
             return nil
         }
+        record.ownerWindow = win
+        if kind == .chat {
+            let chatConfig = chatConfiguration ?? config
+            record.configuredProvider = chatConfig.aiProvider
+            switch chatConfig.aiProvider.lowercased() {
+            case "claude": record.configuredModel = chatConfig.claudeModel
+            case "codex": record.configuredModel = chatConfig.codexModel
+            case "opencode": record.configuredModel = chatConfig.opencodeModel
+            case "hermes": record.configuredModel = chatConfig.hermesModel
+            case "amp": record.configuredModel = chatConfig.ampModel
+            default: record.configuredModel = nil
+            }
+        }
         utilityPanels[id, default: []].append(record)
         if let controller = channelController, let channelID {
             controller.onSendMessage = { [weak self] text, threadID in
@@ -4342,6 +4934,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     participantID: participantID,
                     role: role,
                     channelID: channelID)
+            }
+            controller.onProposalDecision = {
+                [weak self] proposalID, digest, approved in
+                self?.decideChannelProposal(
+                    proposalID: proposalID,
+                    digest: digest,
+                    approved: approved)
             }
         }
         if let controller = codeController {
@@ -4380,8 +4979,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 // assistant so pet-popover history continues in that leaf.
                 let assistant: PetAssistant
                 if forceNewInstance {
-                    assistant = PetAssistant(config: config)
-                    if let sourceSession {
+                    assistant = PetAssistant(
+                        config: chatConfiguration ?? config)
+                    if let chatWorkspaceDirectory {
+                        assistant.setWorkspaceDirectory(
+                            chatWorkspaceDirectory)
+                    } else if let sourceSession {
                         assistant.attach(to: sourceSession)
                         bindAssistant(assistant, to: sourceSession)
                     }
@@ -4393,6 +4996,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 // This Chat surface owns the conversation — drop the pet bubble.
                 assistant.dismissPopover()
                 record.assistant = assistant
+                if let chatTitle {
+                    let title = chatTitle.trimmingCharacters(
+                        in: .whitespacesAndNewlines)
+                    if !title.isEmpty {
+                        pane.paneHeader.title = String(title.prefix(80))
+                    }
+                }
+                if let chatRole {
+                    let role = chatRole.trimmingCharacters(
+                        in: .whitespacesAndNewlines)
+                    if !role.isEmpty {
+                        record.participantRole = String(role.prefix(120))
+                    }
+                }
                 configureCollaboration(for: record, assistant: assistant)
                 let paneLedger = ledgerID
                 pane.onNewChat = { [weak self, weak win, weak assistant] in
@@ -4557,6 +5174,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             background: .clear, blurred: false)
         if let title = request.title { pane.paneHeader.title = title }
         let record = UtilityPanelRecord(surface: controller, pane: pane, ledgerID: ledgerID)
+        record.ownerWindow = win
         utilityPanels[ObjectIdentifier(win), default: []].append(record)
         wireUtilityPane(pane, record: record, in: win)
         guard insertPaneView(
@@ -5234,6 +5852,279 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
+    private func chatControlState(
+        _ record: UtilityPanelRecord
+    ) -> [String: Any]? {
+        guard let assistant = record.assistant else { return nil }
+        var state = assistant.controlState().jsonObject()
+        state["chatId"] = record.ledgerID
+        state["paneId"] = collaborationEndpoint(for: record.pane).id
+        state["title"] = record.pane.paneHeader.title
+        state["role"] = record.participantRole
+        let owner = record.pane.window ?? record.ownerWindow
+        state["focused"] = owner?.firstResponder === record.pane
+        state["open"] = record.pane.superview != nil && owner != nil
+        state["channelId"] = channelID(for: record.pane) ?? NSNull()
+        let participant = collaborationParticipant(for: record.pane)
+        state["provider"] =
+            participant?.provider ?? record.configuredProvider ?? NSNull()
+        state["model"] =
+            participant?.modelID ?? record.configuredModel ?? NSNull()
+        return state
+    }
+
+    private enum ChatConfigurationResult {
+        case success(AppConfig)
+        case failure(String)
+    }
+
+    private func configuredChat(
+        provider rawProvider: String?,
+        model: String?
+    ) -> ChatConfigurationResult {
+        guard let rawProvider else { return .success(config) }
+        let provider = rawProvider
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let supported = Set(
+            InfinittyAIProvider.allCases.map(\.rawValue) + ["auto"])
+        guard supported.contains(provider) else {
+            return .failure(
+                "Unknown provider '\(rawProvider)'. Use auto, claude, codex, "
+                    + "opencode, hermes, amp, or apple.")
+        }
+        var value = config
+        value.aiProvider = provider
+        let model = model?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        switch provider {
+        case "claude": value.claudeModel = model
+        case "codex": value.codexModel = model
+        case "opencode": value.opencodeModel = model
+        case "hermes": value.hermesModel = model
+        case "amp": value.ampModel = model
+        default: break
+        }
+        return .success(value)
+    }
+
+    private func handleChatControl(_ encoded: String) -> String {
+        let request: [String: Any]
+        switch BrowserControlCodec.decode(encoded) {
+        case .success(let value):
+            request = value
+        case .failure(let error):
+            return BrowserControlCodec.response(
+                error: "invalid_request",
+                message: error.localizedDescription)
+        }
+        guard request["v"] as? Int == 1 else {
+            return BrowserControlCodec.response(
+                error: "unsupported_version",
+                message: "Chat requests require version 1.")
+        }
+        let operation = request["op"] as? String ?? ""
+        let response = onMain { () -> String in
+            if operation == "list" {
+                let chats = self.utilityPanels.values
+                    .flatMap { $0 }
+                    .filter { $0.kind == .chat }
+                    .compactMap(self.chatControlState)
+                    .sorted {
+                        ($0["chatId"] as? String ?? "")
+                            < ($1["chatId"] as? String ?? "")
+                    }
+                return BrowserControlCodec.response(
+                    result: ["chats": chats])
+            }
+
+            if operation == "create" {
+                let chatConfiguration: AppConfig
+                switch self.configuredChat(
+                    provider: request["provider"] as? String,
+                    model: request["model"] as? String)
+                {
+                case .success(let value):
+                    chatConfiguration = value
+                case .failure(let message):
+                    return BrowserControlCodec.response(
+                        error: "invalid_provider", message: message)
+                }
+                let workspace: String?
+                if let rawWorkspace = request["workspace"] as? String {
+                    let resolved = URL(fileURLWithPath: rawWorkspace)
+                        .resolvingSymlinksInPath().standardizedFileURL
+                    var isDirectory: ObjCBool = false
+                    guard FileManager.default.fileExists(
+                        atPath: resolved.path,
+                        isDirectory: &isDirectory),
+                          isDirectory.boolValue
+                    else {
+                        return BrowserControlCodec.response(
+                            error: "invalid_workspace",
+                            message:
+                                "workspace must be an existing directory.")
+                    }
+                    workspace = resolved.path
+                } else {
+                    workspace = nil
+                }
+                let existingWindow = self.standardKeyWindow()
+                    ?? NSApp.windows.first(where: {
+                        $0.tabbingIdentifier == "infinitty"
+                            && $0 !== self.quickTerminal.window
+                    })
+                let window: NSWindow
+                if let existingWindow {
+                    window = existingWindow
+                } else {
+                    let created = self.makeTerminalWindow(cwd: workspace)
+                    window = created.0
+                    window.orderFront(nil)
+                    created.1.launch()
+                }
+                guard let record = self.openUtilityPanel(
+                          .chat,
+                          in: window,
+                          forceNewInstance: true,
+                          chatConfiguration: chatConfiguration,
+                          chatWorkspaceDirectory: workspace,
+                          chatTitle: request["name"] as? String,
+                          chatRole: request["role"] as? String),
+                      let state = self.chatControlState(record)
+                else {
+                    return BrowserControlCodec.response(
+                        error: "create_failed",
+                        message: "Could not create the Chat pane.")
+                }
+                self.appControl.broadcast([
+                    "event": "chat-opened",
+                    "chatId": record.ledgerID,
+                    "paneId": self.collaborationEndpoint(
+                        for: record.pane).id,
+                ])
+                return BrowserControlCodec.response(result: state)
+            }
+
+            guard let chatID = request["chatId"] as? String,
+                  let record = self.chatRecord(withID: chatID),
+                  let assistant = record.assistant
+            else {
+                return BrowserControlCodec.response(
+                    error: "unknown_chat",
+                    message: "chatId must identify an open Chat.")
+            }
+            switch operation {
+            case "snapshot":
+                guard let state = self.chatControlState(record) else {
+                    return BrowserControlCodec.response(
+                        error: "chat_unavailable",
+                        message: "The Chat assistant is unavailable.")
+                }
+                return BrowserControlCodec.response(result: state)
+            case "focus":
+                self.restorePaneZoom(revealing: record.pane)
+                (record.pane.window ?? record.ownerWindow)?
+                    .makeFirstResponder(record.pane)
+            case "close":
+                guard let window = record.pane.window ?? record.ownerWindow,
+                      self.closeUtilityPanel(record, in: window)
+                else {
+                    return BrowserControlCodec.response(
+                        error: "close_failed",
+                        message: "The Chat could not be closed.")
+                }
+                self.appControl.broadcast([
+                    "event": "chat-closed",
+                    "chatId": chatID,
+                ])
+                return BrowserControlCodec.response(result: [
+                    "chatId": chatID,
+                    "open": false,
+                ])
+            case "submit":
+                guard let rawText = request["text"] as? String,
+                      !rawText.trimmingCharacters(
+                          in: .whitespacesAndNewlines).isEmpty
+                else {
+                    return BrowserControlCodec.response(
+                        error: "missing_text",
+                        message: "text is required.")
+                }
+                assistant.submitFromControl(
+                    rawText,
+                    model: "Auto",
+                    effort: request["effort"] as? String ?? "Auto")
+            case "cancel":
+                assistant.cancelConversationWork()
+            case "new_thread":
+                assistant.startNewChat()
+            case "select_thread":
+                guard let threadID = request["threadId"] as? String,
+                      assistant.selectThreadFromControl(threadID)
+                else {
+                    return BrowserControlCodec.response(
+                        error: "unknown_thread",
+                        message:
+                            "threadId must identify a thread in this Chat.")
+                }
+            case "rename":
+                guard let rawName = request["name"] as? String else {
+                    return BrowserControlCodec.response(
+                        error: "missing_name",
+                        message: "name is required.")
+                }
+                let name = rawName.trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                guard !name.isEmpty else {
+                    return BrowserControlCodec.response(
+                        error: "missing_name",
+                        message: "name must not be empty.")
+                }
+                record.pane.paneHeader.title = String(name.prefix(80))
+                self.updateCollaborationMembership(for: record.pane)
+                self.appControl.broadcast([
+                    "event": "chat-renamed",
+                    "chatId": chatID,
+                    "name": record.pane.paneHeader.title,
+                ])
+            case "set_workspace":
+                guard let rawWorkspace = request["workspace"] as? String else {
+                    return BrowserControlCodec.response(
+                        error: "invalid_workspace",
+                        message: "workspace is required.")
+                }
+                let workspace = URL(fileURLWithPath: rawWorkspace)
+                    .resolvingSymlinksInPath().standardizedFileURL
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(
+                    atPath: workspace.path,
+                    isDirectory: &isDirectory),
+                      isDirectory.boolValue
+                else {
+                    return BrowserControlCodec.response(
+                        error: "invalid_workspace",
+                        message:
+                            "workspace must be an existing directory.")
+                }
+                assistant.setWorkspaceDirectory(workspace.path)
+            default:
+                return BrowserControlCodec.response(
+                    error: "unknown_operation",
+                    message: "Unknown Chat operation '\(operation)'.")
+            }
+            guard let state = self.chatControlState(record) else {
+                return BrowserControlCodec.response(
+                    error: "chat_unavailable",
+                    message: "The Chat assistant is unavailable.")
+            }
+            return BrowserControlCodec.response(result: state)
+        }
+        return response ?? BrowserControlCodec.response(
+            error: "main_thread_timeout",
+            message: "Could not schedule Chat control.")
+    }
+
     private func handleChannelPanelControl(_ encoded: String) -> String {
         let request: [String: Any]
         switch BrowserControlCodec.decode(encoded) {
@@ -5537,6 +6428,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return String(decoding: data, as: UTF8.self)
         case "browser":
             return handleBrowserControl(arg)
+        case "chat":
+            return handleChatControl(arg)
         case "channel":
             return handleCollaborationControl(arg)
         case "channel-panel":
@@ -5860,7 +6753,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return "error: unknown command '\(cmd)' (ping | version | list | new-window | new-tab | "
                 + "split | focus | close | send | send-line | screen | history | last-output | "
                 + "last-command | exit-code | run | activity | toggle-quick-terminal | toggle-sidebar | "
-                + "sidebar | sidebar-tab | chat-model | chat-effort | browser | channel | "
+                + "sidebar | sidebar-tab | chat | chat-model | chat-effort | browser | channel | "
                 + "channel-panel | subscribe)"
         }
     }
