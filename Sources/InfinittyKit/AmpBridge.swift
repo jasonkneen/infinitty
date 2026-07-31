@@ -2,15 +2,10 @@ import Foundation
 
 /// Best-effort bridge for the Sourcegraph Amp CLI.
 ///
-/// Amp ships **no headless mode** — `amp` with no subcommand launches an
-/// interactive TUI (its only commands are login/logout/version/orb/threads).
-/// Rather than scrape the TUI (fragile ANSI layout parsing) or hang the
-/// turn, this bridge attempts a plain non-TTY one-shot — write the prompt
-/// to stdin, read stdout until exit — bounded by a hard timeout. If Amp
-/// answers (some builds handle piped stdin), great; if it doesn't, the
-/// turn fails FAST with an actionable "open amp in a pane" message instead
-/// of looking hung. This keeps Amp visible and selectable in the picker
-/// without pretending to a streaming protocol it doesn't expose.
+/// Current Amp builds expose `--execute --stream-json` as their supported
+/// non-interactive provider contract. The bridge still accepts plain text
+/// output for older test fixtures and builds, but it never scrapes the
+/// interactive TUI.
 final class AmpBridge: @unchecked Sendable {
     static let shared = AmpBridge()
 
@@ -25,6 +20,7 @@ final class AmpBridge: @unchecked Sendable {
         prompt: String,
         system: String = "",
         model: String? = nil,
+        cwd: String? = nil,
         timeout: TimeInterval = AmpBridge.turnTimeoutSeconds,
         onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
@@ -39,13 +35,34 @@ final class AmpBridge: @unchecked Sendable {
                 let full = system.isEmpty ? prompt : system + "\n\n" + prompt
                 let process = Process()
                 process.executableURL = executable
-                let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-                process.standardInput = stdin
+                var arguments = [
+                    "--no-ide",
+                    "--no-notifications",
+                    "--no-color",
+                    "--execute",
+                    full,
+                    "--stream-json",
+                ]
+                if let model, !model.isEmpty {
+                    // Amp's -m value is an agent mode discovered by the
+                    // adapter, not a hard-coded model release identifier.
+                    arguments += ["-m", model]
+                }
+                process.arguments = arguments
+                let stdout = Pipe(), stderr = Pipe()
+                process.standardInput = FileHandle.nullDevice
                 process.standardOutput = stdout
                 process.standardError = stderr
+                if let cwd, !cwd.isEmpty {
+                    var isDirectory: ObjCBool = false
+                    if FileManager.default.fileExists(
+                        atPath: cwd, isDirectory: &isDirectory
+                    ), isDirectory.boolValue {
+                        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+                    }
+                }
                 var env = ProcessInfo.processInfo.environment
                 env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "")
-                // Hint non-interactive use where Amp honors it.
                 env["NO_COLOR"] = "1"
                 env["TERM"] = "dumb"
                 process.environment = env
@@ -56,7 +73,7 @@ final class AmpBridge: @unchecked Sendable {
                     if handle.availableData.isEmpty { handle.readabilityHandler = nil }
                 }
 
-                PetLog.log("AmpBridge.spawn (best-effort one-shot)")
+                PetLog.log("AmpBridge.spawn (--execute --stream-json)")
                 do {
                     try process.run()
                 } catch {
@@ -64,12 +81,10 @@ final class AmpBridge: @unchecked Sendable {
                         "Failed to launch amp: \(error.localizedDescription)"))
                     return
                 }
-                try? stdin.fileHandleForWriting.write(contentsOf: Data(full.utf8))
-                try? stdin.fileHandleForWriting.close()
 
                 // Watchdog: never hang. Terminate at the deadline — that
                 // closes stdout, so the blocking read below returns and we
-                // resume with the clear interactive-only error.
+                // resume with a bounded provider-execution error.
                 let watchdog = DispatchWorkItem {
                     if process.isRunning {
                         PetLog.log("AmpBridge.timeout after \(Int(timeout))s — terminating")
@@ -85,8 +100,9 @@ final class AmpBridge: @unchecked Sendable {
                 watchdog.cancel()
                 stderr.fileHandleForReading.readabilityHandler = nil
 
-                let text = AmpBridge.stripANSI(
-                    String(data: data, encoding: .utf8) ?? "")
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                let text = (AmpBridge.textFromStreamJSON(raw)
+                    ?? AmpBridge.stripANSI(raw))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if process.terminationStatus == 0, !text.isEmpty {
                     if let onPartial {
@@ -94,7 +110,8 @@ final class AmpBridge: @unchecked Sendable {
                     }
                     cont.resume(returning: text)
                 } else {
-                    cont.resume(throwing: AmpBridgeError.interactiveOnly)
+                    cont.resume(throwing: AmpBridgeError.executionFailed(
+                        status: process.terminationStatus))
                 }
             }
         }
@@ -109,19 +126,41 @@ final class AmpBridge: @unchecked Sendable {
         let range = NSRange(input.startIndex..., in: input)
         return regex.stringByReplacingMatches(in: input, range: range, withTemplate: "")
     }
+
+    static func textFromStreamJSON(_ input: String) -> String? {
+        var assistantText = ""
+        var resultText = ""
+        for line in input.split(whereSeparator: \.isNewline) {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                  let type = object["type"] as? String
+            else { continue }
+            if type == "assistant",
+               let message = object["message"] as? [String: Any],
+               let content = message["content"] as? [[String: Any]] {
+                for block in content where block["type"] as? String == "text" {
+                    assistantText += block["text"] as? String ?? ""
+                }
+            } else if type == "result", let result = object["result"] as? String {
+                resultText = result
+            }
+        }
+        if !assistantText.isEmpty { return assistantText }
+        return resultText.isEmpty ? nil : resultText
+    }
 }
 
 enum AmpBridgeError: LocalizedError {
     case processUnavailable(String)
-    case interactiveOnly
+    case executionFailed(status: Int32)
 
     var errorDescription: String? {
         switch self {
         case .processUnavailable(let m):
             return m
-        case .interactiveOnly:
-            return "Amp is interactive-only — it didn't answer headlessly. "
-                + "Open a pane (⌘T) and run `amp` to use it there."
+        case .executionFailed(let status):
+            return "Amp provider execution failed with status \(status)."
         }
     }
 }

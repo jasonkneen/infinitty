@@ -406,15 +406,7 @@ final class ClaudeBridge: @unchecked Sendable {
                     "Bash BashOutput KillShell Read Write Edit NotebookEdit "
                     + "Glob Grep WebFetch WebSearch Task TodoWrite"]
             }
-            // YOLO by default — same opt-out as Codex (`INFINITTY_AI_YOLO=0`).
-            // Background pet-assistant turns can't surface interactive
-            // approval prompts, so tool calls would otherwise hang the
-            // SSE turn until the timeout. With this flag the CLI
-            // auto-approves every tool call against its permissions
-            // policy; opt out per launch with the env var above.
-            if ProcessInfo.processInfo.environment["INFINITTY_AI_YOLO"] != "0" {
-                args.append("--dangerously-skip-permissions")
-            }
+            args += ProviderPermissionPolicy.claudePermissionArguments()
             let mcpURL = mcpExecutableURLOverride
                 ?? MCPConfiguration.mcpExecutablePath().map(URL.init(fileURLWithPath:))
             if let mcpURL,

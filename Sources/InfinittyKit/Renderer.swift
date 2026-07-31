@@ -47,6 +47,8 @@ final class Renderer: NSObject {
 
     // Inline images (OSC 1337): textures cached per placement id.
     private var imageTextures: [UInt64: MTLTexture] = [:]
+    private var imageTextureBytes: [UInt64: Int] = [:]
+    private static let maximumImageTextureBytes = 64 * 1024 * 1024
 
     private func imageTexture(for id: UInt64) -> MTLTexture? {
         if let cached = imageTextures[id] { return cached }
@@ -60,17 +62,25 @@ final class Renderer: NSObject {
                 region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
                 withBytes: buf.baseAddress!, bytesPerRow: w * 4)
         }
-        if imageTextures.count > 64 {
+        if imageTextureBytes.values.reduce(0, +) + rgba.count
+            > Self.maximumImageTextureBytes
+        {
             let activeIDs = Set(snap.images.map(\.id))
             let unusedKeys = imageTextures.keys.filter { !activeIDs.contains($0) }
             for key in unusedKeys {
                 imageTextures.removeValue(forKey: key)
+                imageTextureBytes.removeValue(forKey: key)
             }
-            if imageTextures.count > 64 {
+            if imageTextureBytes.values.reduce(0, +) + rgba.count
+                > Self.maximumImageTextureBytes
+            {
                 imageTextures.removeAll()
+                imageTextureBytes.removeAll()
             }
         }
+        guard rgba.count <= Self.maximumImageTextureBytes else { return nil }
         imageTextures[id] = texture
+        imageTextureBytes[id] = rgba.count
         return texture
     }
 

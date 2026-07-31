@@ -34,26 +34,17 @@ security find-identity -v -p codesigning | grep -q "Developer ID Application" \
   || die "no Developer ID Application cert in Keychain"
 npm whoami >/dev/null 2>&1 || die "npm not logged in (run: npm login)"
 ok "gh auth, signing cert, npm auth"
-if ! xcrun notarytool history --keychain-profile infinitty >/dev/null 2>&1; then
-  warn "notary profile 'infinitty' missing — ship-signed.sh will walk you through creating it"
-fi
+xcrun notarytool history --keychain-profile infinitty >/dev/null 2>&1 \
+  || die "notary profile 'infinitty' missing"
 if [ -n "$(git status --porcelain)" ]; then
   git status --short
-  read "REPLY?Working tree is dirty — continue anyway? [y/N] "
-  [[ "$REPLY" == [yY]* ]] || die "aborted"
+  die "working tree must be clean for a release"
 fi
 
-step "Tests (full suite is known flaky under load; suites pass in isolation)"
-while true; do
-  if swift test; then ok "tests passed"; break; fi
-  print
-  read "CHOICE?Tests failed. [r]etry / [s]kip and continue / [a]bort: "
-  case "$CHOICE" in
-    r*) ;;
-    s*) warn "skipping tests"; break ;;
-    *)  die "aborted" ;;
-  esac
-done
+step "Tests"
+swift test
+INFINITTY_PERFORMANCE_GATES=1 swift test --filter PerformanceBudgetTests
+ok "tests and isolated performance gates passed"
 
 step "Version bump"
 CURRENT=$(cd npm && npm pkg get version | tr -d '"')

@@ -681,21 +681,27 @@ for line in sys.stdin:
         await fulfillment(of: [eventReceived], timeout: 2)
     }
 
-    func testAmpBridgeReturnsHeadlessOutput() async throws {
+    func testAmpBridgeReturnsProviderOutput() async throws {
         let executable = try makePythonExecutable(#"""
+import os
 import sys
-data = sys.stdin.read()
-sys.stdout.write("AMP:" + data)
+execute_index = sys.argv.index("--execute")
+message = sys.argv[execute_index + 1]
+sys.stdout.write("AMP:" + os.getcwd() + ":" + message)
 sys.stdout.flush()
 sys.exit(0)
 """#)
         defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let workspace = executable.deletingLastPathComponent()
         let bridge = AmpBridge(executableURL: executable)
-        let reply = try await bridge.turn(prompt: "hello", timeout: 5)
-        XCTAssertTrue(reply.contains("hello"), "got: \(reply)")
+        let reply = try await bridge.turn(
+            prompt: "hello", system: "test", cwd: workspace.path, timeout: 5)
+        XCTAssertTrue(
+            reply.hasSuffix("/\(workspace.lastPathComponent):test\n\nhello"),
+            "got: \(reply)")
     }
 
-    func testAmpBridgeFailsFastWhenInteractiveOnly() async throws {
+    func testAmpBridgeFailsFastWhenProviderExecutionFails() async throws {
         let executable = try makePythonExecutable(#"""
 import sys
 sys.exit(1)
@@ -705,10 +711,10 @@ sys.exit(1)
         let start = Date()
         do {
             _ = try await bridge.turn(prompt: "hi", timeout: 5)
-            XCTFail("should throw interactiveOnly")
+            XCTFail("should throw executionFailed")
         } catch {
             XCTAssertTrue(
-                error.localizedDescription.contains("interactive-only"),
+                error.localizedDescription.contains("provider execution failed"),
                 "got: \(error.localizedDescription)")
         }
         XCTAssertLessThan(Date().timeIntervalSince(start), 4)
@@ -718,6 +724,16 @@ sys.exit(1)
         XCTAssertEqual(
             AmpBridge.stripANSI("\u{1B}[31mred\u{1B}[0m plain"),
             "red plain")
+    }
+
+    func testAmpParsesClaudeCompatibleStreamJSON() {
+        let stream = """
+        {"type":"system","subtype":"init"}
+        {"type":"assistant","message":{"content":[{"type":"text","text":"hello "}]}}
+        {"type":"assistant","message":{"content":[{"type":"text","text":"world"}]}}
+        {"type":"result","result":"hello world"}
+        """
+        XCTAssertEqual(AmpBridge.textFromStreamJSON(stream), "hello world")
     }
 
     private func makePythonExecutable(_ body: String) throws -> URL {

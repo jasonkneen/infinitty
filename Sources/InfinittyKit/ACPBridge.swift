@@ -103,12 +103,12 @@ final class ACPBridge: @unchecked Sendable {
         self.queue = DispatchQueue(label: "infinitty.acp.bridge.\(provider.rawValue)")
     }
 
-    /// ACP launch arguments per provider. opencode → `opencode acp`;
-    /// hermes → `hermes acp --accept-hooks` (auto-approve hooks without a
-    /// TTY, mirroring the other bridges' YOLO default).
+    /// ACP launch arguments per provider. Hook acceptance is a permission
+    /// bypass and therefore requires the same explicit process opt-in as the
+    /// other provider danger modes.
     private var launchArguments: [String] {
         switch provider {
-        case .hermes:   return ["acp", "--accept-hooks"]
+        case .hermes:   return ProviderPermissionPolicy.hermesACPArguments()
         default:        return ["acp"]   // opencode (and any future ACP agent)
         }
     }

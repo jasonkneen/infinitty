@@ -23,10 +23,7 @@ let package = Package(
                 .product(name: "AIElementsUI", package: "ShadKit"),
                 .product(name: "AIElementsGallery", package: "ShadKit"),
             ],
-            resources: [.process("Resources")],
-            swiftSettings: [
-                .unsafeFlags(["-Ounchecked"], .when(configuration: .release)),
-            ]
+            resources: [.process("Resources")]
         ),
         .executableTarget(
             name: "infinitty",

@@ -57,6 +57,18 @@ final class TerminalTests: XCTestCase {
         XCTAssertNotEqual(c.flags & CellFlags.underline, 0)
     }
 
+    func testCSIParameterFloodIsBoundedAndIgnored() {
+        let t = makeTerminal()
+        let parameters = Array(repeating: "1", count: 2_000).joined(separator: ";")
+        feed(t, "\u{1B}[\(parameters)mX")
+
+        XCTAssertLessThanOrEqual(
+            t.parserBufferCountsForTesting.csi,
+            Terminal.maxCSIParameters)
+        XCTAssertEqual(cell(t, 0, 0).glyph, UInt32(UInt8(ascii: "X")))
+        XCTAssertEqual(cell(t, 0, 0).flags, 0)
+    }
+
     // MARK: UTF-8 validation
 
     func testSurrogateRejected() {

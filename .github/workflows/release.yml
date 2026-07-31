@@ -37,16 +37,26 @@ jobs:
           scripts/make-app.sh "$BIN" "$VERSION" dist
           cp "$BIN/infinitty-mcp" dist/
 
-      - name: Sign (skipped if no cert secret)
+      - name: Verify release credentials
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$MAC_CERT_P12_BASE64"
+          test -n "$MAC_CERT_PASSWORD"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+
+      - name: Sign
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
           IDENTITY: "Developer ID Application: Jason Kneen (SW75ZJJ5R6)"
         run: |
-          if [ -z "$MAC_CERT_P12_BASE64" ]; then
-            echo "No signing cert configured — shipping unsigned."
-            exit 0
-          fi
           KEYCHAIN_PASS=$(uuidgen)
           security create-keychain -p "$KEYCHAIN_PASS" build.keychain
           security default-keychain -s build.keychain
@@ -61,16 +71,12 @@ jobs:
           codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
           codesign -vvv --strict dist/Infinitty.app
 
-      - name: Notarize & staple (skipped if no Apple secret)
+      - name: Notarize & staple
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -z "$APPLE_ID" ]; then
-            echo "No Apple credentials configured — skipping notarization."
-            exit 0
-          fi
           ditto -c -k --keepParent dist/Infinitty.app notarize-app.zip
           xcrun notarytool submit notarize-app.zip \
             --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \

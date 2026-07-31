@@ -193,18 +193,6 @@ final class CodexAppServer: @unchecked Sendable {
 
     // MARK: - Process management
 
-    /// YOLO sandbox default. Pet-assistant turns are non-interactive,
-    /// so leaving the seed at `workspace-write` causes every write
-    /// tool call to bounce an approval prompt back to a user who
-    /// isn't there, deadlocking the turn until the 130 s timeout
-    /// (that deadlock was the 30 s/turn pathology). Opt out with
-    /// `INFINITTY_AI_YOLO=0`.
-    private static let yoloSandboxMode: String = {
-        ProcessInfo.processInfo.environment["INFINITTY_AI_YOLO"] == "0"
-            ? "workspace-write"
-            : "danger-full-access"
-    }()
-
     private func ensureProcess() throws {
         try queue.sync {
             if process?.isRunning == true { return }
@@ -230,11 +218,10 @@ final class CodexAppServer: @unchecked Sendable {
             var arguments = [
                 "app-server", "--listen", "stdio://",
                 "-c", "approval_policy=never",
-                // YOLO by default — framework lets the CLI self-approve
-                // tool calls instead of bouncing prompts back to a
-                // background pet-assistant lane. Opt out per launch
-                // with `INFINITTY_AI_YOLO=0`.
-                "-c", "sandbox_mode=\(CodexAppServer.yoloSandboxMode)",
+                // `never` fails requests that need escalation. The sandbox
+                // stays workspace-scoped unless danger bypass is explicitly
+                // opted into for this process.
+                "-c", "sandbox_mode=\(ProviderPermissionPolicy.codexSandboxMode())",
             ]
             let mcpURL = mcpExecutableURLOverride
                 ?? MCPConfiguration.mcpExecutablePath().map(URL.init(fileURLWithPath:))
@@ -348,7 +335,8 @@ final class CodexAppServer: @unchecked Sendable {
     ) async throws -> String {
         let input: [[String: Any]] = [["type": "text", "text": prompt]]
         _ = queue.sync { pendingIdleThreadIDs.remove(threadID) }
-        let sandboxPolicy: [String: Any] = CodexAppServer.yoloSandboxMode == "danger-full-access"
+        let sandboxPolicy: [String: Any] =
+            ProviderPermissionPolicy.codexSandboxMode() == "danger-full-access"
             ? ["type": "dangerFullAccess"]
             : ["type": "workspaceWrite", "writableRoots": [] as [String],
                "networkAccess": false, "excludeTmpdirEnvVar": false,

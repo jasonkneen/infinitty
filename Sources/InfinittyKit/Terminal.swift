@@ -72,6 +72,11 @@ private struct SavedCursor {
 /// the renderer takes snapshots. One unfair lock, held briefly by both sides.
 final class Terminal {
     static let maxScrollback = 10_000
+    static let maxCSIParameters = 64
+    static let maxEncodedImageBytes = 8 * 1024 * 1024
+    static let maxImageWorkBytes = 16 * 1024 * 1024
+    static let maxDecodedImagePixels = 1_048_576
+    static let maxResidentImageBytes = 64 * 1024 * 1024
 
     var onOutput: (([UInt8]) -> Void)? // parser responses (DSR etc.) -> pty
     var onTitle: ((String) -> Void)?
@@ -129,6 +134,7 @@ final class Terminal {
     private var csiHasCur = false
     private var csiMarker: UInt8 = 0
     private var csiInter: UInt8 = 0
+    private var csiOverflow = false
     private var escInterByte: UInt8 = 0
     private var oscBuf: [UInt8] = []
 
@@ -197,6 +203,7 @@ final class Terminal {
     private var kittyStore: [UInt32: (w: Int, h: Int, rgba: [UInt8])] = [:]
     private var kittyStoreOrder: [UInt32] = []
     private var kittyChunks: (controls: [String: String], data: [UInt8])?
+    private var imageWorkInFlightBytes = 0
 
     init(cols: Int, rows: Int) {
         self.cols = max(2, cols)
@@ -306,6 +313,13 @@ final class Terminal {
             absLine: Int, col: Int,
             cellPxW: CGFloat, cellPxH: CGFloat, cols: Int
         )
+
+        var encodedByteCount: Int {
+            switch self {
+            case let .iterm2(_, base64, _, _, _, _, _): return base64.count
+            case let .kitty(_, payload, _, _, _, _, _): return payload.count
+            }
+        }
     }
 
     private var pendingImageWork: [PendingImageWork] = []
@@ -546,6 +560,7 @@ final class Terminal {
                 csiHasCur = false
                 csiMarker = 0
                 csiInter = 0
+                csiOverflow = false
                 pstate = .csi
             case UInt8(ascii: "]"):
                 oscBuf.removeAll(keepingCapacity: true)
@@ -583,8 +598,12 @@ final class Terminal {
                 csiCur = min(csiCur * 10 + Int(b - 0x30), 65535)
                 csiHasCur = true
             case UInt8(ascii: ";"), UInt8(ascii: ":"):
-                csiParams.append(csiHasCur ? csiCur : 0)
-                csiColon.append(csiNextColon)
+                if csiParams.count < Self.maxCSIParameters {
+                    csiParams.append(csiHasCur ? csiCur : 0)
+                    csiColon.append(csiNextColon)
+                } else {
+                    csiOverflow = true
+                }
                 csiNextColon = b == UInt8(ascii: ":")
                 csiCur = 0
                 csiHasCur = false
@@ -593,11 +612,11 @@ final class Terminal {
             case 0x20...0x2F:
                 csiInter = b
             case 0x40...0x7E:
-                if csiHasCur || !csiParams.isEmpty {
+                if !csiOverflow, csiHasCur || !csiParams.isEmpty {
                     csiParams.append(csiHasCur ? csiCur : 0)
                     csiColon.append(csiNextColon)
                 }
-                csiDispatch(final: b)
+                if !csiOverflow { csiDispatch(final: b) }
                 pstate = .ground
             case 0x1B:
                 pstate = .esc
@@ -615,7 +634,7 @@ final class Terminal {
                 pstate = .oscEsc
             } else if oscBuf.count < 8192 {
                 oscBuf.append(b)
-            } else if oscBuf.count < 16_777_216,
+            } else if oscBuf.count < Self.maxEncodedImageBytes,
                       oscBuf.count >= 5,
                       oscBuf[0] == UInt8(ascii: "1"), oscBuf[1] == UInt8(ascii: "3"),
                       oscBuf[2] == UInt8(ascii: "3"), oscBuf[3] == UInt8(ascii: "7") {
@@ -645,7 +664,7 @@ final class Terminal {
         case .apc:
             if b == 0x1B {
                 pstate = .apcEsc
-            } else if apcBuf.count < 16_777_216 {
+            } else if apcBuf.count < Self.maxEncodedImageBytes {
                 apcBuf.append(b)
             }
 
@@ -1338,7 +1357,7 @@ final class Terminal {
         }
         guard params["inline"] == "1" else { return }
 
-        pendingImageWork.append(.iterm2(
+        queueImageWork(.iterm2(
             params: params,
             base64: Array(payload[(colon + 1)...]),
             absLine: sbAppended + cy,
@@ -1347,6 +1366,20 @@ final class Terminal {
             cellPxH: cellPxH,
             cols: cols
         ))
+    }
+
+    /// Called only while holding the terminal lock. This accounts for jobs
+    /// already handed to the serial decoder as well as jobs collected in the
+    /// current feed batch, so a PTY flood cannot build an unbounded queue of
+    /// multi-megabyte payloads.
+    private func queueImageWork(_ job: PendingImageWork) {
+        let bytes = job.encodedByteCount
+        guard bytes > 0,
+              bytes <= Self.maxEncodedImageBytes,
+              imageWorkInFlightBytes <= Self.maxImageWorkBytes - bytes
+        else { return }
+        imageWorkInFlightBytes += bytes
+        pendingImageWork.append(job)
     }
 
     /// Place a decoded iTerm2 image. Called under the terminal lock after
@@ -1385,7 +1418,7 @@ final class Terminal {
             rgba: decoded.rgba
         ))
         nextImageID += 1
-        if images.count > 12 { images.removeFirst(images.count - 12) }
+        pruneImagePlacements(maximumCount: 12)
 
         // Advance cursor only if still at the capture site (no intervening output).
         if sbAppended + cy == absLine && cx == col {
@@ -1429,19 +1462,31 @@ final class Terminal {
         return (min(max(w ?? 1, 1), cols), min(max(h ?? 1, 1), 200))
     }
 
-    /// Decode any ImageIO-supported format into premultiplied RGBA8,
-    /// downscaling to at most 2048 on the long edge.
+    private func pruneImagePlacements(maximumCount: Int) {
+        while images.count > maximumCount
+            || images.reduce(0, { $0 + $1.rgba.count }) > Self.maxResidentImageBytes
+        {
+            images.removeFirst()
+        }
+    }
+
+    /// Decode any ImageIO-supported format into premultiplied RGBA8. ImageIO
+    /// creates a bounded thumbnail directly, avoiding a full-size decode of a
+    /// hostile source followed by a downscale.
     private static func decodeImage(_ data: Data) -> (width: Int, height: Int, rgba: [UInt8])? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
-        var w = image.width
-        var h = image.height
-        let maxEdge = 2048
-        if max(w, h) > maxEdge {
-            let scale = CGFloat(maxEdge) / CGFloat(max(w, h))
-            w = max(Int(CGFloat(w) * scale), 1)
-            h = max(Int(CGFloat(h) * scale), 1)
-        }
+              let image = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 1024,
+                ] as CFDictionary)
+        else { return nil }
+        let w = image.width
+        let h = image.height
+        guard w > 0, h > 0, w <= Self.maxDecodedImagePixels / h else { return nil }
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         let ok = rgba.withUnsafeMutableBytes { buf -> Bool in
             guard let ctx = CGContext(
@@ -1479,13 +1524,28 @@ final class Terminal {
         // Chunked transmissions: m=1 accumulates; controls come from chunk 1.
         if controls["m"] == "1" {
             if kittyChunks == nil {
-                kittyChunks = (controls, payload)
+                if payload.count <= Self.maxEncodedImageBytes {
+                    kittyChunks = (controls, payload)
+                } else {
+                    kittyRespond(controls, "EINVAL:image payload too large")
+                }
             } else {
-                kittyChunks?.data.append(contentsOf: payload)
+                if let count = kittyChunks?.data.count,
+                   payload.count <= Self.maxEncodedImageBytes - count {
+                    kittyChunks?.data.append(contentsOf: payload)
+                } else {
+                    kittyChunks = nil
+                    kittyRespond(controls, "EINVAL:image payload too large")
+                }
             }
             return
         }
         if var pending = kittyChunks {
+            guard payload.count <= Self.maxEncodedImageBytes - pending.data.count else {
+                kittyChunks = nil
+                kittyRespond(pending.controls, "EINVAL:image payload too large")
+                return
+            }
             pending.data.append(contentsOf: payload)
             kittyChunks = nil
             handleKitty(controls: pending.controls, payload: pending.data)
@@ -1515,7 +1575,7 @@ final class Terminal {
         switch action {
         case "q", "t", "T":
             // Heavy path (base64 / file / zlib / ImageIO) off the terminal lock.
-            pendingImageWork.append(.kitty(
+            queueImageWork(.kitty(
                 controls: controls,
                 payload: payload,
                 absLine: sbAppended + cy,
@@ -1577,7 +1637,7 @@ final class Terminal {
             kittyID: kittyID == 0 ? UInt32.max : kittyID
         ))
         nextImageID += 1
-        if images.count > 24 { images.removeFirst(images.count - 24) }
+        pruneImagePlacements(maximumCount: 24)
 
         // C=1: app manages the cursor itself (yazi, chafa placements).
         // Only advance when the cursor is still at the capture site.
@@ -1591,6 +1651,12 @@ final class Terminal {
     // MARK: - async image decode (off terminal lock)
 
     private func performImageDecode(_ job: PendingImageWork) {
+        defer {
+            lock.lock()
+            imageWorkInFlightBytes = max(
+                imageWorkInFlightBytes - job.encodedByteCount, 0)
+            lock.unlock()
+        }
         switch job {
         case let .iterm2(params, base64, absLine, col, cellPxW, cellPxH, cols):
             guard let data = Data(base64Encoded: Data(base64), options: .ignoreUnknownCharacters),
@@ -1625,7 +1691,10 @@ final class Terminal {
                     if id != 0 {
                         if kittyStore[id] == nil { kittyStoreOrder.append(id) }
                         kittyStore[id] = decoded
-                        while kittyStoreOrder.count > 8 {
+                        while kittyStoreOrder.count > 8
+                            || kittyStore.values.reduce(
+                                0, { $0 + $1.rgba.count }) > Self.maxResidentImageBytes / 2
+                        {
                             kittyStore.removeValue(forKey: kittyStoreOrder.removeFirst())
                         }
                     }
@@ -1679,7 +1748,8 @@ final class Terminal {
                 || path.hasPrefix("/private/tmp/") || path.hasPrefix("/private/var/folders/") else {
                 return nil
             }
-            guard let d = FileManager.default.contents(atPath: path), d.count <= 33_554_432 else {
+            guard let d = FileManager.default.contents(atPath: path),
+                  d.count <= Self.maxEncodedImageBytes else {
                 return nil
             }
             if controls["t"] == "t" { try? FileManager.default.removeItem(atPath: path) }
@@ -1696,7 +1766,8 @@ final class Terminal {
 
         guard format == 24 || format == 32,
               let w = Int(controls["s"] ?? ""), let h = Int(controls["v"] ?? ""),
-              w > 0, h > 0, w * h <= 8_388_608 else { return nil }
+              w > 0, h > 0,
+              w <= Self.maxDecodedImagePixels / h else { return nil }
         let bpp = format == 24 ? 3 : 4
 
         if controls["o"] == "z" {
@@ -1725,7 +1796,8 @@ final class Terminal {
 
     /// RFC1950 zlib payload -> raw bytes (strip header/adler, raw DEFLATE).
     private static func inflateZlib(_ data: Data, expected: Int) -> Data? {
-        guard data.count > 6, expected > 0, expected <= 33_554_432 else { return nil }
+        guard data.count > 6, expected > 0,
+              expected <= Self.maxDecodedImagePixels * 4 else { return nil }
         let deflate = data.dropFirst(2).dropLast(4)
         var out = Data(count: expected)
         let written = out.withUnsafeMutableBytes { dst -> Int in
@@ -1784,6 +1856,19 @@ final class Terminal {
         defer { lock.unlock() }
         guard let img = images.first(where: { $0.id == id }) else { return nil }
         return (img.pxWidth, img.pxHeight, img.rgba)
+    }
+
+    var parserBufferCountsForTesting: (
+        csi: Int, osc: Int, apc: Int, kittyChunks: Int, imageWorkBytes: Int
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (
+            csiParams.count,
+            oscBuf.count,
+            apcBuf.count,
+            kittyChunks?.data.count ?? 0,
+            imageWorkInFlightBytes)
     }
 
     // OSC 133 semantic prompts: A = prompt start, B = input start,
