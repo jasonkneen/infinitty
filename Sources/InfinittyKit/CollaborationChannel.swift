@@ -393,7 +393,7 @@ struct CollaborationChatContext: Equatable, Sendable {
         return selected.reversed()
     }
 
-    fileprivate static func boundedPrefix(_ text: String, to byteLimit: Int) -> String {
+    static func boundedPrefix(_ text: String, to byteLimit: Int) -> String {
         guard byteLimit > 0 else { return "" }
         guard text.utf8.count > byteLimit else { return text }
         let marker = "…"
@@ -2586,6 +2586,9 @@ final class CollaborationRoom {
             {
                 channel.participants.removeAll {
                     $0.id == previousParticipantID
+                }
+                channel.responsibilities.removeAll {
+                    $0.ownerID == previousParticipantID
                 }
             }
             if let participant {

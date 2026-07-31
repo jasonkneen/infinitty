@@ -457,6 +457,56 @@ final class CollaborationChannelTests: XCTestCase {
         XCTAssertEqual(snapshot.channels[0].responsibilities.map(\.ownerID), [agentB.id])
     }
 
+    func testMembershipRemovalReleasesRemovedParticipantsResponsibilities()
+        throws
+    {
+        let room = try CollaborationRoom(
+            store: MemoryCollaborationEventStore(),
+            idFactory: { "channel-membership" })
+        let registered = CollaborationEndpoint(
+            id: "terminal:registered",
+            kind: .terminal,
+            label: "Claude 1",
+            participantID: agentA.id)
+        let peer = endpoint("terminal:peer")
+        _ = try room.apply(
+            .linkAndJoin(
+                source: registered,
+                target: peer,
+                channelID: nil,
+                participants: [CollaborationParticipant(
+                    id: agentA.id,
+                    displayName: agentA.displayName,
+                    role: "implementation")]),
+            by: human)
+        _ = try room.apply(
+            .claimResponsibility(
+                channelID: "channel-membership",
+                claim: CollaborationResponsibility(
+                    id: "claim-owned",
+                    scope: "Sources/**",
+                    summary: "Implementation",
+                    ownerID: agentA.id)),
+            by: agentA)
+
+        let snapshot = try room.apply(
+            .updateMembership(
+                channelID: "channel-membership",
+                endpoint: CollaborationEndpoint(
+                    id: registered.id,
+                    kind: registered.kind,
+                    label: "infinitty"),
+                participant: nil),
+            by: human)
+
+        XCTAssertFalse(snapshot.channels[0].participants.contains {
+            $0.id == agentA.id
+        })
+        XCTAssertFalse(snapshot.channels[0].responsibilities.contains {
+            $0.ownerID == agentA.id
+        })
+    }
+
     func testPlanAndMessagesReplayFromAppendOnlyAuditRecords() throws {
         let store = MemoryCollaborationEventStore()
         var nextEvent = 0
