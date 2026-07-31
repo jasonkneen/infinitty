@@ -679,6 +679,102 @@ final class CollaborationChannelTests: XCTestCase {
         }
     }
 
+    func testStructuredRejectionsAreDurablyAuditedAndReplayable()
+        throws
+    {
+        let store = MemoryCollaborationEventStore()
+        var event = 0
+        let room = try CollaborationRoom(
+            store: store,
+            now: { Date(timeIntervalSince1970: Double(event + 1)) },
+            idFactory: { "unused" },
+            eventIDFactory: {
+                event += 1
+                return "event-\(event)"
+            })
+        let accepted = CollaborationControlRequest(
+            op: .create,
+            actor: human,
+            idempotencyKey: "create-audit-room",
+            channelID: "audit-room",
+            name: "Audit Room",
+            colorHex: "#3366FF")
+        let acceptedResult = CollaborationControlCodec.execute(
+            try XCTUnwrap(CollaborationControlCodec.encode(accepted)),
+            in: room)
+        XCTAssertNotNil(acceptedResult.snapshot)
+
+        let duplicate = CollaborationControlRequest(
+            op: .create,
+            actor: agentA,
+            idempotencyKey: "rejected-duplicate",
+            channelID: "audit-room",
+            name: "Duplicate",
+            colorHex: "#3366FF")
+        let rejectedResult = CollaborationControlCodec.execute(
+            try XCTUnwrap(CollaborationControlCodec.encode(duplicate)),
+            in: room)
+        XCTAssertNil(rejectedResult.snapshot)
+        XCTAssertTrue(rejectedResult.response.contains("command_rejected"))
+
+        let malformedResult = CollaborationControlCodec.execute(
+            "not-base64url!",
+            in: room)
+        XCTAssertNil(malformedResult.snapshot)
+        XCTAssertTrue(malformedResult.response.contains("invalid_request"))
+
+        XCTAssertEqual(store.records.count, 3)
+        XCTAssertEqual(
+            store.records.map(\.body.auditKind),
+            [
+                "channel_created",
+                "command_rejected",
+                "command_rejected",
+            ])
+        guard case let .commandRejected(
+            operation,
+            reason,
+            requestFingerprint) = store.records[1].body
+        else {
+            return XCTFail("decoded rejection was not classified")
+        }
+        XCTAssertEqual(operation, "create")
+        XCTAssertTrue(reason.contains("already exists"))
+        XCTAssertEqual(requestFingerprint.count, 64)
+        XCTAssertEqual(
+            store.records[2].actor.kind,
+            .system)
+
+        let replayed = try CollaborationRoom(
+            store: store,
+            now: Date.init,
+            idFactory: { "unused" },
+            eventIDFactory: { "unused" })
+        XCTAssertEqual(
+            replayed.snapshot().revision,
+            1,
+            "Rejected attempts must not mutate the room revision.")
+        XCTAssertEqual(
+            replayed.snapshot().channels.map(\.id),
+            ["audit-room"])
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "collaboration-rejected-audit-\(UUID().uuidString)",
+                isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let page = try CollaborationAuditService(
+            store: store,
+            rootDirectory: root)
+            .query(CollaborationAuditQuery(
+                eventKinds: ["command_rejected"]))
+        XCTAssertTrue(page.verified)
+        XCTAssertEqual(page.records.count, 2)
+        XCTAssertEqual(
+            page.records.map(\.eventKind),
+            ["command_rejected", "command_rejected"])
+    }
+
     func testJSONLStorePersistsPrivateReplayableAuditRecords() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("collaboration-store-\(UUID().uuidString)", isDirectory: true)
@@ -1310,6 +1406,171 @@ final class CollaborationChannelTests: XCTestCase {
             eventIDFactory: { "unused" })
         XCTAssertEqual(replayed.snapshot(), snapshot)
         XCTAssertTrue(replayed.snapshot().channels.isEmpty)
+    }
+
+    func testConnectedCloudProposalCannotRunWithoutDurableSessionReceipt()
+        throws
+    {
+        let store = MemoryCollaborationEventStore()
+        var timestamp: TimeInterval = 1_000
+        var event = 0
+        let room = try CollaborationRoom(
+            store: store,
+            now: {
+                defer { timestamp += 1 }
+                return Date(timeIntervalSince1970: timestamp)
+            },
+            idFactory: { "unused" },
+            eventIDFactory: {
+                event += 1
+                return "event-cloud-\(event)"
+            })
+        let spec = CollaborationRoomProposalSpec(
+            id: "proposal-cloud",
+            channelID: "channel-cloud",
+            roomName: "Cloud room",
+            objective: "Run one authenticated remote agent.",
+            workspaceRoot: "/tmp/infinitty-cloud",
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent:cloud",
+                    displayName: "Remote Codex",
+                    role: "Implementation",
+                    runtime: .cloud,
+                    provider: "Codex",
+                    modelID: "opaque-model-id",
+                    responsibilityScopes: ["Sources/**"],
+                    capabilities: ["workspace.write"],
+                    cloudConnection: CollaborationCloudConnection(
+                        endpointURL:
+                            "wss://codex.example.test/app-server",
+                        credentialEnvironmentVariable:
+                            "CODEX_REMOTE_TOKEN",
+                        remoteWorkspace:
+                            "/tmp/infinitty-cloud")),
+            ],
+            workspaceStrategy: .sharedCheckout,
+            expiresAt: Date(timeIntervalSince1970: 2_000))
+        var snapshot = try room.apply(
+            .prepareProposal(spec),
+            by: agentA)
+        XCTAssertEqual(
+            snapshot.proposals.first?.spec.agents.first?.provider,
+            "codex")
+        let digest = try XCTUnwrap(
+            snapshot.proposals.first?.digest)
+        snapshot = try room.apply(
+            .approveProposal(
+                proposalID: spec.id,
+                digest: digest),
+            by: human,
+            humanDecisionAuthority: humanAuthority)
+        snapshot = try room.apply(
+            .startProvisioning(
+                proposalID: spec.id,
+                digest: digest),
+            by: agentA)
+
+        XCTAssertThrowsError(try room.apply(
+            .markProposalRunning(
+                proposalID: spec.id,
+                digest: digest),
+            by: agentA)) { error in
+                XCTAssertTrue(
+                    String(describing: error).contains(
+                        "is not ready"))
+            }
+        XCTAssertEqual(
+            room.snapshot().proposals.first?.state,
+            .provisioning)
+
+        let mismatchedReceipt = CollaborationRuntimeSessionReceipt(
+            id: "receipt-cloud",
+            proposalID: spec.id,
+            agentID: "agent:cloud",
+            adapterKind: "codex_app_server",
+            provider: "codex",
+            remoteSessionID: "thread-remote",
+            workspace: spec.workspaceRoot,
+            modelID: "opaque-model-id",
+            endpointFingerprint: String(repeating: "a", count: 64),
+            accountFingerprint: String(repeating: "b", count: 64),
+            capabilities: ["stream", "interrupt", "resume"],
+            preparedAt: Date(timeIntervalSince1970: 1_003))
+        XCTAssertThrowsError(try room.apply(
+            .recordRuntimeSession(
+                proposalID: spec.id,
+                digest: digest,
+                receipt: mismatchedReceipt),
+            by: agentA))
+        XCTAssertTrue(
+            room.snapshot().proposals.first?.runtimeReceipts.isEmpty
+                == true)
+
+        let receipt = CollaborationRuntimeSessionReceipt(
+            id: "receipt-cloud",
+            proposalID: spec.id,
+            agentID: "agent:cloud",
+            adapterKind: "codex_app_server",
+            provider: "codex",
+            remoteSessionID: "thread-remote",
+            workspace: spec.workspaceRoot,
+            modelID: "opaque-model-id",
+            endpointFingerprint:
+                CollaborationRuntimeSessionReceipt.fingerprint(
+                    endpointURL:
+                        "wss://codex.example.test/app-server"),
+            accountFingerprint: String(repeating: "b", count: 64),
+            capabilities: ["stream", "interrupt", "resume"],
+            preparedAt: Date(timeIntervalSince1970: 1_003))
+        snapshot = try room.apply(
+            .recordRuntimeSession(
+                proposalID: spec.id,
+                digest: digest,
+                receipt: receipt),
+            by: agentA)
+        XCTAssertEqual(
+            snapshot.proposals.first?.runtimeReceipts,
+            [receipt])
+
+        snapshot = try room.apply(
+            .markProposalRunning(
+                proposalID: spec.id,
+                digest: digest),
+            by: agentA)
+        XCTAssertEqual(snapshot.proposals.first?.state, .running)
+        XCTAssertEqual(
+            snapshot.proposals.first?.runtimeReceipts,
+            [receipt])
+        XCTAssertEqual(
+            store.records.map(\.body.auditKind),
+            [
+                "proposal_prepared",
+                "proposal_transitioned",
+                "proposal_transitioned",
+                "runtime_session_recorded",
+                "proposal_transitioned",
+            ])
+        XCTAssertEqual(
+            try CollaborationRoom(
+                store: store).snapshot(),
+            snapshot)
+
+        let request = CollaborationControlRequest(
+            op: .recordRuntimeSession,
+            actor: agentA,
+            idempotencyKey: "record-cloud-receipt",
+            proposalID: spec.id,
+            proposalDigest: digest,
+            runtimeReceipt: receipt)
+        let encoded = try XCTUnwrap(
+            CollaborationControlCodec.encode(request))
+        guard case let .success(decoded) =
+                CollaborationControlCodec.decode(encoded)
+        else {
+            return XCTFail("receipt request did not decode")
+        }
+        XCTAssertEqual(decoded, request)
     }
 
     func testEveryDeclaredCancellationAndFailureEdgeIsExecutable() throws {

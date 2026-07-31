@@ -1771,6 +1771,9 @@ extension PetAssistantPanelView: NSMenuDelegate {
 /// presentations share conversation and request state.
 final class PetAssistant: NSObject, NSPopoverDelegate {
     typealias AskCompletion = (String, [String], String?) -> Void
+    private typealias BackendAskCompletion = (
+        AIOutcome, [String], String?
+    ) -> Void
     typealias RequestRunner = (
         _ request: String, _ model: String, _ effort: String,
         _ completion: @escaping AskCompletion
@@ -2424,7 +2427,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             guard let self, !self.invalidated else { return }
             let finish = {
                 self.completeRequest(
-                    request, answer: answer, files: files, query: query)
+                    request,
+                    outcome: .text(answer),
+                    files: files,
+                    query: query)
             }
             if Thread.isMainThread { finish() }
             else { DispatchQueue.main.async(execute: finish) }
@@ -2432,11 +2438,24 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         if let requestRunner {
             requestRunner(backendRequest, request.model, request.effort, completion)
         } else {
+            let backendCompletion: BackendAskCompletion = {
+                [weak self] outcome, files, query in
+                guard let self, !self.invalidated else { return }
+                let finish = {
+                    self.completeRequest(
+                        request,
+                        outcome: outcome,
+                        files: files,
+                        query: query)
+                }
+                if Thread.isMainThread { finish() }
+                else { DispatchQueue.main.async(execute: finish) }
+            }
             ask(
                 backendRequest, model: request.model, effort: request.effort,
                 priorHistory: priorHistory, conversationID: conversationID,
                 requestIdentity: request,
-                completion: completion)
+                completion: backendCompletion)
         }
     }
 
@@ -2553,7 +2572,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func completeRequest(
-        _ request: PendingRequest, answer: String,
+        _ request: PendingRequest, outcome: AIOutcome,
         files: [String], query: String?
     ) {
         // A cancelled request may finish after a new thread has already
@@ -2580,15 +2599,30 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             threads[idx].lastFiles = files
             threads[idx].lastQuery = query
         }
+        let answer = Self.displayText(for: outcome)
+        let isSuccessfulAgentResponse: Bool
+        if case .text = outcome {
+            isSuccessfulAgentResponse = true
+        } else {
+            isSuccessfulAgentResponse = false
+        }
         appendMessage(
             AssistantChatMessage(
-                role: "Assistant", text: answer,
+                role: isSuccessfulAgentResponse ? "Assistant" : "System",
+                text: answer,
                 tokenCount: AssistantChatMessage.approximateTokenCount(for: answer)),
             to: request.threadId)
-        collaborationMessagePublisher?(CollaborationChatEmission(
-            kind: .agentResponse,
-            text: answer,
-            threadID: request.threadId.uuidString.lowercased()))
+        if isSuccessfulAgentResponse {
+            collaborationMessagePublisher?(CollaborationChatEmission(
+                kind: .agentResponse,
+                text: answer,
+                threadID: request.threadId.uuidString.lowercased()))
+        } else {
+            collaborationMessagePublisher?(CollaborationChatEmission(
+                kind: .runtimeFailure,
+                text: answer,
+                threadID: request.threadId.uuidString.lowercased()))
+        }
         // Move completed thread to the top of the switcher.
         if let idx = threadIndex(request.threadId), idx > 0 {
             let thread = threads.remove(at: idx)
@@ -2803,7 +2837,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         priorHistory: String = "",
         conversationID: String,
         requestIdentity: PendingRequest,
-        completion: AskCompletion? = nil
+        completion: BackendAskCompletion? = nil
     ) {
         var conversationID = conversationID
         // A Chat/Browser tab is allowed to outlive its final terminal pane.
@@ -2981,12 +3015,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                             self.markBackendBootstrapNeeded(after: requestIdentity)
                         }
                         self.finish(
-                            answer: Self.displayText(for: final), files: matches, query: query,
+                            outcome: final, files: matches, query: query,
                             completion: completion)
                     }
                 } else {
                     self.finish(
-                        answer: Self.displayText(for: outcome),
+                        outcome: outcome,
                         files: [], query: nil, completion: completion)
                 }
             }
@@ -3438,11 +3472,11 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func finish(
-        answer: String, files: [String], query: String?,
-        completion: AskCompletion?
+        outcome: AIOutcome, files: [String], query: String?,
+        completion: BackendAskCompletion?
     ) {
         DispatchQueue.main.async {
-            completion?(answer, files, query)
+            completion?(outcome, files, query)
         }
     }
 

@@ -766,6 +766,36 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(header.channelBadgeIsHiddenForTesting)
     }
 
+    func testNarrowConnectedPaneKeepsAgentNameBesideChannelBadge() {
+        let header = PaneHeaderView(
+            frame: NSRect(
+                x: 0,
+                y: 0,
+                width: 247,
+                height: PaneHeaderView.height))
+        header.title = "Turing"
+        header.setChannel(
+            name: "Release Acceptance Room",
+            color: .systemBlue,
+            memberCount: 2)
+        header.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThanOrEqual(
+            header.titleFrameForTesting.width,
+            45,
+            "A narrow room pane must not crowd out its unique agent name.")
+        XCTAssertGreaterThanOrEqual(
+            header.channelBadgeFrameForTesting.width,
+            48,
+            "The room badge must remain separately visible.")
+        XCTAssertLessThanOrEqual(
+            header.titleFrameForTesting.maxX,
+            header.channelBadgeFrameForTesting.minX)
+        XCTAssertLessThanOrEqual(
+            header.channelBadgeFrameForTesting.maxX,
+            header.channelConnectorFrameForTesting.minX)
+    }
+
     func testPaneHeaderIconBecomesCloseButtonOnHoverWhenClosable() {
         let header = PaneHeaderView(frame: NSRect(x: 0, y: 0, width: 500, height: PaneHeaderView.height))
         header.iconSymbol = "terminal"
@@ -1530,6 +1560,171 @@ final class NavigationTests: XCTestCase {
             delegate.utilityPaneCountForTesting(in: window),
             2,
             "The approved room owns one Channel pane and one named Chat.")
+    }
+
+    func testApprovedVisualCloudRoomUsesPreparedRemoteAdapter()
+        throws
+    {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "infinitty-visual-cloud-\(UUID().uuidString)",
+                isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: workspace,
+            withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: workspace)
+        }
+
+        let factory = HeadlessCloudRuntimeFactory()
+        let delegate = AppDelegate()
+        delegate.cloudRuntimeFactory = factory
+        let window = NSWindow(
+            contentRect: NSRect(
+                x: 0, y: 0, width: 1_100, height: 720),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.tabbingIdentifier = "infinitty"
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(
+            frame: window.contentView?.bounds ?? .zero)
+        chrome.autoresizingMask = [.width, .height]
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        let anchor = UtilityPaneView(
+            kind: .files,
+            contentView: NSView(),
+            background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification,
+                object: window))
+            window.close()
+        }
+
+        let spec = CollaborationRoomProposalSpec(
+            id: "proposal-visual-cloud",
+            channelID: "channel-visual-cloud",
+            roomName: "Visual Remote Room",
+            objective: "Run a real remote adapter behind a visual Chat.",
+            workspaceRoot: workspace.path,
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent-visual-cloud",
+                    displayName: "Remote Visual Architect",
+                    role: "remote implementation owner",
+                    runtime: .cloud,
+                    provider: "codex",
+                    modelID: "opaque-visual-cloud-model",
+                    responsibilityScopes: ["Sources/**"],
+                    capabilities: ["workspace.write"],
+                    cloudConnection:
+                        CollaborationCloudConnection(
+                            endpointURL:
+                                "wss://codex.example.test/app-server",
+                            credentialEnvironmentVariable:
+                                "CODEX_CHANNEL_TOKEN",
+                            remoteWorkspace:
+                                "/srv/visual-cloud")),
+            ],
+            workspaceStrategy: .sharedCheckout,
+            presentation: .visual,
+            targetInstanceID:
+                delegate.collaborationInstanceIDForTesting,
+            requestedCapabilities: ["workspace.write"],
+            expiresAt: Date().addingTimeInterval(300))
+        let prepare = CollaborationControlRequest(
+            op: .prepareProposal,
+            actor: CollaborationActor(
+                id: "agent:requester",
+                kind: .agent,
+                displayName: "Requesting agent"),
+            idempotencyKey: "prepare-visual-cloud",
+            proposal: spec)
+        let prepared = try XCTUnwrap(
+            delegate.executeCollaborationForTesting(
+                try XCTUnwrap(
+                    CollaborationControlCodec.encode(prepare)))?
+                .proposals.first)
+        delegate.decideChannelProposalForTesting(
+            proposalID: spec.id,
+            digest: prepared.digest,
+            approved: true)
+
+        var snapshot =
+            delegate.collaborationSnapshotForTesting()
+        var controlledChat: [String: Any]?
+        for _ in 0..<120 {
+            RunLoop.current.run(
+                until: Date().addingTimeInterval(0.05))
+            snapshot =
+                delegate.collaborationSnapshotForTesting()
+            guard snapshot.proposals.first(where: {
+                $0.spec.id == spec.id
+            })?.state == .running else { continue }
+            let request = try XCTUnwrap(
+                BrowserControlCodec.encode([
+                    "v": 1,
+                    "op": "list",
+                ]))
+            let response =
+                delegate.handleAppRequestForTesting(
+                    "chat \(request)")
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(response.utf8))
+                    as? [String: Any])
+            controlledChat =
+                ((envelope["result"] as? [String: Any])?[
+                    "chats"] as? [[String: Any]])?.first
+            let messages =
+                ((controlledChat?["threads"]
+                    as? [[String: Any]])?.first?["messages"]
+                    as? [[String: Any]]) ?? []
+            if messages.contains(where: {
+                ($0["text"] as? String)?
+                    .contains("CLOUD_CHANNEL_READY") == true
+            }) {
+                break
+            }
+        }
+
+        let proposal = try XCTUnwrap(
+            snapshot.proposals.first {
+                $0.spec.id == spec.id
+            })
+        XCTAssertEqual(
+            proposal.state,
+            .running,
+            proposal.statusMessage ?? "no failure reason")
+        XCTAssertEqual(
+            proposal.runtimeReceipts.first?.remoteSessionID,
+            "remote-session-1")
+        XCTAssertEqual(
+            controlledChat?["title"] as? String,
+            "Remote Visual Architect")
+        XCTAssertEqual(
+            controlledChat?["role"] as? String,
+            "remote implementation owner")
+        XCTAssertEqual(
+            controlledChat?["channelId"] as? String,
+            spec.channelID)
+        XCTAssertEqual(
+            delegate.utilityPaneCountForTesting(in: window),
+            2)
+        let prompt = try XCTUnwrap(
+            factory.adapters.first?.users.first)
+        XCTAssertTrue(
+            prompt.contains("ACTIVE INFINITTY CHANNEL"))
+        XCTAssertTrue(
+            prompt.contains(
+                "Your participant name: \"Remote Visual Architect\""))
     }
 
     func testConnectedChatPanesReceiveNamesMembershipAndPeerMessages() throws {

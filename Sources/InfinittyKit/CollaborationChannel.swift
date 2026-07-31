@@ -430,6 +430,7 @@ struct CollaborationChatEmission: Equatable, Sendable {
     enum Kind: String, Equatable, Sendable {
         case humanPrompt
         case agentResponse
+        case runtimeFailure
     }
 
     let kind: Kind
@@ -465,6 +466,108 @@ enum CollaborationRoomPresentation: String, Codable, Sendable {
     case headless
 }
 
+enum CollaborationCloudAuthentication: String, Codable, Sendable {
+    case bearer
+    case apiKey = "api_key"
+}
+
+struct CollaborationCloudConnection: Codable, Equatable, Sendable {
+    let endpointURL: String
+    let credentialEnvironmentVariable: String
+    let authentication: CollaborationCloudAuthentication
+    /// Absolute checkout/mount path as seen by the remote provider runtime.
+    /// It is approval-bound separately from the local host workspace.
+    let remoteWorkspace: String
+    let agentID: String?
+    let environmentID: String?
+    let vaultIDs: [String]
+
+    init(
+        endpointURL: String,
+        credentialEnvironmentVariable: String,
+        authentication: CollaborationCloudAuthentication = .bearer,
+        remoteWorkspace: String,
+        agentID: String? = nil,
+        environmentID: String? = nil,
+        vaultIDs: [String] = []
+    ) {
+        self.endpointURL = endpointURL
+        self.credentialEnvironmentVariable =
+            credentialEnvironmentVariable
+        self.authentication = authentication
+        self.remoteWorkspace = remoteWorkspace
+        self.agentID = agentID
+        self.environmentID = environmentID
+        self.vaultIDs = vaultIDs.sorted()
+    }
+
+    fileprivate var canonicalized: CollaborationCloudConnection {
+        CollaborationCloudConnection(
+            endpointURL: endpointURL,
+            credentialEnvironmentVariable:
+                credentialEnvironmentVariable,
+            authentication: authentication,
+            remoteWorkspace: remoteWorkspace,
+            agentID: agentID,
+            environmentID: environmentID,
+            vaultIDs: vaultIDs)
+    }
+}
+
+struct CollaborationRuntimeSessionReceipt:
+    Codable, Equatable, Sendable
+{
+    let id: String
+    let proposalID: String
+    let agentID: String
+    let adapterKind: String
+    let provider: String
+    let remoteSessionID: String
+    let workspace: String
+    let modelID: String?
+    let endpointFingerprint: String
+    let accountFingerprint: String?
+    let capabilities: [String]
+    let preparedAt: Date
+    let lastPersistedEventID: String?
+
+    static func fingerprint(endpointURL: String) -> String {
+        SHA256.hash(data: Data(endpointURL.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    init(
+        id: String,
+        proposalID: String,
+        agentID: String,
+        adapterKind: String,
+        provider: String,
+        remoteSessionID: String,
+        workspace: String,
+        modelID: String?,
+        endpointFingerprint: String,
+        accountFingerprint: String?,
+        capabilities: [String],
+        preparedAt: Date,
+        lastPersistedEventID: String? = nil
+    ) {
+        self.id = id
+        self.proposalID = proposalID
+        self.agentID = agentID
+        self.adapterKind = adapterKind
+        self.provider = provider
+        self.remoteSessionID = remoteSessionID
+        self.workspace = workspace
+        self.modelID = modelID
+        self.endpointFingerprint = endpointFingerprint
+        self.accountFingerprint = accountFingerprint
+        self.capabilities = capabilities.sorted()
+        self.preparedAt = preparedAt
+        self.lastPersistedEventID = lastPersistedEventID
+    }
+}
+
 struct CollaborationAgentSpec: Codable, Equatable, Sendable {
     let id: String
     let displayName: String
@@ -474,6 +577,7 @@ struct CollaborationAgentSpec: Codable, Equatable, Sendable {
     let modelID: String?
     let responsibilityScopes: [String]
     let capabilities: [String]
+    let cloudConnection: CollaborationCloudConnection?
 
     init(
         id: String,
@@ -483,7 +587,8 @@ struct CollaborationAgentSpec: Codable, Equatable, Sendable {
         provider: String,
         modelID: String? = nil,
         responsibilityScopes: [String] = [],
-        capabilities: [String] = []
+        capabilities: [String] = [],
+        cloudConnection: CollaborationCloudConnection? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -493,6 +598,7 @@ struct CollaborationAgentSpec: Codable, Equatable, Sendable {
         self.modelID = modelID
         self.responsibilityScopes = responsibilityScopes.sorted()
         self.capabilities = capabilities.sorted()
+        self.cloudConnection = cloudConnection?.canonicalized
     }
 
     fileprivate var canonicalized: CollaborationAgentSpec {
@@ -504,7 +610,8 @@ struct CollaborationAgentSpec: Codable, Equatable, Sendable {
             provider: provider,
             modelID: modelID,
             responsibilityScopes: responsibilityScopes,
-            capabilities: capabilities)
+            capabilities: capabilities,
+            cloudConnection: cloudConnection)
     }
 }
 
@@ -586,6 +693,9 @@ struct CollaborationRoomProposalSpec: Codable, Equatable, Sendable {
 
     func canonicalDigest() throws -> String {
         let value = canonicalized
+        let includesCloudConnections = value.agents.contains {
+            $0.cloudConnection != nil
+        }
         let milliseconds = (value.expiresAt.timeIntervalSince1970 * 1_000)
             .rounded(.towardZero)
         guard milliseconds.isFinite,
@@ -606,7 +716,10 @@ struct CollaborationRoomProposalSpec: Codable, Equatable, Sendable {
             strings.forEach { append($0) }
         }
 
-        append("infinitty-room-proposal-v1")
+        append(
+            includesCloudConnections
+                ? "infinitty-room-proposal-v2"
+                : "infinitty-room-proposal-v1")
         append(value.id)
         append(value.channelID)
         append(value.roomName)
@@ -636,6 +749,32 @@ struct CollaborationRoomProposalSpec: Codable, Equatable, Sendable {
             }
             append(agent.responsibilityScopes)
             append(agent.capabilities)
+            if includesCloudConnections {
+                if let connection = agent.cloudConnection {
+                    append("1")
+                    append(connection.endpointURL)
+                    append(
+                        connection
+                            .credentialEnvironmentVariable)
+                    append(connection.authentication.rawValue)
+                    append(connection.remoteWorkspace)
+                    if let agentID = connection.agentID {
+                        append("1")
+                        append(agentID)
+                    } else {
+                        append("0")
+                    }
+                    if let environmentID = connection.environmentID {
+                        append("1")
+                        append(environmentID)
+                    } else {
+                        append("0")
+                    }
+                    append(connection.vaultIDs)
+                } else {
+                    append("0")
+                }
+            }
         }
         append(String(Int64(milliseconds)))
         return SHA256.hash(data: canonical)
@@ -679,6 +818,76 @@ struct CollaborationRoomProposal: Codable, Equatable, Sendable {
     let decidedByActorID: String?
     let decidedAt: Date?
     let statusMessage: String?
+    let runtimeReceipts: [CollaborationRuntimeSessionReceipt]
+
+    init(
+        spec: CollaborationRoomProposalSpec,
+        digest: String,
+        state: CollaborationProposalState,
+        createdAt: Date,
+        updatedAt: Date,
+        decidedByActorID: String?,
+        decidedAt: Date?,
+        statusMessage: String?,
+        runtimeReceipts: [CollaborationRuntimeSessionReceipt] = []
+    ) {
+        self.spec = spec
+        self.digest = digest
+        self.state = state
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.decidedByActorID = decidedByActorID
+        self.decidedAt = decidedAt
+        self.statusMessage = statusMessage
+        self.runtimeReceipts = runtimeReceipts.sorted {
+            $0.agentID < $1.agentID
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case spec
+        case digest
+        case state
+        case createdAt
+        case updatedAt
+        case decidedByActorID
+        case decidedAt
+        case statusMessage
+        case runtimeReceipts
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(
+            keyedBy: CodingKeys.self)
+        self.init(
+            spec: try container.decode(
+                CollaborationRoomProposalSpec.self,
+                forKey: .spec),
+            digest: try container.decode(
+                String.self,
+                forKey: .digest),
+            state: try container.decode(
+                CollaborationProposalState.self,
+                forKey: .state),
+            createdAt: try container.decode(
+                Date.self,
+                forKey: .createdAt),
+            updatedAt: try container.decode(
+                Date.self,
+                forKey: .updatedAt),
+            decidedByActorID: try container.decodeIfPresent(
+                String.self,
+                forKey: .decidedByActorID),
+            decidedAt: try container.decodeIfPresent(
+                Date.self,
+                forKey: .decidedAt),
+            statusMessage: try container.decodeIfPresent(
+                String.self,
+                forKey: .statusMessage),
+            runtimeReceipts: try container.decodeIfPresent(
+                [CollaborationRuntimeSessionReceipt].self,
+                forKey: .runtimeReceipts) ?? [])
+    }
 }
 
 struct CollaborationSnapshot: Codable, Equatable, Sendable {
@@ -739,6 +948,10 @@ enum CollaborationRoomCommand: Codable, Equatable, Sendable {
     case cancelProposal(proposalID: String, digest: String, reason: String?)
     case startProvisioning(proposalID: String, digest: String)
     case markProposalRunning(proposalID: String, digest: String)
+    case recordRuntimeSession(
+        proposalID: String,
+        digest: String,
+        receipt: CollaborationRuntimeSessionReceipt)
     case markProposalFailed(proposalID: String, digest: String, reason: String)
     case completeProposal(proposalID: String, digest: String, summary: String?)
 }
@@ -766,6 +979,7 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
         case cancelProposal = "cancel_proposal"
         case startProvisioning = "start_provisioning"
         case markProposalRunning = "mark_proposal_running"
+        case recordRuntimeSession = "record_runtime_session"
         case markProposalFailed = "mark_proposal_failed"
         case completeProposal = "complete_proposal"
     }
@@ -792,6 +1006,7 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
     var proposal: CollaborationRoomProposalSpec?
     var proposalID: String?
     var proposalDigest: String?
+    var runtimeReceipt: CollaborationRuntimeSessionReceipt?
     var reason: String?
 
     init(
@@ -817,6 +1032,7 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
         proposal: CollaborationRoomProposalSpec? = nil,
         proposalID: String? = nil,
         proposalDigest: String? = nil,
+        runtimeReceipt: CollaborationRuntimeSessionReceipt? = nil,
         reason: String? = nil
     ) {
         self.v = v
@@ -841,6 +1057,7 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
         self.proposal = proposal
         self.proposalID = proposalID
         self.proposalDigest = proposalDigest
+        self.runtimeReceipt = runtimeReceipt
         self.reason = reason
     }
 
@@ -923,6 +1140,15 @@ struct CollaborationControlRequest: Codable, Equatable, Sendable {
             return .markProposalRunning(
                 proposalID: try require(proposalID, "proposalID"),
                 digest: try require(proposalDigest, "proposalDigest"))
+        case .recordRuntimeSession:
+            return .recordRuntimeSession(
+                proposalID: try require(proposalID, "proposalID"),
+                digest: try require(
+                    proposalDigest,
+                    "proposalDigest"),
+                receipt: try require(
+                    runtimeReceipt,
+                    "runtimeReceipt"))
         case .markProposalFailed:
             return .markProposalFailed(
                 proposalID: try require(proposalID, "proposalID"),
@@ -1006,24 +1232,50 @@ enum CollaborationControlCodec {
         in room: CollaborationRoom,
         humanDecisionAuthority: CollaborationHumanDecisionAuthority? = nil
     ) -> (response: String, snapshot: CollaborationSnapshot?) {
+        func rejected(
+            code: String,
+            message: String,
+            request: CollaborationControlRequest? = nil
+        ) -> (response: String, snapshot: CollaborationSnapshot?) {
+            do {
+                _ = try room.recordRejectedControl(
+                    encodedRequest: encoded,
+                    operation: request?.op.rawValue,
+                    requestedChannelID:
+                        request?.channelID
+                        ?? request?.proposal?.channelID,
+                    actor: request?.actor,
+                    reason: message)
+            } catch {
+                return (
+                    response(
+                        error: "audit_unavailable",
+                        message:
+                            "The Channel request was rejected, but its "
+                            + "required audit record could not be committed: "
+                            + String(describing: error)),
+                    nil)
+            }
+            return (
+                response(error: code, message: message),
+                nil)
+        }
+
         let request: CollaborationControlRequest
         switch decode(encoded) {
         case .success(let value):
             request = value
         case .failure(let error):
-            return (
-                response(
-                    error: "invalid_request",
-                    message: error.localizedDescription),
-                nil)
+            return rejected(
+                code: "invalid_request",
+                message: error.localizedDescription)
         }
         guard request.v == 1 else {
-            return (
-                response(
-                    error: "unsupported_version",
-                    message:
-                        "Channel request version \(request.v) is unsupported."),
-                nil)
+            return rejected(
+                code: "unsupported_version",
+                message:
+                    "Channel request version \(request.v) is unsupported.",
+                request: request)
         }
 
         do {
@@ -1032,12 +1284,11 @@ enum CollaborationControlCodec {
                 return (response(snapshot: snapshot), snapshot)
             }
             guard let actor = request.actor else {
-                return (
-                    response(
-                        error: "actor_required",
-                        message:
-                            "Mutating Channel requests require an explicit actor."),
-                    nil)
+                return rejected(
+                    code: "actor_required",
+                    message:
+                        "Mutating Channel requests require an explicit actor.",
+                    request: request)
             }
             let snapshot = try room.apply(
                 command,
@@ -1048,11 +1299,10 @@ enum CollaborationControlCodec {
                 humanDecisionAuthority: humanDecisionAuthority)
             return (response(snapshot: snapshot), snapshot)
         } catch {
-            return (
-                response(
-                    error: "command_rejected",
-                    message: String(describing: error)),
-                nil)
+            return rejected(
+                code: "command_rejected",
+                message: String(describing: error),
+                request: request)
         }
     }
 
@@ -1169,7 +1419,14 @@ enum CollaborationAuditBody: Codable, Equatable, Sendable {
         proposalID: String,
         from: CollaborationProposalState,
         proposal: CollaborationRoomProposal)
+    case runtimeSessionRecorded(
+        proposalID: String,
+        proposal: CollaborationRoomProposal)
     case commandNoOp(channelID: String, reason: String)
+    case commandRejected(
+        operation: String?,
+        reason: String,
+        requestFingerprint: String)
 }
 
 struct CollaborationAuditRecord: Codable, Equatable, Sendable {
@@ -1457,6 +1714,10 @@ final class CollaborationRoom {
     /// Store only the committed sequence; the uncommon delayed retry rebuilds
     /// its original receipt from the durable hash-chained journal.
     private var idempotencyRevisions: [String: Int] = [:]
+    /// Audit sequence includes rejected control attempts. State revision does
+    /// not: a rejected request must not invalidate an otherwise current
+    /// optimistic-concurrency token.
+    private var auditSequence = 0
     private var revision = 0
     private var previousHash = CollaborationAuditRecord.genesisHash
 
@@ -1483,7 +1744,12 @@ final class CollaborationRoom {
                 throw CollaborationRoomError.auditIntegrityFailure(sequence: expectedSequence)
             }
             try replay(record)
-            revision = record.sequence
+            auditSequence = record.sequence
+            if case .commandRejected = record.body {
+                // Audit-only event; the room state did not change.
+            } else {
+                revision += 1
+            }
             previousHash = record.hash
             if let key = record.idempotencyKey {
                 idempotencyFingerprints[key] = record.commandFingerprint
@@ -1551,7 +1817,8 @@ final class CollaborationRoom {
                 idempotencyRevisions[validatedKey] = event.sequence
                 idempotencyActors[validatedKey] = actor
             }
-            revision = event.sequence
+            auditSequence = event.sequence
+            revision += 1
             previousHash = event.hash
             committed = event
             let result = snapshotLocked()
@@ -1577,6 +1844,75 @@ final class CollaborationRoom {
                     .sorted { $0.spec.id < $1.spec.id })
         }
         return snapshotLocked()
+    }
+
+    /// Append a tamper-evident, state-neutral record for a rejected structured
+    /// control request. This deliberately uses a separate audit sequence so
+    /// hostile or malformed attempts cannot churn the room's state revision.
+    @discardableResult
+    func recordRejectedControl(
+        encodedRequest: String,
+        operation: String?,
+        requestedChannelID: String?,
+        actor rawActor: CollaborationActor?,
+        reason rawReason: String
+    ) throws -> CollaborationSnapshot {
+        lock.lock()
+        var committed: CollaborationAuditRecord?
+        do {
+            let fingerprint = SHA256.hash(
+                data: Data(encodedRequest.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+            let actor =
+                rawActor.flatMap { try? validated(actor: $0) }
+                ?? CollaborationActor(
+                    id: "system:channel-control",
+                    kind: .system,
+                    displayName: "Channel control")
+            let channelID =
+                requestedChannelID.flatMap {
+                    try? validatedID(
+                        $0,
+                        field: "rejected channel id")
+                }
+                ?? "audit:channel-control"
+            let operation = operation.map {
+                CollaborationChatContext.boundedPrefix(
+                    $0,
+                    to: 80)
+            }
+            let reason =
+                CollaborationChatContext.boundedPrefix(
+                    rawReason.isEmpty
+                        ? "unspecified rejection"
+                        : rawReason,
+                    to: 1_024)
+            let timestamp = now()
+            let event = try makeRecord(
+                channelID: channelID,
+                body: .commandRejected(
+                    operation: operation,
+                    reason: reason,
+                    requestFingerprint: fingerprint),
+                actor: actor,
+                causationID: nil,
+                idempotencyKey: nil,
+                commandFingerprint: fingerprint,
+                timestamp: timestamp)
+            try store.append(event)
+            try replay(event)
+            auditSequence = event.sequence
+            previousHash = event.hash
+            committed = event
+            let result = snapshotLocked()
+            lock.unlock()
+            if let committed { eventSink?(committed) }
+            return result
+        } catch {
+            lock.unlock()
+            throw error
+        }
     }
 
     static func colorHex(for channelID: String) -> String {
@@ -1824,6 +2160,26 @@ final class CollaborationRoom {
                 timestamp: timestamp)
 
         case let .markProposalRunning(proposalID, digest):
+            if let proposal = proposals[proposalID] {
+                let cloudAgents = proposal.spec.agents.filter {
+                    $0.runtime == .cloud
+                        && $0.cloudConnection != nil
+                }
+                for agent in cloudAgents {
+                    guard let receipt =
+                            proposal.runtimeReceipts.first(where: {
+                                $0.agentID == agent.id
+                            }),
+                          receipt.provider == agent.provider,
+                          receipt.proposalID == proposal.spec.id
+                    else {
+                        throw CollaborationRoomError.invalidValue(
+                            field: "runtime session receipts",
+                            reason:
+                                "cloud agent \(agent.id) is not ready")
+                    }
+                }
+            }
             (channelID, body) = try proposalTransitionEvent(
                 proposalID: proposalID,
                 digest: digest,
@@ -1831,6 +2187,54 @@ final class CollaborationRoom {
                 statusMessage: nil,
                 actor: actor,
                 timestamp: timestamp)
+
+        case let .recordRuntimeSession(
+            proposalID, digest, rawReceipt):
+            let proposalID = try validatedID(
+                proposalID,
+                field: "proposal id")
+            guard let current = proposals[proposalID] else {
+                throw CollaborationRoomError.proposalNotFound(
+                    proposalID)
+            }
+            guard current.digest == digest else {
+                throw CollaborationRoomError.proposalDigestMismatch(
+                    proposalID)
+            }
+            guard current.state == .provisioning else {
+                throw CollaborationRoomError.invalidProposalTransition(
+                    proposalID: proposalID,
+                    from: current.state,
+                    to: .provisioning)
+            }
+            let receipt = try validated(
+                runtimeReceipt: rawReceipt,
+                proposal: current,
+                timestamp: timestamp)
+            guard !current.runtimeReceipts.contains(where: {
+                $0.agentID == receipt.agentID
+            }) else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "runtime session receipt",
+                    reason:
+                        "agent \(receipt.agentID) already has a receipt")
+            }
+            let updated = CollaborationRoomProposal(
+                spec: current.spec,
+                digest: current.digest,
+                state: current.state,
+                createdAt: current.createdAt,
+                updatedAt: timestamp,
+                decidedByActorID: current.decidedByActorID,
+                decidedAt: current.decidedAt,
+                statusMessage: current.statusMessage,
+                runtimeReceipts:
+                    current.runtimeReceipts + [receipt])
+            _ = try prospectiveProposals(replacing: updated)
+            channelID = current.spec.channelID
+            body = .runtimeSessionRecorded(
+                proposalID: proposalID,
+                proposal: updated)
 
         case let .markProposalFailed(proposalID, digest, reason):
             (channelID, body) = try proposalTransitionEvent(
@@ -1903,7 +2307,8 @@ final class CollaborationRoom {
             updatedAt: timestamp,
             decidedByActorID: isDecision ? actor.id : current.decidedByActorID,
             decidedAt: isDecision ? timestamp : current.decidedAt,
-            statusMessage: status)
+            statusMessage: status,
+            runtimeReceipts: current.runtimeReceipts)
         _ = try prospectiveProposals(replacing: updated)
         return (
             current.spec.channelID,
@@ -2037,7 +2442,7 @@ final class CollaborationRoom {
         timestamp: Date
     ) throws -> CollaborationAuditRecord {
         try CollaborationAuditRecord.make(
-            sequence: revision + 1,
+            sequence: auditSequence + 1,
             eventID: try validatedID(eventIDFactory(), field: "event id"),
             idempotencyKey: idempotencyKey,
             commandFingerprint: commandFingerprint,
@@ -2263,6 +2668,7 @@ final class CollaborationRoom {
                       proposal.decidedByActorID == nil,
                       proposal.decidedAt == nil,
                       proposal.statusMessage == nil,
+                      proposal.runtimeReceipts.isEmpty,
                       record.channelID == proposal.spec.channelID
                 else {
                     throw CollaborationRoomError.auditIntegrityFailure(
@@ -2290,6 +2696,8 @@ final class CollaborationRoom {
                   proposal.createdAt == current.createdAt,
                   proposal.updatedAt == record.timestamp,
                   proposal.updatedAt >= current.updatedAt,
+                  proposal.runtimeReceipts
+                    == current.runtimeReceipts,
                   record.channelID == current.spec.channelID
             else {
                 throw CollaborationRoomError.auditIntegrityFailure(
@@ -2321,9 +2729,70 @@ final class CollaborationRoom {
                 }
             }
             proposals = replacements
+        case let .runtimeSessionRecorded(proposalID, proposal):
+            guard let current = proposals[proposalID],
+                  proposalID == proposal.spec.id,
+                  current.state == .provisioning,
+                  proposal.state == current.state,
+                  proposal.spec == current.spec,
+                  proposal.digest == current.digest,
+                  proposal.createdAt == current.createdAt,
+                  proposal.updatedAt == record.timestamp,
+                  proposal.updatedAt >= current.updatedAt,
+                  proposal.decidedByActorID
+                    == current.decidedByActorID,
+                  proposal.decidedAt == current.decidedAt,
+                  proposal.statusMessage == current.statusMessage,
+                  proposal.runtimeReceipts.count
+                    == current.runtimeReceipts.count + 1,
+                  record.channelID == current.spec.channelID
+            else {
+                try fail()
+            }
+            let previousAgentIDs = Set(
+                current.runtimeReceipts.map(\.agentID))
+            guard let added = proposal.runtimeReceipts.first(where: {
+                !previousAgentIDs.contains($0.agentID)
+            }) else {
+                try fail()
+            }
+            do {
+                let validated = try validated(
+                    runtimeReceipt: added,
+                    proposal: current,
+                    timestamp: record.timestamp)
+                guard validated == added,
+                      proposal.runtimeReceipts.filter({
+                          $0.agentID == added.agentID
+                      }).count == 1,
+                      proposal.runtimeReceipts.filter({
+                          $0.agentID != added.agentID
+                      }) == current.runtimeReceipts
+                else {
+                    try fail()
+                }
+                proposals = try prospectiveProposals(
+                    replacing: proposal)
+            } catch {
+                try fail()
+            }
         case let .commandNoOp(channelID, _):
             guard channelID == record.channelID,
                   channels[channelID] != nil
+            else {
+                try fail()
+            }
+        case let .commandRejected(
+            operation,
+            reason,
+            requestFingerprint):
+            guard operation?.utf8.count ?? 0 <= 80,
+                  !reason.isEmpty,
+                  reason.utf8.count <= 1_024,
+                  requestFingerprint.count == 64,
+                  requestFingerprint.allSatisfy({
+                      $0.isHexDigit && !$0.isUppercase
+                  })
             else {
                 try fail()
             }
@@ -2524,19 +2993,38 @@ final class CollaborationRoom {
                 agent.capabilities,
                 field: "proposal agent capability",
                 maximum: 120)
+            let provider = try bounded(
+                agent.provider,
+                field: "proposal agent provider",
+                maximum: 80)
+            let canonicalProvider =
+                agent.runtime == .cloud
+                ? provider.lowercased()
+                : provider
+            let cloudConnection = try agent.cloudConnection.map {
+                try validated(
+                    cloudConnection: $0,
+                    runtime: agent.runtime,
+                    provider: canonicalProvider)
+            }
+            if agent.runtime == .local, cloudConnection != nil {
+                throw CollaborationRoomError.invalidValue(
+                    field: "proposal cloud connection",
+                    reason: "local agents cannot declare one")
+            }
             return CollaborationAgentSpec(
                 id: id,
                 displayName: displayName,
                 role: try bounded(
                     agent.role, field: "proposal agent role", maximum: 120),
                 runtime: agent.runtime,
-                provider: try bounded(
-                    agent.provider, field: "proposal agent provider", maximum: 80),
+                provider: canonicalProvider,
                 modelID: try agent.modelID.map {
                     try bounded($0, field: "proposal agent model", maximum: 160)
                 },
                 responsibilityScopes: scopes,
-                capabilities: capabilities)
+                capabilities: capabilities,
+                cloudConnection: cloudConnection)
         }
         let capabilities = try uniqueBoundedValues(
             rawProposal.requestedCapabilities,
@@ -2583,6 +3071,215 @@ final class CollaborationRoom {
                 reason: "encoded proposal exceeds \(Self.maximumEncodedProposalBytes) bytes")
         }
         return proposal
+    }
+
+    private func validated(
+        cloudConnection raw: CollaborationCloudConnection,
+        runtime: CollaborationAgentRuntime,
+        provider rawProvider: String
+    ) throws -> CollaborationCloudConnection {
+        guard runtime == .cloud else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal cloud connection",
+                reason: "requires runtime cloud")
+        }
+        let provider = rawProvider.lowercased()
+        guard provider == "codex" || provider == "claude" else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal cloud provider",
+                reason: "must be codex or claude")
+        }
+        let endpoint = try bounded(
+            raw.endpointURL,
+            field: "proposal cloud endpoint",
+            maximum: 2_048)
+        guard let components = URLComponents(string: endpoint),
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              (provider == "codex"
+                ? components.scheme?.lowercased() == "wss"
+                : components.scheme?.lowercased() == "https")
+        else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal cloud endpoint",
+                reason:
+                    provider == "codex"
+                    ? "must be a credential-free wss URL"
+                    : "must be a credential-free https URL")
+        }
+        let credential = try bounded(
+            raw.credentialEnvironmentVariable,
+            field: "proposal credential reference",
+            maximum: 128)
+        let first = credential.unicodeScalars.first
+        let validHead = first.map {
+            CharacterSet.uppercaseLetters.contains($0) || $0 == "_"
+        } ?? false
+        let validTail = credential.unicodeScalars.dropFirst().allSatisfy {
+            CharacterSet.uppercaseLetters.contains($0)
+                || CharacterSet.decimalDigits.contains($0)
+                || $0 == "_"
+        }
+        guard validHead, validTail else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal credential reference",
+                reason:
+                    "must name an uppercase environment variable")
+        }
+        if provider == "codex", raw.authentication != .bearer {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal cloud authentication",
+                reason: "Codex app-server requires bearer authentication")
+        }
+        let remoteWorkspace = try bounded(
+            raw.remoteWorkspace,
+            field: "proposal remote workspace",
+            maximum: 4_096)
+        guard (remoteWorkspace as NSString).isAbsolutePath,
+              !remoteWorkspace.contains("\0")
+        else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal remote workspace",
+                reason:
+                    "must be an absolute path visible to the remote runtime")
+        }
+        let agentID = try raw.agentID.map {
+            try bounded(
+                $0,
+                field: "proposal managed agent id",
+                maximum: 160)
+        }
+        let environmentID = try raw.environmentID.map {
+            try bounded(
+                $0,
+                field: "proposal managed environment id",
+                maximum: 160)
+        }
+        if provider == "claude",
+           agentID == nil || environmentID == nil
+        {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal Claude managed agent",
+                reason: "requires agentID and environmentID")
+        }
+        guard raw.vaultIDs.count <= 32 else {
+            throw CollaborationRoomError.invalidValue(
+                field: "proposal vault ids",
+                reason: "contains more than 32 values")
+        }
+        let vaultIDs = try uniqueBoundedValues(
+            raw.vaultIDs,
+            field: "proposal vault id",
+            maximum: 160)
+        return CollaborationCloudConnection(
+            endpointURL: endpoint,
+            credentialEnvironmentVariable: credential,
+            authentication: raw.authentication,
+            remoteWorkspace: remoteWorkspace,
+            agentID: agentID,
+            environmentID: environmentID,
+            vaultIDs: vaultIDs)
+    }
+
+    private func validated(
+        runtimeReceipt raw: CollaborationRuntimeSessionReceipt,
+        proposal: CollaborationRoomProposal,
+        timestamp: Date
+    ) throws -> CollaborationRuntimeSessionReceipt {
+        guard raw.proposalID == proposal.spec.id,
+              let agent = proposal.spec.agents.first(where: {
+                  $0.id == raw.agentID
+              }),
+              agent.runtime == .cloud,
+              agent.cloudConnection != nil,
+              raw.provider == agent.provider,
+              raw.modelID == agent.modelID,
+              raw.workspace
+                == agent.cloudConnection?.remoteWorkspace,
+              raw.preparedAt <= timestamp,
+              (raw.workspace as NSString).isAbsolutePath
+        else {
+            throw CollaborationRoomError.invalidValue(
+                field: "runtime session receipt",
+                reason:
+                    "does not match the approved cloud agent")
+        }
+        let expectedAdapter =
+            agent.provider == "codex"
+            ? "codex_app_server"
+            : "claude_managed_agents"
+        guard raw.adapterKind == expectedAdapter else {
+            throw CollaborationRoomError.invalidValue(
+                field: "runtime session adapter",
+                reason: "does not match provider \(agent.provider)")
+        }
+        let endpointFingerprint = try bounded(
+            raw.endpointFingerprint,
+            field: "runtime endpoint fingerprint",
+            maximum: 64)
+        let expectedEndpointFingerprint =
+            CollaborationRuntimeSessionReceipt.fingerprint(
+                endpointURL:
+                    agent.cloudConnection?.endpointURL ?? "")
+        guard endpointFingerprint.lowercased()
+                == expectedEndpointFingerprint
+        else {
+            throw CollaborationRoomError.invalidValue(
+                field: "runtime endpoint fingerprint",
+                reason:
+                    "does not match the approved cloud endpoint")
+        }
+        let accountFingerprint = try raw.accountFingerprint.map {
+            try bounded(
+                $0,
+                field: "runtime account fingerprint",
+                maximum: 64)
+        }
+        if let accountFingerprint {
+            guard accountFingerprint.count == 64,
+                  accountFingerprint.allSatisfy({
+                      $0.isHexDigit
+                  })
+            else {
+                throw CollaborationRoomError.invalidValue(
+                    field: "runtime account fingerprint",
+                    reason: "must be a SHA-256 digest")
+            }
+        }
+        return CollaborationRuntimeSessionReceipt(
+            id: try validatedID(
+                raw.id,
+                field: "runtime receipt id"),
+            proposalID: proposal.spec.id,
+            agentID: agent.id,
+            adapterKind: expectedAdapter,
+            provider: agent.provider,
+            remoteSessionID: try bounded(
+                raw.remoteSessionID,
+                field: "runtime remote session id",
+                maximum: 512),
+            workspace: try bounded(
+                raw.workspace,
+                field: "runtime workspace",
+                maximum: 4_096),
+            modelID: raw.modelID,
+            endpointFingerprint: endpointFingerprint.lowercased(),
+            accountFingerprint: accountFingerprint?.lowercased(),
+            capabilities: try uniqueBoundedValues(
+                raw.capabilities,
+                field: "runtime capability",
+                maximum: 120),
+            preparedAt: raw.preparedAt,
+            lastPersistedEventID:
+                try raw.lastPersistedEventID.map {
+                    try bounded(
+                        $0,
+                        field: "runtime last event id",
+                        maximum: 512)
+                })
     }
 
     private func uniqueBoundedValues(

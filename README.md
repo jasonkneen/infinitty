@@ -148,8 +148,60 @@ the complete canonical journal to an app-owned private JSONL artifact and signs
 it with Infinitty's local Ed25519 authority; callers cannot choose a destination
 path. `infinitty_audit_verify` rechecks the signature, payload digest, manifest,
 record chain, and semantic replay without invoking provider, pane, worktree, or
-other external effects. This is a verified local audit export, not a claim of
-WORM retention or third-party compliance certification.
+other external effects. Rejected and malformed control requests are also
+hash-chained with a bounded reason and SHA-256 request fingerprint without
+changing room state. This is a verified local audit export, not a claim of WORM
+retention or third-party compliance certification.
+
+### Authenticated cloud agents
+
+A room agent with `runtime: "cloud"` must include an approved
+`cloudConnection`. Infinitty never accepts a raw token in a proposal and never
+falls back to a local CLI. The proposal contains only a credential-free
+endpoint and the name of an uppercase environment variable already present in
+the addressed visual or headless host. `remoteWorkspace` is the absolute
+checkout or mounted-worktree path as seen by the remote runtime; Infinitty binds
+it into the human-approved digest and never pretends that a local path is
+automatically mounted remotely:
+
+```json
+{
+  "runtime": "cloud",
+  "provider": "codex",
+  "modelID": "provider-owned-opaque-model-id",
+  "cloudConnection": {
+    "endpointURL": "wss://codex-host.example/app-server",
+    "credentialEnvironmentVariable": "CODEX_CHANNEL_TOKEN",
+    "authentication": "bearer",
+    "remoteWorkspace": "/srv/worktrees/channel-release/architect"
+  }
+}
+```
+
+Codex uses the app-server `initialize` / `thread/start` or `thread/resume` /
+`turn/start` protocol, streams `item/agentMessage/delta`, and targets
+`turn/interrupt` on cancellation. The approved worktree path and opaque model
+identifier are sent unchanged. The upstream WebSocket app-server transport is
+currently experimental, so deployments must explicitly provide an
+authenticated WSS endpoint; Infinitty does not open or expose a listener.
+
+Claude uses the Managed Agents API with an HTTPS endpoint, `agentID`,
+`environmentID`, optional `vaultIDs`, and either `api_key` or `bearer`
+authentication. It opens the SSE stream before posting `user.message`, treats
+preview deltas as provisional, commits only authoritative `agent.message`
+events, sends `user.interrupt` on cancellation, and stops for explicit human
+handling when the session reports `requires_action`. Managed Agents is an
+upstream beta surface.
+
+Before either agent can run, Infinitty authenticates and prepares the remote
+session, writes a provider/session/workspace receipt into the tamper-evident
+Channel journal, and only then transitions the proposal to `running`. Restarted
+headless hosts resume that exact remote session from the durable receipt.
+Authentication, protocol, timeout, or remote failures appear in the Chat as
+`System` failures and are never recorded as successful agent responses. When
+the Chat is connected, the failure is also journaled as a system-authored
+Channel message so peers and audit consumers can distinguish it from agent
+work.
 
 ### Headless terminal/app host
 

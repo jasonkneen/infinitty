@@ -349,6 +349,44 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertTrue(user.hasSuffix(requestEnd))
     }
 
+    func testVisualTransportFailureIsNotPublishedAsAgentResponse() {
+        let displayed = expectation(
+            description: "transport failure displayed")
+        var emissions: [CollaborationChatEmission] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            backendRunner: {
+                _, _, _, _, _, _, _, done in
+                done(.failure("remote authentication failed"))
+            })
+        assistant.configureCollaboration(
+            contextProvider: { nil },
+            messagePublisher: { emissions.append($0) })
+        assistant.onPetMessage = { text in
+            if text == "remote authentication failed" {
+                displayed.fulfill()
+            }
+        }
+
+        assistant.submitFromControl("start the remote agent")
+        wait(for: [displayed], timeout: 2)
+
+        let messages =
+            assistant.controlState().threads.first?.messages
+        XCTAssertEqual(messages?.map(\.role), ["You", "System"])
+        XCTAssertEqual(
+            messages?.last?.text,
+            "remote authentication failed")
+        XCTAssertEqual(
+            emissions.map(\.kind),
+            [.humanPrompt, .runtimeFailure])
+        XCTAssertFalse(
+            emissions.contains { $0.kind == .agentResponse })
+        XCTAssertEqual(
+            emissions.last?.text,
+            "remote authentication failed")
+    }
+
     func testPetHitRectNilWithoutPet() {
         let renderer = Renderer(config: AppConfig(), scale: 2)
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))

@@ -131,6 +131,8 @@ private final class UtilityPanelRecord {
     var proposedAgentID: String?
     var proposalID: String?
     var participantCapabilities = ["channel.receive", "channel.send"]
+    var cloudRuntimeAdapter:
+        (any CollaborationAgentRuntimeAdapter)?
 
     var kind: UtilityPanelKind { pane.kind }
 
@@ -309,6 +311,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var presentedProposalIDs = Set<String>()
     private var provisioningProposalIDs = Set<String>()
     private let agentWorkspaceProvisioner = AgentWorkspaceProvisioner()
+    var cloudRuntimeFactory:
+        any CollaborationCloudRuntimeFactoryProtocol =
+            CollaborationCloudRuntimeFactory()
     private var collaborationSupportDirectory: URL? {
         if let configured = ProcessInfo.processInfo.environment[
             "INFINITTY_COLLABORATION_SUPPORT_DIR"],
@@ -3091,13 +3096,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 id: participantID,
                 kind: .agent,
                 displayName: record.pane.paneHeader.title)
+        case .runtimeFailure:
+            authorID = "system:runtime"
+            actor = CollaborationActor(
+                id: authorID,
+                kind: .system,
+                displayName:
+                    "Runtime for \(record.pane.paneHeader.title)")
+        }
+        let messageText: String
+        if emission.kind == .runtimeFailure {
+            messageText =
+                "Runtime failure for \(record.pane.paneHeader.title): "
+                + emission.text
+        } else {
+            messageText = emission.text
         }
         let messageID = UUID().uuidString.lowercased()
         let message = CollaborationMessage(
             id: messageID,
             threadID: emission.threadID,
             authorID: authorID,
-            text: CollaborationMessage.boundedChannelText(emission.text))
+            text: CollaborationMessage.boundedChannelText(messageText))
 
         collaborationQueue.async { [weak self] in
             guard let self else { return }
@@ -3367,11 +3387,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     == collaborationInstanceID,
               provisioningProposalIDs.insert(proposal.spec.id).inserted
         else { return }
-        orchestrationQueue.async { [weak self] in
-            guard let self else { return }
-            do {
+        Task { [weak self] in
+            await self?.provisionApprovedProposalOffMain(
+                proposal)
+        }
+    }
+
+    private func provisionApprovedProposalOffMain(
+        _ proposal: CollaborationRoomProposal
+    ) async {
+        var preparedCloudAdapters:
+            [any CollaborationAgentRuntimeAdapter] = []
+        defer {
+            _ = self.onMain {
+                self.provisioningProposalIDs.remove(proposal.spec.id)
+            }
+        }
+        do {
+                guard let authoritativeSnapshot =
+                        self.collaborationCoordinator.snapshot(),
+                      let authoritativeProposal =
+                        authoritativeSnapshot.proposals.first(where: {
+                            $0.spec.id == proposal.spec.id
+                        }),
+                      authoritativeProposal.digest == proposal.digest
+                else {
+                    return
+                }
+
                 var snapshot: CollaborationSnapshot
-                if proposal.state == .approved {
+                switch authoritativeProposal.state {
+                case .approved:
                     snapshot = try self.executeOrchestrationMutation(
                         CollaborationControlRequest(
                             op: .startProvisioning,
@@ -3381,21 +3427,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                                 + "\(proposal.updatedAt.timeIntervalSince1970)",
                             proposalID: proposal.spec.id,
                             proposalDigest: proposal.digest))
-                } else {
-                    guard let current =
-                            self.collaborationCoordinator.snapshot(),
-                          current.proposals.contains(where: {
-                              $0.spec.id == proposal.spec.id
-                                  && $0.digest == proposal.digest
-                                  && $0.state == .provisioning
-                          })
-                    else {
-                        throw CollaborationRoomError.invalidValue(
-                            field: "proposal state",
-                            reason:
-                                "the approved room is no longer provisioning")
-                    }
-                    snapshot = current
+                case .provisioning:
+                    snapshot = authoritativeSnapshot
+                default:
+                    // Projection delivery is asynchronous. An older approved
+                    // or provisioning snapshot can arrive after this proposal
+                    // has already reached running or another terminal state.
+                    // Treat that delivery as stale instead of corrupting the
+                    // authoritative outcome with a synthetic failure.
+                    return
                 }
 
                 let workspaceMode: AgentWorkspaceMode =
@@ -3421,6 +3461,58 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                             participantID: agent.id,
                             mode: workspaceMode)
                 }
+                var cloudBindings:
+                    [String: CollaborationCloudChatBindings] = [:]
+                var cloudAdapters:
+                    [String: any CollaborationAgentRuntimeAdapter] =
+                        [:]
+                for agent in proposal.spec.agents
+                where agent.runtime == .cloud {
+                    guard let workspace = workspaces[agent.id] else {
+                        throw CollaborationRoomError.invalidValue(
+                            field: "cloud workspace",
+                            reason:
+                                "approved workspace is unavailable for "
+                                + agent.id)
+                    }
+                    let previous =
+                        proposal.runtimeReceipts.first {
+                            $0.agentID == agent.id
+                        }
+                    let adapter = try self.cloudRuntimeFactory
+                        .makeAdapter(
+                            context:
+                                CollaborationCloudRuntimeContext(
+                                    proposalID: proposal.spec.id,
+                                    agent: agent,
+                                    workspace:
+                                        agent.cloudConnection?
+                                            .remoteWorkspace
+                                        ?? workspace.path,
+                                    previousReceipt: previous))
+                    let preparedReceipt = try await adapter.prepare()
+                    preparedCloudAdapters.append(adapter)
+                    if previous == nil {
+                        snapshot =
+                            try self.executeOrchestrationMutation(
+                                CollaborationControlRequest(
+                                    op: .recordRuntimeSession,
+                                    actor:
+                                        self.orchestrationActor(),
+                                    idempotencyKey:
+                                        "proposal:"
+                                        + "\(proposal.spec.id):runtime:"
+                                        + agent.id,
+                                    proposalID: proposal.spec.id,
+                                    proposalDigest: proposal.digest,
+                                    runtimeReceipt:
+                                        preparedReceipt))
+                    }
+                    cloudBindings[agent.id] =
+                        CollaborationCloudChatBindings(
+                            adapter: adapter)
+                    cloudAdapters[agent.id] = adapter
+                }
 
                 if !snapshot.channels.contains(where: {
                     $0.id == proposal.spec.channelID
@@ -3434,10 +3526,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                             channelID: proposal.spec.channelID,
                             name: proposal.spec.roomName))
                 }
-                let visual = try self.makeApprovedVisualAgents(
+                let visual = try await self.makeApprovedVisualAgents(
                     proposal: proposal,
                     snapshot: snapshot,
-                    workspaces: workspaces)
+                    workspaces: workspaces,
+                    cloudBindings: cloudBindings,
+                    cloudAdapters: cloudAdapters)
                 snapshot = visual.snapshot
 
                 for agent in visual.agents {
@@ -3523,7 +3617,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                                 "Approved objective: "
                                 + proposal.spec.objective)))
 
-                guard self.onMain({
+                await self.onMainAsync {
                     self.applyCollaborationProjection(snapshot)
                     for agent in visual.agents {
                         let peers = proposal.spec.agents
@@ -3552,11 +3646,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                             model: "Auto",
                             effort: "Auto")
                     }
-                    return true
-                }) == true else {
-                    throw CollaborationRoomError.invalidValue(
-                        field: "visual host",
-                        reason: "timed out while starting approved agents")
                 }
 
                 snapshot = try self.executeOrchestrationMutation(
@@ -3573,17 +3662,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     "channelId": proposal.spec.channelID,
                     "agentCount": proposal.spec.agents.count,
                 ])
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.provisioningProposalIDs.remove(
-                        proposal.spec.id)
+                await self.onMainAsync {
                     self.applyCollaborationProjection(snapshot)
                 }
-            } catch {
-                self.markProposalProvisioningFailed(
-                    proposal,
-                    error: error)
+        } catch {
+            for adapter in preparedCloudAdapters {
+                await adapter.close()
             }
+            self.markProposalProvisioningFailed(
+                proposal,
+                error: error)
         }
     }
 
@@ -3603,9 +3691,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func makeApprovedVisualAgents(
         proposal: CollaborationRoomProposal,
         snapshot: CollaborationSnapshot,
-        workspaces: [String: ProvisionedAgentWorkspace]
-    ) throws -> ApprovedVisualRoom {
-        guard let result = onMain({ () -> ApprovedVisualRoom? in
+        workspaces: [String: ProvisionedAgentWorkspace],
+        cloudBindings:
+            [String: CollaborationCloudChatBindings],
+        cloudAdapters:
+            [String: any CollaborationAgentRuntimeAdapter]
+    ) async throws -> ApprovedVisualRoom {
+        guard let result = await onMainAsync({ () -> ApprovedVisualRoom? in
             self.applyCollaborationProjection(snapshot)
             guard let window = self.standardKeyWindow()
                     ?? NSApp.windows.first(where: {
@@ -3651,12 +3743,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                         vertical: true,
                         forceNewInstance: true,
                         chatConfiguration: chatConfig,
-                        chatWorkspaceDirectory: workspace.path,
+                        chatWorkspaceDirectory:
+                            spec.cloudConnection?.remoteWorkspace
+                            ?? workspace.path,
                         chatTitle: spec.displayName,
-                        chatRole: spec.role)
+                        chatRole: spec.role,
+                        chatBackendRunner:
+                            cloudBindings[spec.id]?.backendRunner,
+                        chatConversationReleaser:
+                            cloudBindings[spec.id]?.cancel)
                     else { return nil }
                     created.proposalID = proposal.spec.id
                     created.proposedAgentID = spec.id
+                    created.cloudRuntimeAdapter =
+                        cloudAdapters[spec.id]
                     created.participantCapabilities = Array(Set(
                         spec.capabilities
                             + ["channel.receive", "channel.send"]))
@@ -3680,7 +3780,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 channelEndpoint: self.collaborationEndpoint(
                     for: channelRecord.pane),
                 agents: agents)
-        }), let result else {
+        }) else {
             throw CollaborationRoomError.invalidValue(
                 field: "visual host",
                 reason:
@@ -4829,7 +4929,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         chatConfiguration: AppConfig? = nil,
         chatWorkspaceDirectory: String? = nil,
         chatTitle: String? = nil,
-        chatRole: String? = nil
+        chatRole: String? = nil,
+        chatBackendRunner: PetAssistant.BackendRunner? = nil,
+        chatConversationReleaser:
+            ((String) -> Void)? = nil
     ) -> UtilityPanelRecord? {
         let id = ObjectIdentifier(win)
         // Files stays one-per-window. Chat, Channel, and Browser support extra
@@ -5017,7 +5120,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 let assistant: PetAssistant
                 if forceNewInstance {
                     assistant = PetAssistant(
-                        config: chatConfiguration ?? config)
+                        config: chatConfiguration ?? config,
+                        backendRunner: chatBackendRunner,
+                        conversationReleaser:
+                            chatConversationReleaser)
                     if let chatWorkspaceDirectory {
                         assistant.setWorkspaceDirectory(
                             chatWorkspaceDirectory)
@@ -5028,7 +5134,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 } else if let sourceSession {
                     assistant = petAssistant(for: sourceSession)
                 } else {
-                    assistant = PetAssistant(config: config)
+                    assistant = PetAssistant(
+                        config: chatConfiguration ?? config,
+                        backendRunner: chatBackendRunner,
+                        conversationReleaser:
+                            chatConversationReleaser)
                 }
                 // This Chat surface owns the conversation — drop the pet bubble.
                 assistant.dismissPopover()
@@ -5279,6 +5389,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let surface = record.surface {
             surface.teardown()
             appControl.broadcast(["event": "surface-closed", "surface": record.ledgerID])
+        }
+        if let cloudRuntimeAdapter = record.cloudRuntimeAdapter {
+            Task {
+                await cloudRuntimeAdapter.interrupt()
+                await cloudRuntimeAdapter.close()
+            }
+            record.cloudRuntimeAdapter = nil
         }
         if let assistant = record.assistant {
             appControl.broadcast([
@@ -5749,6 +5866,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
         return sem.wait(timeout: .now() + 3) == .success ? result : nil
+    }
+
+    /// AppKit provisioning is required work, not a best-effort control query.
+    /// Await the main actor instead of timing out while its run loop is busy;
+    /// a timed-out block remains queued and can otherwise create panes after
+    /// the proposal has already been marked failed.
+    private func onMainAsync<T>(
+        _ work: @escaping @MainActor () -> T
+    ) async -> T {
+        await MainActor.run {
+            work()
+        }
     }
 
     private func session(withID id: Int) -> TerminalSession? {

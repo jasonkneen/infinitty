@@ -804,6 +804,202 @@ final class HeadlessAppHostTests: XCTestCase {
             "pong")
     }
 
+    func testApprovedHeadlessCloudRoomPersistsSessionBeforeRunning()
+        throws
+    {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let factory = HeadlessCloudRuntimeFactory()
+        let host = try HeadlessAppHost(
+            instanceID: "headless-cloud-room",
+            socketPath: fixture.socketPath,
+            applicationSupportDirectory: fixture.support,
+            publishesCurrentLink: false)
+        host.cloudRuntimeFactory = factory
+        try host.start(launchInitialTerminal: false)
+        defer { host.stop() }
+
+        let coordinator = CollaborationCoordinatorClient(
+            applicationSupportDirectory: fixture.support)
+        let spec = CollaborationRoomProposalSpec(
+            id: "proposal-headless-cloud",
+            channelID: "channel-headless-cloud",
+            roomName: "Remote Delivery Room",
+            objective:
+                "Run the approved remote agent in the shared Channel.",
+            workspaceRoot: fixture.support.path,
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent-headless-cloud",
+                    displayName: "Remote Architect",
+                    role: "remote delivery owner",
+                    runtime: .cloud,
+                    provider: "codex",
+                    modelID: "opaque-cloud-model",
+                    responsibilityScopes: ["Sources/**"],
+                    capabilities: ["workspace.write"],
+                    cloudConnection:
+                        CollaborationCloudConnection(
+                            endpointURL:
+                                "wss://codex.example.test/app-server",
+                            credentialEnvironmentVariable:
+                                "CODEX_CHANNEL_TOKEN",
+                            remoteWorkspace:
+                                "/srv/headless-cloud")),
+            ],
+            workspaceStrategy: .sharedCheckout,
+            presentation: .headless,
+            targetInstanceID: "headless-cloud-room",
+            requestedCapabilities: ["workspace.write"],
+            expiresAt: Date().addingTimeInterval(300))
+        let prepare = CollaborationControlRequest(
+            op: .prepareProposal,
+            actor: CollaborationActor(
+                id: "agent:requester",
+                kind: .agent,
+                displayName: "Requesting agent"),
+            idempotencyKey: "prepare-headless-cloud",
+            proposal: spec)
+        let prepared = try XCTUnwrap(coordinator.execute(
+            try XCTUnwrap(
+                CollaborationControlCodec.encode(prepare)))
+            .snapshot?.proposals.first)
+        let approve = CollaborationControlRequest(
+            op: .approveProposal,
+            actor: CollaborationActor(
+                id: "human:test",
+                kind: .human,
+                displayName: "Test human"),
+            idempotencyKey: "approve-headless-cloud",
+            proposalID: spec.id,
+            proposalDigest: prepared.digest)
+        XCTAssertNotNil(coordinator.executeHumanDecision(
+            try XCTUnwrap(
+                CollaborationControlCodec.encode(approve)))
+            .snapshot)
+
+        var finalProposal: CollaborationRoomProposal?
+        var chatMessages: [[String: Any]] = []
+        for _ in 0..<120 {
+            finalProposal = coordinator.snapshot()?
+                .proposals.first {
+                    $0.spec.id == spec.id
+                }
+            if finalProposal?.state == .running,
+               let encoded = BrowserControlCodec.encode([
+                   "v": 1,
+                   "op": "list",
+               ]),
+               let response = AppSocketClient.request(
+                   "chat \(encoded)",
+                   socketPath: fixture.socketPath),
+               let envelope =
+                    try? JSONSerialization.jsonObject(
+                        with: Data(response.utf8))
+                        as? [String: Any],
+               let result = envelope["result"]
+                    as? [String: Any],
+               let chat = (result["chats"]
+                    as? [[String: Any]])?.first
+            {
+                chatMessages =
+                    ((chat["threads"] as? [[String: Any]])?
+                        .first?["messages"]
+                        as? [[String: Any]]) ?? []
+                if chatMessages.contains(where: {
+                    ($0["text"] as? String)?
+                        .contains("CLOUD_CHANNEL_READY")
+                        == true
+                }) {
+                    break
+                }
+            }
+            usleep(50_000)
+        }
+
+        XCTAssertEqual(finalProposal?.state, .running)
+        let receipt = try XCTUnwrap(
+            finalProposal?.runtimeReceipts.first)
+        XCTAssertEqual(receipt.agentID, "agent-headless-cloud")
+        XCTAssertEqual(receipt.adapterKind, "codex_app_server")
+        XCTAssertEqual(receipt.remoteSessionID, "remote-session-1")
+        XCTAssertEqual(factory.contexts.count, 1)
+        XCTAssertEqual(
+            factory.contexts.first?.previousReceipt,
+            nil)
+        XCTAssertTrue(chatMessages.contains(where: {
+            ($0["text"] as? String)?
+                .contains("CLOUD_CHANNEL_READY") == true
+        }))
+        let prompt = try XCTUnwrap(
+            factory.adapters.first?.users.first)
+        XCTAssertTrue(
+            prompt.contains("ACTIVE INFINITTY CHANNEL"))
+        XCTAssertTrue(
+            prompt.contains(
+                "Your participant name: \"Remote Architect\""))
+        XCTAssertFalse(
+            prompt.contains("chat-only session (no active terminal)"),
+            "cloud adapters receive their approved remote workspace context")
+
+        host.stop()
+        let recoveryFactory = HeadlessCloudRuntimeFactory()
+        let recoveredHost = try HeadlessAppHost(
+            instanceID: "headless-cloud-room",
+            socketPath: fixture.socketPath,
+            applicationSupportDirectory: fixture.support,
+            publishesCurrentLink: false)
+        recoveredHost.cloudRuntimeFactory = recoveryFactory
+        try recoveredHost.start(launchInitialTerminal: false)
+        defer { recoveredHost.stop() }
+        var recoveredMessages: [[String: Any]] = []
+        for _ in 0..<120 {
+            if let encoded = BrowserControlCodec.encode([
+                "v": 1,
+                "op": "list",
+            ]),
+               let response = AppSocketClient.request(
+                   "chat \(encoded)",
+                   socketPath: fixture.socketPath),
+               let envelope =
+                    try? JSONSerialization.jsonObject(
+                        with: Data(response.utf8))
+                        as? [String: Any],
+               let result = envelope["result"]
+                    as? [String: Any],
+               let chat = (result["chats"]
+                    as? [[String: Any]])?.first
+            {
+                recoveredMessages =
+                    ((chat["threads"] as? [[String: Any]])?
+                        .first?["messages"]
+                        as? [[String: Any]]) ?? []
+                if recoveredMessages.contains(where: {
+                    ($0["text"] as? String)?
+                        .contains("CLOUD_CHANNEL_READY")
+                        == true
+                }) {
+                    break
+                }
+            }
+            usleep(50_000)
+        }
+        let recoveredContext = try XCTUnwrap(
+            recoveryFactory.contexts.first)
+        XCTAssertEqual(
+            recoveredContext.previousReceipt?.remoteSessionID,
+            "remote-session-1")
+        XCTAssertTrue(recoveredMessages.contains(where: {
+            ($0["text"] as? String)?
+                .contains("CLOUD_CHANNEL_READY") == true
+        }))
+        XCTAssertTrue(
+            recoveryFactory.adapters.first?.users.first?
+                .contains(
+                    "Reconnect to your existing Channel")
+                == true)
+    }
+
     func testStoppingHeadlessHostCancelsInflightRun() throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -875,4 +1071,91 @@ final class HeadlessAppHostTests: XCTestCase {
                 try? FileManager.default.removeItem(at: support)
             })
     }
+}
+
+final class HeadlessCloudRuntimeFactory:
+    CollaborationCloudRuntimeFactoryProtocol, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var storedContexts:
+        [CollaborationCloudRuntimeContext] = []
+    private var storedAdapters:
+        [HeadlessCloudRuntimeAdapter] = []
+
+    var contexts: [CollaborationCloudRuntimeContext] {
+        lock.withLock { storedContexts }
+    }
+
+    var adapters: [HeadlessCloudRuntimeAdapter] {
+        lock.withLock { storedAdapters }
+    }
+
+    func makeAdapter(
+        context: CollaborationCloudRuntimeContext
+    ) throws -> any CollaborationAgentRuntimeAdapter {
+        let adapter = HeadlessCloudRuntimeAdapter(
+            context: context)
+        lock.withLock {
+            storedContexts.append(context)
+            storedAdapters.append(adapter)
+        }
+        return adapter
+    }
+}
+
+final class HeadlessCloudRuntimeAdapter:
+    CollaborationAgentRuntimeAdapter, @unchecked Sendable
+{
+    private let context: CollaborationCloudRuntimeContext
+    private let lock = NSLock()
+    private var storedUsers: [String] = []
+
+    init(context: CollaborationCloudRuntimeContext) {
+        self.context = context
+    }
+
+    var users: [String] {
+        lock.withLock { storedUsers }
+    }
+
+    func prepare() async throws
+        -> CollaborationRuntimeSessionReceipt
+    {
+        CollaborationRuntimeSessionReceipt(
+            id: "receipt-headless-cloud",
+            proposalID: context.proposalID,
+            agentID: context.agent.id,
+            adapterKind: "codex_app_server",
+            provider: "codex",
+            remoteSessionID:
+                context.previousReceipt?.remoteSessionID
+                ?? "remote-session-1",
+            workspace: context.workspace,
+            modelID: context.agent.modelID,
+            endpointFingerprint:
+                CollaborationRuntimeSessionReceipt.fingerprint(
+                    endpointURL:
+                        context.agent.cloudConnection?.endpointURL
+                        ?? ""),
+            accountFingerprint:
+                String(repeating: "b", count: 64),
+            capabilities: ["interrupt", "resume", "stream"],
+            preparedAt: Date())
+    }
+
+    func turn(
+        system: String,
+        user: String,
+        timeout: TimeInterval,
+        onPartial: (@Sendable (String) -> Void)?
+    ) async throws -> String {
+        lock.withLock {
+            storedUsers.append(user)
+        }
+        onPartial?("CLOUD_CHANNEL")
+        return "CLOUD_CHANNEL_READY"
+    }
+
+    func interrupt() async {}
+    func close() async {}
 }

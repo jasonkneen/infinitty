@@ -148,6 +148,86 @@ final class ChannelPanelTests: XCTestCase {
         XCTAssertEqual(decisions.first?.2, true)
     }
 
+    func testCloudProposalShowsSafeConnectionAndDurableSessionState() {
+        let cloud = CollaborationCloudConnection(
+            endpointURL:
+                "wss://codex.example.test/app-server",
+            credentialEnvironmentVariable:
+                "CODEX_CHANNEL_TOKEN",
+            remoteWorkspace: "/srv/project")
+        let spec = CollaborationRoomProposalSpec(
+            id: "proposal-cloud",
+            channelID: "channel-1",
+            roomName: "Launch Room",
+            objective: "Run the approved remote agent",
+            workspaceRoot: "/tmp/project",
+            agents: [
+                CollaborationAgentSpec(
+                    id: "agent-cloud",
+                    displayName: "Remote Architect",
+                    role: "Own remote implementation",
+                    runtime: .cloud,
+                    provider: "codex",
+                    modelID: "opaque-model",
+                    cloudConnection: cloud),
+            ],
+            workspaceStrategy: .worktrees,
+            expiresAt: Date(timeIntervalSince1970: 5_000))
+        let receipt = CollaborationRuntimeSessionReceipt(
+            id: "receipt-cloud",
+            proposalID: spec.id,
+            agentID: "agent-cloud",
+            adapterKind: "codex_app_server",
+            provider: "codex",
+            remoteSessionID: "remote-session-1",
+            workspace: "/srv/project",
+            modelID: "opaque-model",
+            endpointFingerprint:
+                String(repeating: "a", count: 64),
+            accountFingerprint: nil,
+            capabilities: ["resume", "stream"],
+            preparedAt: Date(timeIntervalSince1970: 10))
+        let proposal = CollaborationRoomProposal(
+            spec: spec,
+            digest: try! spec.canonicalDigest(),
+            state: .running,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 10),
+            decidedByActorID: "human:test",
+            decidedAt: Date(timeIntervalSince1970: 2),
+            statusMessage: nil,
+            runtimeReceipts: [receipt])
+        let controller = ChannelPanelController(
+            channel: makeChannel(),
+            proposals: [proposal])
+
+        let state = controller.controlState()
+        let projected = (state["proposals"]
+            as? [[String: Any]])?.first
+        let agent = (projected?["agents"]
+            as? [[String: Any]])?.first
+        let connection = agent?["cloudConnection"]
+            as? [String: Any]
+        XCTAssertEqual(
+            connection?["endpointURL"] as? String,
+            cloud.endpointURL)
+        XCTAssertEqual(
+            connection?["credentialEnvironmentVariable"]
+                as? String,
+            "CODEX_CHANNEL_TOKEN")
+        XCTAssertEqual(
+            (projected?["runtimeReceipts"]
+                as? [[String: Any]])?
+                .first?["remoteSessionID"] as? String,
+            "remote-session-1")
+        XCTAssertTrue(
+            controller.renderedTextForTesting.contains(
+                "remote session ready"))
+        XCTAssertFalse(
+            controller.renderedTextForTesting.contains(
+                "secret-token"))
+    }
+
     private func makeChannel() -> CollaborationChannelState {
         CollaborationChannelState(
             id: "channel-1",

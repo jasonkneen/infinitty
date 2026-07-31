@@ -1053,6 +1053,7 @@ final class PaneHeaderView: NSView {
     }
     var channelBadgeTextForTesting: String { channelBadge.stringValue }
     var channelBadgeIsHiddenForTesting: Bool { channelBadge.isHidden }
+    var channelBadgeFrameForTesting: NSRect { channelBadge.frame }
 
     /// Anchor for the todo popover.
     var todoAnchorView: NSView { todoButton }
@@ -1232,13 +1233,39 @@ final class PaneHeaderView: NSView {
             badgeWidth = 0
             channelBadge.frame = .zero
         } else {
-            let textWidth = ceil(channelBadge.stringValue.size(withAttributes: [
+            let badgeTextWidth = ceil(
+                channelBadge.stringValue.size(withAttributes: [
                 .font: channelBadge.font as Any,
             ]).width)
-            badgeWidth = min(max(textWidth + 16, 62), 132)
-            channelBadge.frame = NSRect(
-                x: channelConnector.frame.minX - badgeWidth - 4,
-                y: 5, width: badgeWidth, height: 18)
+            let titleTextWidth = ceil(
+                titleLabel.stringValue.size(withAttributes: [
+                    .font: titleLabel.font as Any,
+                ]).width)
+            let minimumTitleWidth = min(
+                max(titleTextWidth + 6, 42),
+                96)
+            let idealBadgeWidth = min(
+                max(badgeTextWidth + 16, 62),
+                132)
+            let maximumBadgeWidth = max(
+                channelConnector.frame.minX
+                    - 43
+                    - minimumTitleWidth,
+                0)
+            if maximumBadgeWidth >= 48 {
+                badgeWidth = min(
+                    idealBadgeWidth,
+                    maximumBadgeWidth)
+                channelBadge.frame = NSRect(
+                    x: channelConnector.frame.minX - badgeWidth - 4,
+                    y: 5, width: badgeWidth, height: 18)
+            } else {
+                // At extremely small widths the connected ring remains
+                // visible and accessible; do not erase the unique pane name
+                // merely to fit a second text label.
+                badgeWidth = 0
+                channelBadge.frame = .zero
+            }
         }
         iconView.frame = NSRect(x: 10, y: 6, width: 16, height: 16)
         let titleLimit = channelBadge.isHidden

@@ -672,7 +672,10 @@ extension CollaborationAuditBody {
         case .messagePosted: return "message_posted"
         case .proposalPrepared: return "proposal_prepared"
         case .proposalTransitioned: return "proposal_transitioned"
+        case .runtimeSessionRecorded:
+            return "runtime_session_recorded"
         case .commandNoOp: return "command_no_op"
+        case .commandRejected: return "command_rejected"
         }
     }
 }

@@ -7,6 +7,15 @@ import Foundation
 /// queue. State is polled through the same structured Chat control contract as
 /// visual panes.
 final class HeadlessChatRuntime: @unchecked Sendable {
+    static let localBackendConversationCanceller:
+        @Sendable (String) -> Void = { conversationID in
+            PetAssistant.cancelBackendConversation(conversationID)
+        }
+    static let localBackendConversationReleaser:
+        @Sendable (String) -> Void = { conversationID in
+            PetAssistant.releaseBackendConversation(conversationID)
+        }
+
     private struct ThreadState {
         let id: UUID
         var title: String
@@ -42,6 +51,11 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         @Sendable () -> CollaborationChatContext?
     private let collaborationMessagePublisher:
         @Sendable (CollaborationChatEmission) -> Void
+    private let backendRunner: PetAssistant.BackendRunner?
+    private let backendConversationCanceller:
+        @Sendable (String) -> Void
+    private let backendConversationReleaser:
+        @Sendable (String) -> Void
     private var threads: [ThreadState]
     private var activeThreadID: UUID
     private var pending: [PendingRequest] = []
@@ -69,6 +83,13 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             @escaping @Sendable (CollaborationChatEmission) -> Void = {
                 _ in
             },
+        backendRunner: PetAssistant.BackendRunner? = nil,
+        backendConversationCanceller:
+            @escaping @Sendable (String) -> Void =
+                localBackendConversationCanceller,
+        backendConversationReleaser:
+            @escaping @Sendable (String) -> Void =
+                localBackendConversationReleaser,
         onStateChange: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.id = id
@@ -85,6 +106,11 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             collaborationContextProvider
         self.collaborationMessagePublisher =
             collaborationMessagePublisher
+        self.backendRunner = backendRunner
+        self.backendConversationCanceller =
+            backendConversationCanceller
+        self.backendConversationReleaser =
+            backendConversationReleaser
         self.onStateChange = onStateChange
         self.workQueue = DispatchQueue(
             label: "infinitty.headless-chat.\(id)",
@@ -210,8 +236,7 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         if threads[index].messages.isEmpty {
             stateLock.unlock()
             if let conversationToCancel {
-                PetAssistant.cancelBackendConversation(
-                    conversationToCancel)
+                backendConversationCanceller(conversationToCancel)
             }
             onStateChange("thread-reset")
             processNext()
@@ -227,7 +252,7 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         activeThreadID = fresh.id
         stateLock.unlock()
         if let conversationToCancel {
-            PetAssistant.cancelBackendConversation(conversationToCancel)
+            backendConversationCanceller(conversationToCancel)
         }
         onStateChange("thread-opened")
         processNext()
@@ -261,7 +286,7 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         inFlight = nil
         stateLock.unlock()
         for conversation in conversations {
-            PetAssistant.cancelBackendConversation(conversation)
+            backendConversationCanceller(conversation)
         }
         onStateChange("cancelled")
     }
@@ -279,7 +304,7 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         inFlight = nil
         stateLock.unlock()
         for conversation in conversations {
-            PetAssistant.releaseBackendConversation(conversation)
+            backendConversationReleaser(conversation)
         }
     }
 
@@ -329,15 +354,31 @@ final class HeadlessChatRuntime: @unchecked Sendable {
 
         workQueue.async { [weak self] in
             guard let self else { return }
-            PetAssistant.askAI(
-                backend: backend,
-                system: Self.systemPrompt,
-                user: user,
-                cwd: workspace,
-                conversationID: conversationID,
-                timeout: self.config.aiTurnTimeout
-            ) { [weak self] outcome in
+            let done: (PetAssistant.AIOutcome) -> Void = {
+                [weak self] outcome in
                 self?.complete(request, outcome: outcome)
+            }
+            if let backendRunner = self.backendRunner {
+                backendRunner(
+                    backend,
+                    Self.systemPrompt,
+                    user,
+                    workspace,
+                    conversationID,
+                    { [weak self] _ in
+                        self?.onStateChange("streaming")
+                    },
+                    self.config.aiTurnTimeout,
+                    done)
+            } else {
+                PetAssistant.askAI(
+                    backend: backend,
+                    system: Self.systemPrompt,
+                    user: user,
+                    cwd: workspace,
+                    conversationID: conversationID,
+                    timeout: self.config.aiTurnTimeout,
+                    done: done)
             }
         }
     }
@@ -358,18 +399,33 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             return
         }
         let response = PetAssistant.displayText(for: outcome)
+        let isSuccessfulAgentResponse: Bool
+        if case .text = outcome {
+            isSuccessfulAgentResponse = true
+        } else {
+            isSuccessfulAgentResponse = false
+        }
         threads[index].messages.append(AssistantChatMessage(
-            role: "Assistant",
+            role: isSuccessfulAgentResponse ? "Assistant" : "System",
             text: response))
         threads[index].updatedAt = Date()
         inFlight = nil
         stateLock.unlock()
-        collaborationMessagePublisher(CollaborationChatEmission(
-            kind: .agentResponse,
-            text: response,
-            threadID:
-                request.threadID.uuidString.lowercased()))
-        onStateChange("completed")
+        if isSuccessfulAgentResponse {
+            collaborationMessagePublisher(CollaborationChatEmission(
+                kind: .agentResponse,
+                text: response,
+                threadID:
+                    request.threadID.uuidString.lowercased()))
+        } else {
+            collaborationMessagePublisher(CollaborationChatEmission(
+                kind: .runtimeFailure,
+                text: response,
+                threadID:
+                    request.threadID.uuidString.lowercased()))
+        }
+        onStateChange(
+            isSuccessfulAgentResponse ? "completed" : "failed")
         processNext()
     }
 

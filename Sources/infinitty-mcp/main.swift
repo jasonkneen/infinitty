@@ -669,6 +669,50 @@ let tools: [Tool] = [
                                 "type": "array",
                                 "items": ["type": "string"],
                             ],
+                            "cloudConnection": [
+                                "type": "object",
+                                "description":
+                                    "Required for runtime=cloud. Contains only "
+                                    + "an approved endpoint and environment "
+                                    + "credential reference; raw credentials "
+                                    + "are forbidden.",
+                                "properties": [
+                                    "endpointURL": [
+                                        "type": "string",
+                                        "description":
+                                            "Credential-free WSS URL for Codex app-server or HTTPS URL for Claude Managed Agents.",
+                                    ],
+                                    "credentialEnvironmentVariable": [
+                                        "type": "string",
+                                        "description":
+                                            "Uppercase environment variable name; never the credential value.",
+                                    ],
+                                    "authentication": [
+                                        "type": "string",
+                                        "enum": [
+                                            "bearer", "api_key",
+                                        ],
+                                    ] as [String: Any],
+                                    "remoteWorkspace": [
+                                        "type": "string",
+                                        "description":
+                                            "Absolute checkout or mount path as seen by the remote runtime. It is approval-bound and must already expose the intended codebase.",
+                                    ],
+                                    "agentID": ["type": "string"],
+                                    "environmentID": [
+                                        "type": "string",
+                                    ],
+                                    "vaultIDs": [
+                                        "type": "array",
+                                        "items": ["type": "string"],
+                                    ],
+                                ],
+                                "required": [
+                                    "endpointURL",
+                                    "credentialEnvironmentVariable",
+                                    "remoteWorkspace",
+                                ],
+                            ] as [String: Any],
                         ],
                         "required": [
                             "id", "displayName", "role",

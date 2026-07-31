@@ -53,6 +53,9 @@ public final class HeadlessAppHost: @unchecked Sendable {
         label: "infinitty.headless-collaboration",
         qos: .userInitiated)
     private let workspaceProvisioner = AgentWorkspaceProvisioner()
+    var cloudRuntimeFactory:
+        any CollaborationCloudRuntimeFactoryProtocol =
+            CollaborationCloudRuntimeFactory()
 
     private var sessions: [Int: HeadlessTerminalSession] = [:]
     private var chats: [String: HeadlessChatRuntime] = [:]
@@ -1316,6 +1319,21 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 id: authorID,
                 kind: .agent,
                 displayName: chat.metadata().name)
+        case .runtimeFailure:
+            authorID = "system:runtime"
+            actor = CollaborationActor(
+                id: authorID,
+                kind: .system,
+                displayName:
+                    "Runtime for \(chat.metadata().name)")
+        }
+        let messageText: String
+        if emission.kind == .runtimeFailure {
+            messageText =
+                "Runtime failure for \(chat.metadata().name): "
+                + emission.text
+        } else {
+            messageText = emission.text
         }
         collaborationQueue.sync {
             guard let channelID = channelID(
@@ -1332,7 +1350,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
                     threadID: emission.threadID,
                     authorID: authorID,
                     text: CollaborationMessage.boundedChannelText(
-                        emission.text)))
+                        messageText)))
             guard let encoded = CollaborationControlCodec.encode(request)
             else { return }
             let result = self.collaborationCoordinator.execute(encoded)
@@ -1362,14 +1380,20 @@ public final class HeadlessAppHost: @unchecked Sendable {
             stateLock.unlock()
             guard inserted else { continue }
             orchestrationQueue.async { [weak self] in
-                self?.provisionApprovedHeadlessProposal(proposal)
+                guard let self else { return }
+                Task {
+                    await self.provisionApprovedHeadlessProposal(
+                        proposal)
+                }
             }
         }
     }
 
     private func provisionApprovedHeadlessProposal(
         _ proposal: CollaborationRoomProposal
-    ) {
+    ) async {
+        var preparedCloudAdapters:
+            [any CollaborationAgentRuntimeAdapter] = []
         do {
             let isRunningRecovery = proposal.state == .running
             var snapshot: CollaborationSnapshot
@@ -1420,6 +1444,54 @@ public final class HeadlessAppHost: @unchecked Sendable {
                     participantID: agent.id,
                     mode: mode)
             }
+            var cloudBindings:
+                [String: CollaborationCloudChatBindings] = [:]
+            for agent in proposal.spec.agents
+            where agent.runtime == .cloud {
+                guard let workspace = workspaces[agent.id] else {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "cloud workspace",
+                        reason:
+                            "approved workspace is unavailable for "
+                            + agent.id)
+                }
+                let previous = proposal.runtimeReceipts.first {
+                    $0.agentID == agent.id
+                }
+                if isRunningRecovery, previous == nil {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "runtime session receipt",
+                        reason:
+                            "running cloud agent \(agent.id) has no "
+                            + "durable session to recover")
+                }
+                let adapter = try cloudRuntimeFactory.makeAdapter(
+                    context: CollaborationCloudRuntimeContext(
+                        proposalID: proposal.spec.id,
+                        agent: agent,
+                        workspace:
+                            agent.cloudConnection?
+                                .remoteWorkspace
+                            ?? workspace.path,
+                        previousReceipt: previous))
+                let preparedReceipt = try await adapter.prepare()
+                preparedCloudAdapters.append(adapter)
+                if previous == nil {
+                    snapshot =
+                        try executeHeadlessOrchestrationMutation(
+                            CollaborationControlRequest(
+                                op: .recordRuntimeSession,
+                                actor: headlessOrchestrationActor(),
+                                idempotencyKey:
+                                    "proposal:\(proposal.spec.id):runtime:"
+                                    + agent.id,
+                                proposalID: proposal.spec.id,
+                                proposalDigest: proposal.digest,
+                                runtimeReceipt: preparedReceipt))
+                }
+                cloudBindings[agent.id] =
+                    CollaborationCloudChatBindings(adapter: adapter)
+            }
             if !snapshot.channels.contains(where: {
                 $0.id == proposal.spec.channelID
             }) {
@@ -1433,15 +1505,17 @@ public final class HeadlessAppHost: @unchecked Sendable {
                         name: proposal.spec.roomName))
             }
 
-            stateLock.lock()
-            channelPanels[proposal.spec.channelID] =
-                channelPanels[proposal.spec.channelID]
-                ?? HeadlessChannelPanelState()
-            let existingByParticipant = Dictionary(
-                uniqueKeysWithValues: chats.values
-                    .filter { $0.proposalID == proposal.spec.id }
-                    .map { ($0.participantID, $0) })
-            stateLock.unlock()
+            let existingByParticipant = stateLock.withLock {
+                channelPanels[proposal.spec.channelID] =
+                    channelPanels[proposal.spec.channelID]
+                    ?? HeadlessChannelPanelState()
+                return Dictionary(
+                    uniqueKeysWithValues: chats.values
+                        .filter {
+                            $0.proposalID == proposal.spec.id
+                        }
+                        .map { ($0.participantID, $0) })
+            }
             var runtimes: [(CollaborationAgentSpec, HeadlessChatRuntime)] = []
             for (agentIndex, spec) in proposal.spec.agents.enumerated() {
                 if let existing = existingByParticipant[spec.id] {
@@ -1460,13 +1534,25 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 }
                 let chatID =
                     "chat-room-\(proposal.spec.id)-\(agentIndex + 1)"
+                let cancelConversation:
+                    @Sendable (String) -> Void =
+                    cloudBindings[spec.id]?.cancel
+                    ?? HeadlessChatRuntime
+                        .localBackendConversationCanceller
+                let releaseConversation:
+                    @Sendable (String) -> Void =
+                    cloudBindings[spec.id]?.release
+                    ?? HeadlessChatRuntime
+                        .localBackendConversationReleaser
                 let runtime = HeadlessChatRuntime(
                     id: chatID,
                     participantID: spec.id,
                     proposalID: proposal.spec.id,
                     name: spec.displayName,
                     role: spec.role,
-                    workspaceDirectory: workspace.path,
+                    workspaceDirectory:
+                        spec.cloudConnection?.remoteWorkspace
+                        ?? workspace.path,
                     configuredProvider: configured.provider,
                     configuredModel: configured.model,
                     config: configured.config,
@@ -1485,6 +1571,12 @@ public final class HeadlessAppHost: @unchecked Sendable {
                             emission,
                             fromChatID: chatID)
                     },
+                    backendRunner:
+                        cloudBindings[spec.id]?.backendRunner,
+                    backendConversationCanceller:
+                        cancelConversation,
+                    backendConversationReleaser:
+                        releaseConversation,
                     onStateChange: { [weak self] state in
                         self?.appControl.broadcast([
                             "event": "chat-state",
@@ -1493,9 +1585,9 @@ public final class HeadlessAppHost: @unchecked Sendable {
                             "headless": true,
                         ])
                     })
-                stateLock.lock()
-                chats[chatID] = runtime
-                stateLock.unlock()
+                stateLock.withLock {
+                    chats[chatID] = runtime
+                }
                 runtimes.append((spec, runtime))
                 appControl.broadcast([
                     "event": "chat-opened",
@@ -1652,11 +1744,14 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 "headless": true,
                 "revision": snapshot.revision,
             ])
-            stateLock.lock()
-            provisioningProposalIDs.remove(proposal.spec.id)
-            activeProposalIDs.insert(proposal.spec.id)
-            stateLock.unlock()
+            stateLock.withLock {
+                provisioningProposalIDs.remove(proposal.spec.id)
+                activeProposalIDs.insert(proposal.spec.id)
+            }
         } catch {
+            for adapter in preparedCloudAdapters {
+                await adapter.close()
+            }
             let reason = String(describing: error)
             let request = CollaborationControlRequest(
                 op: .markProposalFailed,
@@ -1668,9 +1763,9 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 proposalDigest: proposal.digest,
                 reason: reason)
             _ = try? executeHeadlessOrchestrationMutation(request)
-            stateLock.lock()
-            provisioningProposalIDs.remove(proposal.spec.id)
-            stateLock.unlock()
+            _ = stateLock.withLock {
+                provisioningProposalIDs.remove(proposal.spec.id)
+            }
             appControl.broadcast([
                 "event": "channel-room-failed",
                 "proposalId": proposal.spec.id,

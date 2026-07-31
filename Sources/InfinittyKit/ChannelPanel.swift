@@ -47,6 +47,8 @@ struct ChannelPanelProjection: Equatable {
         let presentation: CollaborationRoomPresentation
         let targetInstanceID: String?
         let agents: [CollaborationAgentSpec]
+        let runtimeReceipts:
+            [CollaborationRuntimeSessionReceipt]
         let expiresAt: Date
         let statusMessage: String?
     }
@@ -170,6 +172,7 @@ struct ChannelPanelProjection: Equatable {
                     presentation: $0.spec.presentation,
                     targetInstanceID: $0.spec.targetInstanceID,
                     agents: $0.spec.agents,
+                    runtimeReceipts: $0.runtimeReceipts,
                     expiresAt: $0.spec.expiresAt,
                     statusMessage: $0.statusMessage)
             }
@@ -306,8 +309,43 @@ struct ChannelPanelProjection: Equatable {
                         if let model = agent.modelID {
                             value["model"] = model
                         }
+                        if let cloud = agent.cloudConnection {
+                            value["cloudConnection"] = [
+                                "endpointURL": cloud.endpointURL,
+                                "credentialEnvironmentVariable":
+                                    cloud.credentialEnvironmentVariable,
+                                "authentication":
+                                    cloud.authentication.rawValue,
+                                "remoteWorkspace":
+                                    cloud.remoteWorkspace,
+                                "agentID":
+                                    cloud.agentID ?? NSNull(),
+                                "environmentID":
+                                    cloud.environmentID ?? NSNull(),
+                                "vaultIDs": cloud.vaultIDs,
+                            ] as [String: Any]
+                        }
                         return value
                     },
+                    "runtimeReceipts":
+                        proposal.runtimeReceipts.map {
+                            [
+                                "id": $0.id,
+                                "agentID": $0.agentID,
+                                "adapterKind": $0.adapterKind,
+                                "provider": $0.provider,
+                                "remoteSessionID":
+                                    $0.remoteSessionID,
+                                "workspace": $0.workspace,
+                                "capabilities":
+                                    $0.capabilities,
+                                "preparedAt":
+                                    ISO8601DateFormatter()
+                                        .string(
+                                            from:
+                                                $0.preparedAt),
+                            ] as [String: Any]
+                        },
                 ]
                 if let statusMessage = proposal.statusMessage {
                     value["statusMessage"] = statusMessage
@@ -715,8 +753,22 @@ final class ChannelPanelController: NSViewController {
                 NSTextField(labelWithString: "No room proposal"))
         } else {
             for proposal in projection.proposals {
-                let agents = proposal.agents.map {
-                    "\($0.displayName) — \($0.role) [\($0.provider)]"
+                let agents = proposal.agents.map { agent in
+                    let cloud = agent.cloudConnection.map {
+                        " · \($0.endpointURL) · workspace "
+                            + "\($0.remoteWorkspace) · credential "
+                            + $0.credentialEnvironmentVariable
+                    } ?? ""
+                    let receipt =
+                        proposal.runtimeReceipts.contains {
+                            $0.agentID == agent.id
+                        }
+                        ? " · remote session ready"
+                        : (agent.runtime == .cloud
+                            ? " · remote session pending"
+                            : "")
+                    return "\(agent.displayName) — \(agent.role) "
+                        + "[\(agent.provider)]\(cloud)\(receipt)"
                 }.joined(separator: "\n")
                 let status = proposal.state.rawValue
                 let workspace = proposal.workspaceStrategy.rawValue
@@ -932,11 +984,26 @@ final class ChannelPanelController: NSViewController {
                 proposal.presentation.rawValue,
                 proposal.targetInstanceID ?? "",
             ] + proposal.agents.flatMap {
-                [
+                var values = [
                     $0.displayName,
                     $0.role,
                     $0.provider,
                     $0.modelID ?? "",
+                ]
+                if let cloud = $0.cloudConnection {
+                    values.append(cloud.endpointURL)
+                    values.append(
+                        cloud.credentialEnvironmentVariable)
+                    values.append(cloud.authentication.rawValue)
+                    values.append(cloud.remoteWorkspace)
+                }
+                return values
+            } + proposal.runtimeReceipts.flatMap {
+                [
+                    $0.agentID,
+                    $0.adapterKind,
+                    $0.remoteSessionID,
+                    "remote session ready",
                 ]
             }
         }
