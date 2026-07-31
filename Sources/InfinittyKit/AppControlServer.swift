@@ -9,6 +9,7 @@ import Foundation
 ///
 ///   ping                     -> pong
 ///   version                  -> infinitty <version>
+///   instance                 -> this process's id, pid, socket, protocol
 ///   list                     -> JSON array of panes (id, title, focused, …)
 ///   new-window [dir]         -> pane id of the new window's session
 ///   new-tab [dir]            -> pane id (tab of the key window); optional
@@ -40,12 +41,16 @@ import Foundation
 ///   browser <base64url-json> -> native browser automation request/reply JSON
 ///                               (use the infinitty_browser MCP tools rather
 ///                               than constructing this framing by hand)
+///   channel <base64url-json> -> versioned Channel snapshot or typed mutation
+///                               (use the infinitty_channel MCP tools)
 ///   subscribe                -> connection stays open; JSON events stream in:
 ///                               pane-opened, pane-closed, title, marker,
 ///                               process (foreground process changed)
 final class AppControlServer {
     let path: String
     static let currentLink = "/tmp/infinitty-current.sock"
+    private let publishesCurrentLink: Bool
+    private let replacesExistingSocket: Bool
 
     /// Handles one request line, returns the response body.
     var handler: ((String) -> String)?
@@ -53,16 +58,37 @@ final class AppControlServer {
     private var listenFD: Int32 = -1
     private var subscribers: [Int32] = []
     private let subscriberLock = NSLock()
+    /// One writer lane preserves event order and assigns a process-local
+    /// monotonic cursor before bytes reach any subscriber.
+    private let broadcastQueue = DispatchQueue(
+        label: "com.infinitty.app-control.broadcast", qos: .utility)
+    private var nextBroadcastSequence: UInt64 = 1
 
-    init() {
-        path = AppControlServer.ownSocketPath
+    init(
+        path: String = AppControlServer.ownSocketPath,
+        publishesCurrentLink: Bool =
+            AppControlServer.publishesCurrentLinkByDefault,
+        replacesExistingSocket: Bool = true
+    ) {
+        self.path = path
+        self.publishesCurrentLink = publishesCurrentLink
+        self.replacesExistingSocket = replacesExistingSocket
     }
 
     /// The app control socket path for the current process. Deterministic from
     /// the pid so the in-process AI bridges can hand it to their spawned
     /// `infinitty-mcp` server (via `INFINITTY_APP_SOCKET`) without needing a
     /// reference to this instance. Must match `init`'s `path`.
-    static var ownSocketPath: String { "/tmp/infinitty-app-\(getpid()).sock" }
+    static var ownSocketPath: String {
+        ProcessInfo.processInfo.environment[
+            "INFINITTY_CONTROL_SOCKET_OVERRIDE"]
+            ?? "/tmp/infinitty-app-\(getpid()).sock"
+    }
+
+    static var publishesCurrentLinkByDefault: Bool {
+        ProcessInfo.processInfo.environment[
+            "INFINITTY_PUBLISH_CURRENT"] != "0"
+    }
 
     /// Remove socket files left behind by infinitty processes that are no
     /// longer running. `stop()` only runs on a clean quit, so a crash,
@@ -101,11 +127,14 @@ final class AppControlServer {
         return String(cString: buf)
     }
 
-    func start() {
+    @discardableResult
+    func start() -> Bool {
         AppControlServer.sweepStaleSockets()
-        unlink(path)
+        if replacesExistingSocket {
+            unlink(path)
+        }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else { return false }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -121,7 +150,7 @@ final class AppControlServer {
         }
         guard ok else {
             close(fd)
-            return
+            return false
         }
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
         let bound = withUnsafePointer(to: &addr) {
@@ -129,20 +158,23 @@ final class AppControlServer {
         }
         guard bound == 0, listen(fd, 16) == 0 else {
             close(fd)
-            return
+            return false
         }
         chmod(path, 0o600)
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         listenFD = fd
 
         // Stable discovery path for external apps.
-        unlink(AppControlServer.currentLink)
-        symlink(path, AppControlServer.currentLink)
+        if publishesCurrentLink {
+            unlink(AppControlServer.currentLink)
+            symlink(path, AppControlServer.currentLink)
+        }
 
         let thread = Thread { [weak self] in self?.acceptLoop() }
         thread.name = "infinitty-app-control"
         thread.qualityOfService = .utility
         thread.start()
+        return true
     }
 
     func stop() {
@@ -151,7 +183,8 @@ final class AppControlServer {
         // Only remove the shared discovery symlink if it still points at us.
         // A newer instance may have repointed it to its own socket during our
         // lifetime; clobbering that would break the live instance's discovery.
-        if AppControlServer.readlinkString(AppControlServer.currentLink) == path {
+        if publishesCurrentLink,
+           AppControlServer.readlinkString(AppControlServer.currentLink) == path {
             unlink(AppControlServer.currentLink)
         }
         subscriberLock.lock()
@@ -168,10 +201,15 @@ final class AppControlServer {
     /// subscribe handler never double-closes a pruned (and possibly reused)
     /// descriptor.
     func broadcast(_ object: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
-        let line = Array(data) + [0x0A]
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        broadcastQueue.async { [weak self] in
             guard let self else { return }
+            var sequenced = object
+            sequenced["instanceSeq"] = self.nextBroadcastSequence
+            guard let data = try? JSONSerialization.data(withJSONObject: sequenced) else {
+                return
+            }
+            self.nextBroadcastSequence &+= 1
+            let line = Array(data) + [0x0A]
             self.subscriberLock.lock()
             let targets = self.subscribers
             self.subscriberLock.unlock()

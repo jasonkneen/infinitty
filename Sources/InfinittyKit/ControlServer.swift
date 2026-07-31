@@ -40,10 +40,11 @@ final class ControlServer {
         self.path = "/tmp/infinitty-\(getpid())-\(id).sock"
     }
 
-    func start() {
+    @discardableResult
+    func start() -> Bool {
         unlink(path)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else { return false }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -59,7 +60,7 @@ final class ControlServer {
         }
         guard ok else {
             close(fd)
-            return
+            return false
         }
 
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
@@ -68,7 +69,7 @@ final class ControlServer {
         }
         guard bound == 0, listen(fd, 16) == 0 else {
             close(fd)
-            return
+            return false
         }
         chmod(path, 0o600)
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
@@ -78,10 +79,14 @@ final class ControlServer {
         thread.name = "infinitty-control"
         thread.qualityOfService = .utility
         thread.start()
+        return true
     }
 
     func stop() {
-        if listenFD >= 0 { close(listenFD) }
+        if listenFD >= 0 {
+            close(listenFD)
+            listenFD = -1
+        }
         unlink(path)
     }
 

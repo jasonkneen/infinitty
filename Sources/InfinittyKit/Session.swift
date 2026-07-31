@@ -182,7 +182,7 @@ final class TerminalSession: NSObject {
 
     /// Ask the shell to exit; the EOF path fires onExited for teardown.
     func terminate() {
-        if pty.pid > 0 { kill(pty.pid, SIGHUP) }
+        pty.terminateProcessGroup()
     }
 
     /// The pane's live working directory: the foreground process's cwd (the
@@ -207,6 +207,6 @@ final class TerminalSession: NSObject {
         control.stop()
         terminal.setHintProvider(nil)
         renderer.shutdown()
-        if pty.pid > 0 { kill(pty.pid, SIGHUP) }
+        pty.terminateProcessGroup()
     }
 }

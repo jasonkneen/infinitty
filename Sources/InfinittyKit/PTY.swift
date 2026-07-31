@@ -114,5 +114,15 @@ final class PTY {
         guard targetFD >= 0 else { return }
         _ = cpty_set_winsize(targetFD, UInt16(rows), UInt16(cols), UInt16(pixelWidth), UInt16(pixelHeight))
     }
-}
 
+    /// `forkpty` makes the child a session/process-group leader. Signal the
+    /// whole terminal job so a foreground descendant cannot outlive the shell
+    /// and keep the PTY read loop or headless host alive.
+    func terminateProcessGroup(signal signalNumber: Int32 = SIGHUP) {
+        let child = pid
+        guard child > 0 else { return }
+        if kill(-child, signalNumber) != 0 {
+            _ = kill(child, signalNumber)
+        }
+    }
+}

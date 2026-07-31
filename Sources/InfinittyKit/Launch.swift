@@ -49,8 +49,13 @@ public enum AppSocketClient {
     /// reading at the first newline so a shell forked by an older server
     /// holding a leaked copy of the connection can't stall us waiting for
     /// EOF.
-    public static func request(_ line: String) -> String? {
-        let path = ProcessInfo.processInfo.environment["INFINITTY_APP_SOCKET"]
+    public static func request(
+        _ line: String,
+        socketPath explicitSocketPath: String? = nil,
+        timeoutSeconds: Int32 = 3
+    ) -> String? {
+        let path = explicitSocketPath
+            ?? ProcessInfo.processInfo.environment["INFINITTY_APP_SOCKET"]
             ?? AppControlServer.currentLink
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -70,7 +75,7 @@ public enum AppSocketClient {
         }
         guard ok else { return nil }
 
-        var tv = timeval(tv_sec: 3, tv_usec: 0)
+        var tv = timeval(tv_sec: time_t(max(timeoutSeconds, 1)), tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)

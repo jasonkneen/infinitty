@@ -12,9 +12,48 @@ signal(SIGPIPE, SIG_IGN)
 
 // MARK: - socket bridge
 
+private func registeredInstanceObjects() -> [[String: Any]] {
+    let support = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask).first
+        ?? FileManager.default.temporaryDirectory
+    let directory = support
+        .appendingPathComponent("Infinitty/instances", isDirectory: true)
+    guard let files = try? FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles])
+    else { return [] }
+    return files
+        .filter { $0.pathExtension == "json" }
+        .compactMap { url -> [String: Any]? in
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+                  let object = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                  let pid = object["pid"] as? Int,
+                  let socket = object["socketPath"] as? String,
+                  pid > 0,
+                  kill(pid_t(pid), 0) == 0 || errno == EPERM,
+                  FileManager.default.fileExists(atPath: socket)
+            else { return nil }
+            return object
+        }
+        .sorted {
+            ($0["startedAt"] as? Double ?? 0) < ($1["startedAt"] as? Double ?? 0)
+        }
+}
+
 var appSocketPath: String {
-    ProcessInfo.processInfo.environment["INFINITTY_APP_SOCKET"]
-        ?? "/tmp/infinitty-current.sock"
+    let environment = ProcessInfo.processInfo.environment
+    if let explicit = environment["INFINITTY_APP_SOCKET"], !explicit.isEmpty {
+        return explicit
+    }
+    if let requestedID = environment["INFINITTY_INSTANCE_ID"], !requestedID.isEmpty {
+        return registeredInstanceObjects().first {
+            $0["id"] as? String == requestedID
+        }?["socketPath"] as? String
+            ?? "/tmp/infinitty-requested-instance-unavailable.sock"
+    }
+    return "/tmp/infinitty-current.sock"
 }
 
 /// Connect to the app control socket. Returns -1 on failure.
@@ -235,6 +274,29 @@ func browserCall(
     return infinittyRequest("browser \(encoded)", timeout: timeout)
 }
 
+private let maximumChannelRequestBytes = 48_000
+
+func channelCall(
+    _ operation: String,
+    arguments: [String: Any] = [:]
+) -> String {
+    var payload = arguments
+    payload["v"] = 1
+    payload["op"] = operation
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload) else {
+        return "error: could not encode Channel request"
+    }
+    guard data.count <= maximumChannelRequestBytes else {
+        return "error: Channel request exceeds \(maximumChannelRequestBytes) bytes"
+    }
+    let encoded = data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return infinittyRequest("channel \(encoded)")
+}
+
 // MARK: - tool definitions
 
 struct Tool {
@@ -268,12 +330,122 @@ let browserSnapshotProperty = browserIDProperty.merging([
     ],
 ] as [String: Any]) { a, _ in a }
 
+let channelActorSchema: [String: Any] = [
+    "type": "object",
+    "description": "Explicit actor responsible for this mutation.",
+    "properties": [
+        "id": ["type": "string"],
+        "kind": ["type": "string", "enum": ["human", "agent", "system"]],
+        "displayName": ["type": "string"],
+    ],
+    "required": ["id", "kind", "displayName"],
+]
+
+let channelEndpointSchema: [String: Any] = [
+    "type": "object",
+    "description": "Endpoint object returned in infinitty_list_panes.channelEndpoint.",
+    "properties": [
+        "id": ["type": "string"],
+        "kind": ["type": "string"],
+        "label": ["type": "string"],
+        "participantID": ["type": "string"],
+        "instanceID": ["type": "string"],
+    ],
+    "required": ["id", "kind", "label"],
+]
+
 let tools: [Tool] = [
     Tool(
+        name: "infinitty_instances",
+        description: "List every live infinitty app instance with its stable process-lifetime "
+            + "instance id and direct socket. Set INFINITTY_INSTANCE_ID when launching this "
+            + "MCP server to address one explicitly.",
+        schema: ["type": "object", "properties": [:]],
+        invoke: { _ in
+            let instances = registeredInstanceObjects()
+            let data = (try? JSONSerialization.data(withJSONObject: instances))
+                ?? Data("[]".utf8)
+            return String(decoding: data, as: UTF8.self)
+        }
+    ),
+    Tool(
         name: "infinitty_list_panes",
-        description: "List infinitty panes (terminals) with id, title, focus state, and size.",
+        description: "List every live infinitty pane, including terminals and named Chat "
+            + "participants, with focus state and the endpoint object used to link a "
+            + "collaboration Channel.",
         schema: ["type": "object", "properties": [:]],
         invoke: { _ in infinittyRequest("list") }
+    ),
+    Tool(
+        name: "infinitty_channels",
+        description: "Read the authoritative snapshot of Channels, connected endpoints, "
+            + "participants and roles, responsibility claims, plans, and recent messages.",
+        schema: ["type": "object", "properties": [:]],
+        invoke: { _ in channelCall("snapshot") }
+    ),
+    Tool(
+        name: "infinitty_channel_link",
+        description: "Link two pane endpoints. It creates a Channel when neither endpoint "
+            + "is linked, or extends the existing Channel. Merging two Channels is rejected "
+            + "until explicit merge consent is implemented.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "source": channelEndpointSchema,
+                "target": channelEndpointSchema,
+                "channelID": ["type": "string"],
+                "actor": channelActorSchema,
+                "idempotencyKey": ["type": "string"],
+                "expectedRevision": ["type": "integer"],
+                "causationID": ["type": "string"],
+            ],
+            "required": ["source", "target", "actor", "idempotencyKey"],
+        ],
+        invoke: { args in channelCall("link", arguments: args) }
+    ),
+    Tool(
+        name: "infinitty_channel_apply",
+        description: "Apply one typed Channel mutation: create, link_and_join, join, leave, "
+            + "update_membership, claim, release, replace_plan, or post_message. "
+            + "Supply the corresponding typed payload plus "
+            + "an explicit actor and idempotency key. Returns the committed room snapshot.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "op": [
+                    "type": "string",
+                    "enum": [
+                        "create", "link_and_join", "join", "leave",
+                        "update_membership",
+                        "claim", "release",
+                        "replace_plan", "post_message",
+                    ],
+                ] as [String: Any],
+                "actor": channelActorSchema,
+                "idempotencyKey": ["type": "string"],
+                "expectedRevision": ["type": "integer"],
+                "causationID": ["type": "string"],
+                "channelID": ["type": "string"],
+                "endpointID": ["type": "string"],
+                "endpoint": channelEndpointSchema,
+                "source": channelEndpointSchema,
+                "target": channelEndpointSchema,
+                "name": ["type": "string"],
+                "colorHex": ["type": "string"],
+                "participant": ["type": "object"],
+                "participants": ["type": "array", "items": ["type": "object"]],
+                "claim": ["type": "object"],
+                "claimID": ["type": "string"],
+                "plan": ["type": "array", "items": ["type": "object"]],
+                "message": ["type": "object"],
+            ],
+            "required": ["op", "actor", "idempotencyKey"],
+        ],
+        invoke: { args in
+            var payload = args
+            let operation = payload.removeValue(forKey: "op") as? String ?? ""
+            return channelCall(operation, arguments: payload)
+        }
     ),
     Tool(
         name: "infinitty_toggle_quick_terminal",
