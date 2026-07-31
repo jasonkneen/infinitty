@@ -975,6 +975,21 @@ final class TerminalChromeView: NSView {
             x: PaneMetrics.horizontalCanvasInset, y: 0,
             width: max(body.bounds.width - PaneMetrics.horizontalCanvasInset * 2, 0),
             height: body.bounds.height)
-        for sub in body.subviews { sub.frame = contentBounds }
+        let layoutRoots = body.subviews.filter { PaneLayoutController.snapshot(of: $0) != nil }
+        guard layoutRoots.count <= 1 else {
+            PaneLog.log(
+                "ERROR chrome layout has \(layoutRoots.count) roots "
+                    + "tree=\(PaneLog.describe(body))")
+            return
+        }
+        if let root = layoutRoots.first {
+            // The host owns one complete tree. NSSplitView remains responsible
+            // for its descendants, including user-selected divider ratios.
+            PaneLayoutController.prepareFrameManaged(root, filling: contentBounds)
+            if let split = root as? NSSplitView,
+               contentBounds.height > 1, contentBounds.width > 1 {
+                split.adjustSubviews()
+            }
+        }
     }
 }

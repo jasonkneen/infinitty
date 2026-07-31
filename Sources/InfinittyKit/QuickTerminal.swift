@@ -526,7 +526,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         let page: QuickTerminalTabPageView
         var automaticTitle: String
         var customTitle: String?
-        weak var lastFocusedView: TerminalView?
+        weak var lastFocusedView: NSView?
 
         init(page: QuickTerminalTabPageView, automaticTitle: String) {
             self.page = page
@@ -550,6 +550,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private var transition: UInt64 = 0
     private(set) var visible = false
     var onTabsChanged: (() -> Void)?
+    /// App-level teardown for a complete quick page, including smart panes
+    /// whose lifetime is intentionally independent of terminal sessions.
+    var onCloseTabRequested: ((_ rootView: NSView, _ sessions: [TerminalSession]) -> Void)?
 
     init(
         config: AppConfig,
@@ -583,7 +586,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     var hasLiveSession: Bool {
-        tabs.contains { !sessionsInPage($0.page).isEmpty }
+        // A quick tab can intentionally outlive its final terminal when it
+        // still owns Files, Chat, Browser, or another smart pane.
+        !tabs.isEmpty
     }
 
     var tabCount: Int { tabs.count }
@@ -599,6 +604,40 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     func sessions(inTabContaining session: TerminalSession) -> [TerminalSession] {
         guard let tab = tab(containing: session) else { return [] }
         return sessionsInPage(tab.page)
+    }
+
+    func rootView(inTabContaining session: TerminalSession) -> NSView? {
+        tab(containing: session)?.page
+    }
+
+    func rootView(containing view: NSView) -> NSView? {
+        tabs.first { contains(view, in: $0.page) }?.page
+    }
+
+    /// The page is the stable tab identity, but a frosted quick-terminal page
+    /// owns its pane tree inside an NSVisualEffectView. Return the plain host
+    /// that directly owns the layout branch so structural preflight does not
+    /// mistake that visual wrapper for an invalid pane node.
+    func paneLayoutHost(containing view: NSView) -> NSView? {
+        guard let page = rootView(containing: view) else { return nil }
+        let topBranch: NSView
+        if view === page {
+            guard let child = page.subviews.first else { return page }
+            topBranch = child
+        } else {
+            var branch = view
+            while let parent = branch.superview, parent !== page {
+                branch = parent
+            }
+            guard branch.superview === page else { return nil }
+            topBranch = branch
+        }
+        if topBranch is TerminalView
+            || topBranch is UtilityPaneView
+            || topBranch is NSSplitView {
+            return page
+        }
+        return topBranch
     }
 
     func baseTitle(for id: QuickTerminalTabID) -> String? {
@@ -748,6 +787,23 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         guard let index = tabs.firstIndex(where: { contains(session.view, in: $0.page) }) else {
             return false
         }
+        return removeTab(at: index)
+    }
+
+    /// Removes a tab by its stable page identity. This remains usable after
+    /// the tab's final terminal leaf has already been detached from the page.
+    @discardableResult
+    func removeTab(rootView: NSView) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.page === rootView }) else {
+            return false
+        }
+        _ = removeTab(at: index)
+        return true
+    }
+
+    /// Returns true when removing the tab also reset the final quick panel.
+    @discardableResult
+    private func removeTab(at index: Int) -> Bool {
         let removed = tabs.remove(at: index)
         tabsView?.remove(removed.page)
         if tabs.isEmpty {
@@ -765,7 +821,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     func show() {
-        guard !visible, let (window, session) = ensureWindow(),
+        guard !visible, let (window, fallbackSession) = ensureWindow(),
               let screen = config.quickTerminalScreen.screen else { return }
         visible = true
         transition &+= 1
@@ -789,15 +845,21 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().setFrame(finalFrame, display: true)
             window.animator().alphaValue = 1
-        } completionHandler: { [weak self, weak window, weak session] in
+        } completionHandler: { [weak self, weak window, weak fallbackSession] in
             DispatchQueue.main.async {
-                guard let self, let window, let session,
+                guard let self, let window,
                       self.visible, self.transition == currentTransition else { return }
                 window.level = .floating
                 NSApp.activate(ignoringOtherApps: true)
                 window.makeKeyAndOrderFront(nil)
-                let responder = window.firstResponder as? TerminalView ?? session.view
-                window.makeFirstResponder(responder)
+                self.restoreActiveResponder()
+                guard let activeRoot = self.activeRootView else { return }
+                if let responder = window.firstResponder as? NSView,
+                   responder === activeRoot || responder.isDescendant(of: activeRoot) {
+                    window.makeFirstResponder(responder)
+                } else if let fallbackSession {
+                    window.makeFirstResponder(fallbackSession.view)
+                }
             }
         }
     }
@@ -882,10 +944,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             display: true)
     }
 
-    func ensureWindow() -> (NSWindow, TerminalSession)? {
+    func ensureWindow() -> (NSWindow, TerminalSession?)? {
         if let window {
-            guard let session = activeSessions.first else { return nil }
-            return (window, session)
+            return (window, activeSessions.first)
         }
         guard let (window, session) = makeWindow() else { return nil }
         guard let initialContent = window.contentView else { return nil }
@@ -937,7 +998,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private func selectTab(at index: Int) -> Bool {
         guard tabs.indices.contains(index), let window else { return false }
         if tabs.indices.contains(selectedIndex),
-           let focused = window.firstResponder as? TerminalView,
+           let focused = window.firstResponder as? NSView,
            contains(focused, in: tabs[selectedIndex].page) {
             tabs[selectedIndex].lastFocusedView = focused
         }
@@ -963,11 +1024,23 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
 
     private func closeTab(at index: Int) {
         guard tabs.indices.contains(index) else { return }
-        let sessions = sessionsInPage(tabs[index].page)
-        let terminate = { sessions.forEach { $0.terminate() } }
+        let page = tabs[index].page
+        let sessions = sessionsInPage(page)
+        let close = { [weak self, weak page] in
+            guard let self, let page else { return }
+            if let onCloseTabRequested = self.onCloseTabRequested {
+                onCloseTabRequested(page, sessions)
+            } else if sessions.isEmpty {
+                // Standalone/test controllers have no external smart-pane
+                // registry to tear down.
+                _ = self.removeTab(rootView: page)
+            } else {
+                sessions.forEach { $0.terminate() }
+            }
+        }
         let running = ForegroundProcessTracker.runningProcesses(in: sessions)
         guard !running.isEmpty else {
-            terminate()
+            close()
             return
         }
         let alert = ForegroundProcessTracker.closeConfirmationAlert(
@@ -976,11 +1049,20 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             // Sheet, not modal, so quick-terminal autohide-on-focus-loss
             // doesn't fire while the user decides.
             alert.beginSheetModal(for: window) { response in
-                if response == .alertSecondButtonReturn { terminate() }
+                if response == .alertSecondButtonReturn { close() }
             }
         } else if alert.runModal() == .alertSecondButtonReturn {
-            terminate()
+            close()
         }
+    }
+
+    @discardableResult
+    func requestCloseTab(rootView: NSView) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.page === rootView }) else {
+            return false
+        }
+        closeTab(at: index)
+        return true
     }
 
     private func renderTabStrip() {

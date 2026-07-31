@@ -86,7 +86,7 @@ enum Pet {
             }
             // SwiftPM flattens processed resources into its module bundle.
             if nameOrPath.caseInsensitiveCompare("infinitty") == .orderedSame,
-               let bundled = Bundle.module.url(
+               let bundled = Bundle.infinittyResources?.url(
                    forResource: "spritesheet",
                    withExtension: "webp"
                ) {

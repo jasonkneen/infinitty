@@ -17,21 +17,33 @@ public enum InfinittyAIProvider: String, CaseIterable, Equatable {
     case codex
     /// Anthropic Claude Code CLI binary (`claude` on PATH).
     case claude
+    /// OpenCode CLI binary (`opencode` on PATH), driven over ACP.
+    case opencode
+    /// Hermes Agent CLI binary (`hermes` on PATH), driven over ACP.
+    case hermes
+    /// Sourcegraph Amp CLI binary (`amp` on PATH).
+    case amp
 
     public var displayName: String {
         switch self {
-        case .apple:  return "Apple Intelligence"
-        case .codex:  return "Codex"
-        case .claude: return "Claude"
+        case .apple:    return "Apple Intelligence"
+        case .codex:    return "Codex"
+        case .claude:   return "Claude"
+        case .opencode: return "OpenCode"
+        case .hermes:   return "Hermes"
+        case .amp:      return "Amp"
         }
     }
 
     /// One-character chip label For a notch / provider chip UI.
     public var shortLabel: String {
         switch self {
-        case .apple:  return "A"
-        case .codex:  return "X"
-        case .claude: return "C"
+        case .apple:    return "A"
+        case .codex:    return "X"
+        case .claude:   return "C"
+        case .opencode: return "O"
+        case .hermes:   return "H"
+        case .amp:      return "M"
         }
     }
 
@@ -39,9 +51,38 @@ public enum InfinittyAIProvider: String, CaseIterable, Equatable {
     /// Models, no subprocess).
     public var binaryName: String {
         switch self {
-        case .apple:  return ""
-        case .codex:  return "codex"
-        case .claude: return "claude"
+        case .apple:    return ""
+        case .codex:    return "codex"
+        case .claude:   return "claude"
+        case .opencode: return "opencode"
+        case .hermes:   return "hermes"
+        case .amp:      return "amp"
+        }
+    }
+
+    /// The CLI binary kind backing this provider, or nil for Apple
+    /// (in-process Foundation Models, no subprocess). Drives the generic
+    /// PATH probe in `ProviderDiscovery.cliAvailability`.
+    var cliKind: CLIExecutableKind? {
+        switch self {
+        case .apple:    return nil
+        case .codex:    return .codex
+        case .claude:   return .claude
+        case .opencode: return .opencode
+        case .hermes:   return .hermes
+        case .amp:      return .amp
+        }
+    }
+
+    /// One-line "not installed" hint shown in the availability detail.
+    var installHint: String {
+        switch self {
+        case .apple:    return "Apple Intelligence models require macOS 26 or later."
+        case .codex:    return "Install the Codex CLI (developers.openai.com)."
+        case .claude:   return "Install Claude Code (npm i -g @anthropic-ai/claude-code)."
+        case .opencode: return "Install OpenCode (npm i -g opencode-ai) or set INFINITTY_OPENCODE_EXECUTABLE."
+        case .hermes:   return "Install Hermes, or set INFINITTY_HERMES_EXECUTABLE."
+        case .amp:      return "Install Amp (sourcegraph.com/amp) or set INFINITTY_AMP_EXECUTABLE."
         }
     }
 }
@@ -70,6 +111,9 @@ public enum ProviderDiscovery {
             appleAvailability(),
             codexAvailability(fileManager: fileManager, environment: environment),
             claudeAvailability(fileManager: fileManager, environment: environment),
+            cliAvailability(.opencode, fileManager: fileManager, environment: environment),
+            cliAvailability(.hermes, fileManager: fileManager, environment: environment),
+            cliAvailability(.amp, fileManager: fileManager, environment: environment),
         ]
     }
 
@@ -138,6 +182,31 @@ public enum ProviderDiscovery {
         )
     }
 
+    /// Generic PATH probe for a CLI-backed provider (opencode/hermes/amp).
+    /// Same shape as `codexAvailability`/`claudeAvailability` but reads the
+    /// binary + env override + install hint off the provider itself, so a
+    /// new CLI provider is one enum case instead of a new function.
+    public static func cliAvailability(
+        _ provider: InfinittyAIProvider,
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ProviderAvailability {
+        guard let kind = provider.cliKind else {
+            return appleAvailability()
+        }
+        let url = CLIExecutableResolver.resolve(
+            kind, fileManager: fileManager, environment: environment)
+        return ProviderAvailability(
+            provider: provider,
+            isAvailable: url != nil,
+            statusLabel: url == nil ? "Missing" : "Detected",
+            detail: url == nil
+                ? provider.installHint
+                : "\(provider.displayName) CLI at \(url!.path)",
+            executableURL: url
+        )
+    }
+
     /// Resolve the user-configured provider to a concrete pick, honoring
     /// `ai-provider` from the infinitty config (or its env override). When
     /// the value is "auto" / unset, prefer Claude → Codex → Apple so user's
@@ -170,6 +239,12 @@ public enum ProviderDiscovery {
             return probe.first { $0.provider == .codex }?.isAvailable == true ? .codex : nil
         case "claude", "anthropic":
             return probe.first { $0.provider == .claude }?.isAvailable == true ? .claude : nil
+        case "opencode", "openclaw", "oc":
+            return probe.first { $0.provider == .opencode }?.isAvailable == true ? .opencode : nil
+        case "hermes", "nous":
+            return probe.first { $0.provider == .hermes }?.isAvailable == true ? .hermes : nil
+        case "amp", "sourcegraph":
+            return probe.first { $0.provider == .amp }?.isAvailable == true ? .amp : nil
         default:
             return nil
         }

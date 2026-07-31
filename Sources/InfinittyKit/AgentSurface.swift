@@ -133,12 +133,8 @@ final class SurfacePaneController: NSObject, WKScriptMessageHandler {
     /// The self-contained json-render host page (built by
     /// surfaces/json-render-host/build.mjs, shipped in Resources/Surfaces).
     static let jsonRenderHostHTML: String? = {
-        let url = Bundle.main.url(
+        let url = Bundle.infinittyResourceURL(
             forResource: "json-render-host", withExtension: "html", subdirectory: "Surfaces")
-            ?? Bundle.main.url(forResource: "json-render-host", withExtension: "html")
-            ?? Bundle.module.url(
-                forResource: "json-render-host", withExtension: "html", subdirectory: "Surfaces")
-            ?? Bundle.module.url(forResource: "json-render-host", withExtension: "html")
         guard let url, let data = try? Data(contentsOf: url) else { return nil }
         return String(data: data, encoding: .utf8)
     }()

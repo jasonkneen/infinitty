@@ -98,12 +98,12 @@ private final class UtilityPanelRecord {
     let browser: BrowserPaneController?
     let surface: SurfacePaneController?
     let pane: UtilityPaneView
-    /// Stable pane-ledger identity. Files and Chat are per-window singletons
-    /// and keep their kind name; each Browser instance gets a unique
-    /// "browser-N" so structural records can tell instances apart.
+    /// Stable pane-ledger identity. Files stays a per-window singleton
+    /// (`files`); each Chat and Browser instance gets a unique
+    /// `chat-N` / `browser-N` so structural records can tell them apart.
     let ledgerID: String
-    /// Chat is a tab-level surface. Keep its assistant alive if the terminal
-    /// it started from exits while the Chat leaf remains visible.
+    /// Chat is a pane-level surface. Each Chat leaf owns its assistant; keep
+    /// it alive if the terminal it started from exits while the leaf remains.
     var assistant: PetAssistant?
 
     var kind: UtilityPanelKind { pane.kind }
@@ -246,7 +246,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var nextPaneLedgerTabID = 1
     private var configWatcher: DispatchSourceFileSystemObject?
     private var reloadPending = false
-    private var settings: SettingsWindowController?
+    private var settings: NSWindowController?
     private let notch = NotchActivityController()
     private let appControl = AppControlServer()
     private struct RunItem {
@@ -290,6 +290,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.refreshPets()
             self.refreshShortcutHints()
         }
+        controller.onCloseTabRequested = { [weak self] rootView, sessions in
+            self?.closeQuickTerminalTab(rootView: rootView, sessions: sessions)
+        }
         return controller
     }()
     /// Local mouse monitor that turns titlebar double-clicks into inline rename.
@@ -316,6 +319,33 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var launchCompleted = false
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        // QA hook: open Settings straight away so a screenshot pass can
+        // capture it without driving the menu.
+        if ProcessInfo.processInfo.environment["INFINITTY_OPEN_SETTINGS"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.openSettings(nil)
+            }
+        }
+        // QA hook: open the assistant and submit a prompt, so a screenshot
+        // pass can verify a real turn end to end without driving the UI.
+        // The sidebar is preferred over the popover: it stays open long enough
+        // to be looked at, and it is where the panel is actually used.
+        if let prompt = ProcessInfo.processInfo.environment["INFINITTY_ASSISTANT_PROMPT"],
+           !prompt.isEmpty {
+            let useSidebar =
+                ProcessInfo.processInfo.environment["INFINITTY_ASSISTANT_SIDEBAR"] == "1"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self, let session = self.sessions.first else { return }
+                if useSidebar, let win = session.view.window {
+                    self.openUtilityPanel(.chat, in: win)
+                } else {
+                    self.presentPetAssistant(for: session)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    self.petAssistant(for: session).submitForQA(prompt)
+                }
+            }
+        }
         signal(SIGPIPE, SIG_IGN)
         paneLifecycleLedger.start()
         appControl.handler = { [weak self] request in
@@ -418,11 +448,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func openSettings(_ sender: Any?) {
         if settings == nil {
-            settings = SettingsWindowController(config: config) { [weak self] newConfig in
+            let apply: (AppConfig) -> Void = { [weak self] newConfig in
                 guard let self else { return }
                 try? newConfig.saveAll() // writes infinitty.conf + settings.conf
                 self.reloadConfig() // instant apply; also re-arms the watcher
             }
+            // The ShadKit settings are opt-in until they have been looked
+            // at in the real window; both take the same config and callback.
+            settings = ShadcnChatFeature.usesShadcnSettings
+                ? ShadcnSettingsWindowController(config: config, onSave: apply)
+                : SettingsWindowController(config: config, onSave: apply)
         }
         settings?.showWindow(nil)
         settings?.window?.makeKeyAndOrderFront(nil)
@@ -522,7 +557,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.updatePaneSelection(in: win, focused: s.view)
             self.quickTerminal.setFocusedSession(s)
             self.updateTitle(for: win)
-            self.rebindUtilityPanels(to: s, in: win)
+            self.refreshUtilityPanels(for: s, in: win)
         }
         s.view.onPetClick = { [weak self, weak s] in
             guard let self, let s else { return }
@@ -727,6 +762,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func activeSessions(in win: NSWindow) -> [TerminalSession] {
         if win === quickTerminal.window { return quickTerminal.activeSessions }
         return sessions.filter { $0.view.window === win }
+    }
+
+    private func sessions(in win: NSWindow, rootedAt root: NSView?) -> [TerminalSession] {
+        guard let root else { return activeSessions(in: win) }
+        return sessions.filter {
+            $0.view === root || $0.view.isDescendant(of: root)
+        }
+    }
+
+    /// Resolve the terminal context owned by a pane. Chat must follow its
+    /// attached assistant even when another terminal happens to be focused.
+    private func sourceSession(relativeTo sourceView: NSView, in win: NSWindow) -> TerminalSession? {
+        let root = terminalRoot(of: win, containing: sourceView)
+        let candidates = sessions(in: win, rootedAt: root)
+        if let record = utilityRecord(forPane: sourceView),
+           record.kind == .chat,
+           let assistant = record.assistant,
+           let attached = candidates.first(where: { assistant.isAttached(to: $0) }) {
+            return attached
+        }
+        if let terminal = sourceView as? TerminalView,
+           let exact = candidates.first(where: { $0.view === terminal }) {
+            return exact
+        }
+        if let focused = focusedSession(in: win),
+           candidates.contains(where: { $0 === focused }) {
+            return focused
+        }
+        return candidates.first
     }
 
     // MARK: - pane lifecycle ledger
@@ -941,7 +1005,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return views.compactMap { view in sessions.first { $0.view === view } }
     }
 
-    private func paneLeafViews(in win: NSWindow) -> [NSView] {
+    private func paneLeafViews(
+        in win: NSWindow,
+        rootedAt explicitRoot: NSView? = nil
+    ) -> [NSView] {
         var result: [NSView] = []
         func collect(_ view: NSView) {
             if view is TerminalView || view is UtilityPaneView {
@@ -954,38 +1021,59 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 view.subviews.forEach(collect)
             }
         }
-        if let root = terminalRoot(of: win) { collect(root) }
+        if let root = explicitRoot ?? terminalRoot(of: win) { collect(root) }
         return result
     }
 
-    /// A surviving Chat owns its conversation at the main-tab level. If its
-    /// source terminal exits, preserve the assistant through the close; a
-    /// remaining or newly-created terminal rebinds it below.
+    /// A surviving Chat pane owns its conversation. If its source terminal
+    /// exits, preserve any assistant still mounted on a Chat leaf; a remaining
+    /// or newly-created terminal rebinds below.
     private func retainChatAssistantAfterTerminalExit(
-        _ assistant: PetAssistant?, in win: NSWindow
+        _ assistant: PetAssistant?, in win: NSWindow, rootedAt root: NSView? = nil
     ) {
         guard let assistant else { return }
-        guard let chat = utilityRecord(.chat, in: win),
-              chat.assistant === assistant
-        else {
-            assistant.detach()
-            return
+        let stillMounted = utilityRecords(in: win, rootedAt: root).contains {
+            $0.kind == .chat && $0.assistant === assistant
         }
-        assistant.detach()
+        // A mounted Chat still needs the old identity long enough for
+        // migrateUtilityPanels to recognize and rebind it. An unowned pet
+        // assistant has reached its final owner and must release every keyed
+        // backend conversation rather than merely dropping its terminal.
+        if !stillMounted { assistant.invalidate() }
     }
 
-    /// Utility panes follow the terminal that remains in their native tab.
-    /// This keeps file tracking current and reconnects the retained Chat
-    /// assistant after a sibling terminal closes.
-    private func rebindUtilityPanels(to session: TerminalSession, in win: NSWindow) {
-        let panels = utilityRecords(in: win)
-        guard !panels.isEmpty else { return }
-        for record in panels { record.controller?.track(session: session) }
-        guard let chat = panels.last(where: { $0.kind == .chat }) else { return }
-        let assistant = chat.assistant ?? petAssistant(for: session)
-        rehomeAssistant(assistant, to: session)
-        chat.assistant = assistant
-        chat.controller?.attachAssistant(assistant)
+    /// Terminal focus updates Files, but a Chat pane keeps the terminal it was
+    /// created against. Merely clicking another terminal must not silently
+    /// change that conversation's cwd, history, or tool target.
+    private func refreshUtilityPanels(
+        for session: TerminalSession, in win: NSWindow, rootedAt root: NSView? = nil
+    ) {
+        let owningRoot = root ?? terminalRoot(of: win, containing: session.view)
+        for record in utilityRecords(in: win, rootedAt: owningRoot) where record.kind != .chat {
+            record.controller?.track(session: session)
+        }
+    }
+
+    /// Only chats actually attached to an exiting terminal migrate to its
+    /// replacement. Chats bound to other sibling terminals remain untouched.
+    private func migrateUtilityPanels(
+        from previous: TerminalSession, to replacement: TerminalSession?,
+        in win: NSWindow, rootedAt root: NSView? = nil
+    ) {
+        if let replacement {
+            refreshUtilityPanels(for: replacement, in: win, rootedAt: root)
+        }
+        for record in utilityRecords(in: win, rootedAt: root) where record.kind == .chat {
+            guard let assistant = record.assistant,
+                  assistant.isAttached(to: previous) else { continue }
+            if let replacement {
+                bindAssistant(assistant, to: replacement)
+                record.controller?.track(session: replacement)
+            } else {
+                assistant.detach()
+            }
+            record.controller?.attachAssistant(assistant)
+        }
     }
 
     private func focusedPaneLeaf(in win: NSWindow) -> NSView? {
@@ -997,8 +1085,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    private func updatePaneSelection(in win: NSWindow, focused: NSView?) {
-        for pane in paneLeafViews(in: win) {
+    private func updatePaneSelection(
+        in win: NSWindow, focused: NSView?, rootedAt root: NSView? = nil
+    ) {
+        for pane in paneLeafViews(in: win, rootedAt: root) {
             let selected = pane === focused
             (pane as? TerminalView)?.setPaneSelected(selected)
             (pane as? UtilityPaneView)?.setPaneSelected(selected)
@@ -1378,42 +1468,91 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         session.renderer.setPet(texture: nil, sizePoints: 0)
     }
 
+    /// Close one complete Quick Terminal page after its foreground-process
+    /// confirmation. Terminal EOF owns terminal teardown; utility panes use
+    /// their normal close path so controllers, browsers, surfaces, assistants,
+    /// and backend conversations are all released exactly once.
+    private func closeQuickTerminalTab(
+        rootView: NSView, sessions requestedSessions: [TerminalSession]
+    ) {
+        guard let win = quickTerminal.window,
+              quickTerminal.rootView(containing: rootView) === rootView else { return }
+        let records = utilityRecords(in: win, rootedAt: rootView)
+        let liveSessions = requestedSessions.filter { requested in
+            sessions.contains { $0 === requested }
+                && (requested.view === rootView
+                    || requested.view.isDescendant(of: rootView))
+        }
+        let probe = records.first?.pane ?? liveSessions.first?.view
+        if let probe,
+           let layoutRoot = quickTerminal.paneLayoutHost(containing: probe),
+           !PaneLayoutController.rootInvariantHolds(in: layoutRoot) {
+            PaneLog.log(
+                "ERROR quick tab close rejected invalid-root "
+                    + "tree=\(PaneLog.describe(layoutRoot))")
+            recordPaneLedgerFailure(
+                in: win, reason: "quick-tab-close-invalid-root",
+                origin: "quick-tab-strip")
+            return
+        }
+
+        for record in records {
+            guard closeUtilityPanel(record, in: win) else { return }
+        }
+        for session in liveSessions { session.terminate() }
+        if liveSessions.isEmpty {
+            // The final utility close normally removes the page. This also
+            // handles an already-empty page without inventing a dummy shell.
+            _ = quickTerminal.removeTab(rootView: rootView)
+        }
+    }
+
     private func sessionDidExit(_ s: TerminalSession) {
+        // EOF can race a test/manual teardown. Claim the callback first and
+        // make every later delivery for this session a no-op.
+        s.onExited = nil
+        guard sessions.contains(where: { $0 === s }) else { return }
+
         restorePaneZoom(containing: s, refocus: false)
         let wasQuickTerminal = quickTerminal.contains(s)
-        let quickTabWasActive = wasQuickTerminal
-            && quickTerminal.activeSessions.contains { $0 === s }
+        let quickRoot = wasQuickTerminal
+            ? quickTerminal.rootView(inTabContaining: s)
+            : nil
+        let quickTabWasActive = quickRoot != nil
+            && quickTerminal.activeRootView === quickRoot
         let quickTabSessions = wasQuickTerminal
             ? quickTerminal.sessions(inTabContaining: s)
             : []
         let win = s.view.window
+        let preservedQuickResponder: NSResponder? =
+            wasQuickTerminal && !quickTabWasActive ? win?.firstResponder : nil
+        let v = s.view
+        let lifecycleRoot = win.flatMap {
+            paneLayoutHost(of: $0, containing: v)
+        }
+        let tabRoot = quickRoot ?? lifecycleRoot
+        // Pull the leaf out of the split tree *before* tearing the PTY/renderer
+        // down so a dying Metal layer cannot blank the whole chrome surface.
+        if let win {
+            if let root = lifecycleRoot {
+                removeExitedTerminalLeaf(v, from: root, in: win)
+            } else if v.superview != nil {
+                v.removeFromSuperview()
+            }
+        }
+
         s.shutdown()
         pendingLaunchCommands.removeValue(forKey: s.id)
         sessions.removeAll { $0 === s }
         let exitingAssistant = petAssistants.removeValue(forKey: s.id)
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runQueues.removeValue(forKey: s.id)?.forEach { $0.completion(-1) }
-        let v = s.view
+
         guard let win else {
-            exitingAssistant?.detach()
+            exitingAssistant?.invalidate()
             recordPaneLedgerTerminalRemoved(
                 s, in: nil, reason: "terminal-exit", origin: "pty-eof")
             return
-        }
-
-        if wasQuickTerminal, quickTabSessions.count == 1 {
-            exitingAssistant?.detach()
-            _ = quickTerminal.removeTab(containing: s)
-            refreshPets()
-            refreshShortcutHints()
-            return
-        }
-
-        if let split = v.superview as? NSSplitView {
-            v.removeFromSuperview()
-            collapse(split, in: win)
-        } else {
-            v.removeFromSuperview()
         }
 
         if !wasQuickTerminal {
@@ -1423,26 +1562,52 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         let next: TerminalSession?
         if wasQuickTerminal {
-            next = quickTabWasActive ? quickTabSessions.first { $0 !== s } : nil
+            next = quickTabSessions.first { $0 !== s }
         } else {
             next = activeSessions(in: win).first
         }
-        retainChatAssistantAfterTerminalExit(exitingAssistant, in: win)
-        if let next {
-            rebindUtilityPanels(to: next, in: win)
+        let scopedRoot = wasQuickTerminal ? quickRoot : nil
+        retainChatAssistantAfterTerminalExit(
+            exitingAssistant, in: win, rootedAt: scopedRoot)
+        migrateUtilityPanels(
+            from: s, to: next, in: win, rootedAt: scopedRoot)
+        if let next, !wasQuickTerminal || quickTabWasActive {
             win.makeFirstResponder(next.view)
-        } else {
-            if let remainingPane = paneLeafViews(in: win).first {
+        } else if next == nil, !wasQuickTerminal || quickTabWasActive {
+            // Last terminal in this tab — Chat/Files/Browser must keep the tab.
+            if let remainingPane = paneLeafViews(
+                in: win, rootedAt: tabRoot
+            ).first {
                 win.makeFirstResponder(remainingPane)
-                updatePaneSelection(in: win, focused: remainingPane)
+                updatePaneSelection(
+                    in: win, focused: remainingPane, rootedAt: tabRoot)
             }
+        }
+        stabilizePaneTree(
+            in: win, root: lifecycleRoot, reason: "terminal-exit")
+        if let preservedQuickResponder {
+            win.makeFirstResponder(preservedQuickResponder)
         }
 
         // A terminal is not the lifetime owner of a tab. Keep any Files,
         // Chat, Browser, or future smart pane alive; only the final pane leaf
         // closes this native main tab.
+        //
+        let remaining = remainingTabLeafCount(in: win, rootedAt: tabRoot)
+        if wasQuickTerminal,
+           PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: remaining) {
+            if let quickRoot {
+                _ = quickTerminal.removeTab(rootView: quickRoot)
+            }
+            refreshPets()
+            refreshShortcutHints()
+            return
+        }
         if !wasQuickTerminal,
-           PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: paneLeafViews(in: win).count) {
+           PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: remaining) {
+            PaneLog.log(
+                "session-exit closing-tab leaves=\(remaining) "
+                    + "tree=\(lifecycleRoot.map(PaneLog.describe) ?? "nil")")
             win.close()
             return
         }
@@ -1450,12 +1615,99 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         updateTitle(for: win)
         refreshPets()
         refreshShortcutHints()
+        PaneLog.log(
+            "session-exit remaining=\(remaining) "
+                + "visible=\(paneLeafViews(in: win, rootedAt: lifecycleRoot).count) "
+                + "utilities=\(utilityRecords(in: win, rootedAt: scopedRoot).count) "
+                + "tree=\(lifecycleRoot.map(PaneLog.describe) ?? "nil")")
+    }
+
+    /// EOF cannot leave a dead terminal view mounted. The normal controller
+    /// path preserves split ratios; if a legacy wrapper makes that path reject
+    /// the leaf, detach only the dead branch, prune now-empty wrappers, and
+    /// normalize the surviving pane tree.
+    private func removeExitedTerminalLeaf(
+        _ leaf: TerminalView, from root: NSView, in win: NSWindow
+    ) {
+        guard !PaneLayoutController.removeLeaf(leaf, from: root) else { return }
+        PaneLog.log(
+            "ERROR terminal removal failed pane=\(ObjectIdentifier(leaf)) "
+                + "tree=\(PaneLog.describe(root)); forcing dead-leaf detach")
+        recordPaneLedgerFailure(
+            in: win, paneID: paneLedgerPaneID(for: leaf),
+            reason: "terminal-remove-failed", origin: "pty-eof")
+
+        var container = leaf.superview
+        leaf.removeFromSuperview()
+        while let candidate = container,
+              candidate !== root,
+              !(candidate is TerminalView),
+              !(candidate is UtilityPaneView) {
+            let parent = candidate.superview
+            // `snapshot(of:)` intentionally returns nil for a corrupt plain
+            // wrapper with multiple pane leaves. Treating that as empty here
+            // would delete the wrapper and orphan every surviving Chat below
+            // it while recovering from terminal EOF.
+            let layoutBranches = candidate.subviews.filter(
+                PaneLayoutController.containsLayoutLeaf)
+            if layoutBranches.isEmpty {
+                candidate.removeFromSuperview()
+                container = parent
+                continue
+            }
+            // A legacy plain wrapper may have held both the dead terminal and
+            // one surviving pane. Unwrap that sole branch into the wrapper's
+            // slot; leaving the plain view inside an NSSplitView would keep the
+            // root structurally invalid even though the survivor is healthy.
+            if !(candidate is NSSplitView),
+               layoutBranches.count == 1,
+               let survivor = layoutBranches.first,
+               let parent {
+                survivor.removeFromSuperview()
+                if PaneLayoutController.replace(candidate, with: survivor, in: parent) {
+                    container = parent
+                    continue
+                }
+                candidate.addSubview(survivor)
+            }
+            break
+        }
+        _ = PaneLayoutController.normalizeRoot(in: root)
+        PaneLayoutController.stabilizeRoot(in: root)
+    }
+
+    /// A tab's lifetime follows reachable layout leaves. Registry entries are
+    /// bookkeeping, not hidden panes; counting detached records here preserved
+    /// blank zombie windows after a structural failure.
+    private func remainingTabLeafCount(
+        in win: NSWindow, rootedAt root: NSView? = nil
+    ) -> Int {
+        paneLeafViews(in: win, rootedAt: root).count
+    }
+
+    /// Maintain the pane host's single-root invariant without changing
+    /// unaffected divider ratios or reparenting nested leaves.
+    private func stabilizePaneTree(
+        in win: NSWindow, root explicitRoot: NSView? = nil, reason: String
+    ) {
+        guard let root = explicitRoot ?? paneLayoutHost(of: win) else { return }
+        _ = PaneLayoutController.normalizeRoot(in: root)
+        PaneLayoutController.stabilizeRoot(in: root)
+        guard PaneLayoutController.rootInvariantHolds(in: root) else {
+            PaneLog.log(
+                "ERROR invalid pane root after \(reason) tree=\(PaneLog.describe(root))")
+            recordPaneLedgerFailure(
+                in: win, reason: "invalid-pane-root", origin: reason)
+            return
+        }
+        PaneLog.log("pane root stable after \(reason) tree=\(PaneLog.describe(root))")
     }
 
     /// A split with a single child left dissolves into its parent.
     private func collapse(_ split: NSSplitView, in win: NSWindow) {
         guard split.arrangedSubviews.count == 1 else { return }
         let sibling = split.arrangedSubviews[0]
+        let parent = split.superview
         if win.contentView === split {
             // Keep a real content view in place while the survivor leaves the
             // old split. This mirrors PaneLayoutController's root safeguard.
@@ -1467,12 +1719,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             sibling.autoresizingMask = placeholder.autoresizingMask
             win.contentView = sibling
         } else {
-            // The helper installs a placeholder first when this is the root
-            // chrome body, so it never exposes an empty layout container.
+            // Compatibility path for legacy/test content-view splits. Native
+            // pane hosts use PaneLayoutController.removeLeaf directly.
             _ = PaneLayoutController.collapseSingleChildSplit(split)
         }
         win.contentView?.needsLayout = true
         win.contentView?.layoutSubtreeIfNeeded()
+        // Walk up: parent may now be a one-child split after this dissolve.
+        if let parentSplit = parent as? NSSplitView {
+            collapse(parentSplit, in: win)
+        }
     }
 
     // MARK: - windows & tabs
@@ -1659,6 +1915,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         openWindow(cwd: nil)
     }
 
+    /// Opens the ShadKit component gallery, for eyeballing the AI controls
+    /// against the shadcn and AI Elements references.
+    @objc func showDesignGallery(_ sender: Any?) {
+        DesignGalleryWindowController.present()
+    }
+
     @discardableResult
     private func openWindow(
         cwd: String?, launchCommand: String? = nil
@@ -1780,8 +2042,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             _ = openUtilityPanel(
                 .files, in: win, relativeTo: context.sourceView, vertical: context.vertical)
         case .chat:
+            // Split chooser always places a fresh Chat leaf (multi-chat panes).
             _ = openUtilityPanel(
-                .chat, in: win, relativeTo: context.sourceView, vertical: context.vertical)
+                .chat, in: win, relativeTo: context.sourceView, vertical: context.vertical,
+                forceNewInstance: true)
         case .browser:
             // The split chooser places a pane at a chosen spot, so it always
             // creates a fresh Browser instance instead of refocusing one.
@@ -1793,31 +2057,42 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    private func splitTerminal(relativeTo sourceView: NSView, vertical: Bool) {
+    @discardableResult
+    private func splitTerminal(
+        relativeTo sourceView: NSView, vertical: Bool
+    ) -> TerminalSession? {
         restorePaneZoom(containing: sourceView, refocus: false)
-        guard let win = sourceView.window else { return }
+        guard let win = sourceView.window else { return nil }
         let session = createSession(
             scale: win.backingScaleFactor,
             usesSharedWindowSurface: terminalChromes[ObjectIdentifier(win)] != nil)
-        session.workingDirectory = focusedSession(in: win)?.currentDirectory()
-            ?? activeSessions(in: win).first?.currentDirectory()
+        session.workingDirectory = sourceSession(
+            relativeTo: sourceView, in: win)?.currentDirectory()
         guard insertPaneView(session.view, relativeTo: sourceView, vertical: vertical) else {
             recordPaneLedgerFailure(
                 in: win, paneID: paneLedgerTerminalID(session), reason: "split-insert-failed",
                 origin: "pane-header")
             session.shutdown()
             sessions.removeAll { $0 === session }
-            return
+            return nil
         }
         recordPaneLedgerTerminalAdded(
             session, in: win, reason: vertical ? "split-right" : "split-down",
             origin: "pane-header", sourceView: sourceView, vertical: vertical)
         session.launch()
-        rebindUtilityPanels(to: session, in: win)
+        if let sourceRecord = utilityRecord(forPane: sourceView),
+           sourceRecord.kind == .chat,
+           let assistant = sourceRecord.assistant {
+            bindAssistantAfterChatSplit(assistant, to: session)
+            sourceRecord.controller?.track(session: session)
+            sourceRecord.controller?.attachAssistant(assistant)
+        }
+        refreshUtilityPanels(for: session, in: win)
         win.makeFirstResponder(session.view)
         refreshPets()
         updateTitle(for: win)
         refreshShortcutHints()
+        return session
     }
 
     @discardableResult
@@ -1826,6 +2101,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         vertical: Bool, newFirst: Bool = false
     ) -> Bool {
         let owningWindow = oldView.window
+        if let owningWindow,
+           let root = paneLayoutHost(of: owningWindow, containing: oldView) {
+            _ = PaneLayoutController.normalizeRoot(in: root)
+            guard PaneLayoutController.rootInvariantHolds(in: root) else {
+                PaneLog.log(
+                    "ERROR split insert invalid source root tree=\(PaneLog.describe(root))")
+                return false
+            }
+        }
         let split = PaneSplitView(frame: oldView.frame)
         split.isVertical = vertical
         split.dividerStyle = .thin
@@ -1841,15 +2125,58 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // arranged children, NSSplitView is their sole geometry owner.
         oldView.autoresizingMask = []
         newView.autoresizingMask = []
+        // Seed both children with usable local geometry before AppKit asks
+        // their internal Auto Layout trees to resolve. A newly constructed
+        // Shadcn Chat starts at `.zero`; adding it at that size can transiently
+        // break its required composer constraints and leave the split at
+        // width zero before the deferred divider-centering pass.
+        let localBounds = split.bounds
+        let divider = split.dividerThickness
+        let firstFrame: NSRect
+        let secondFrame: NSRect
+        if vertical {
+            let usable = max(localBounds.width - divider, 0)
+            let firstWidth = usable / 2
+            firstFrame = NSRect(
+                x: 0, y: 0, width: firstWidth, height: localBounds.height)
+            secondFrame = NSRect(
+                x: firstWidth + divider, y: 0,
+                width: usable - firstWidth, height: localBounds.height)
+        } else {
+            let usable = max(localBounds.height - divider, 0)
+            let firstHeight = usable / 2
+            firstFrame = NSRect(
+                x: 0, y: localBounds.height - firstHeight,
+                width: localBounds.width, height: firstHeight)
+            secondFrame = NSRect(
+                x: 0, y: 0,
+                width: localBounds.width, height: usable - firstHeight)
+        }
         if newFirst {
+            newView.frame = firstFrame
+            oldView.frame = secondFrame
             split.addArrangedSubview(newView)
             split.addArrangedSubview(oldView)
         } else {
+            oldView.frame = firstFrame
+            newView.frame = secondFrame
             split.addArrangedSubview(oldView)
             split.addArrangedSubview(newView)
         }
         if let owningWindow { applyTabTint(to: owningWindow) }
-        DispatchQueue.main.async {
+        if let owningWindow,
+           let root = paneLayoutHost(of: owningWindow, containing: oldView) {
+            PaneLayoutController.stabilizeRoot(in: root)
+        }
+        // Establish usable geometry immediately. The deferred pass below
+        // handles the final window layout, but a rapid add-then-close can
+        // happen before that runloop turn and must not capture zero ratios.
+        split.layoutSubtreeIfNeeded()
+        let initialMid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
+        if initialMid > 0 { split.setPosition(initialMid, ofDividerAt: 0) }
+        DispatchQueue.main.async { [weak split] in
+            guard let split, split.superview != nil,
+                  split.arrangedSubviews.count == 2 else { return }
             let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
             split.setPosition(mid, ofDividerAt: 0)
         }
@@ -1866,7 +2193,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func togglePaneZoom(for pane: NSView) {
-        guard let win = pane.window, let root = terminalRoot(of: win) else { return }
+        guard let win = pane.window,
+              let root = terminalRoot(of: win, containing: pane) else { return }
         let key = ObjectIdentifier(root)
         if paneZoomStates[key] != nil {
             restorePaneZoom(key: key, refocus: true, animated: true)
@@ -1877,7 +2205,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return
         }
 
-        let panes = paneLeafViews(in: win)
+        let panes = paneLeafViews(in: win, rootedAt: root)
         guard panes.count > 1, pane !== root else { return }
         root.layoutSubtreeIfNeeded()
         let dividerRatios = PaneLayoutController.captureDividerRatios(in: root)
@@ -1960,7 +2288,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func restorePaneZoom(
         containing pane: NSView, refocus: Bool, animated: Bool = false
     ) {
-        guard let win = pane.window, let root = terminalRoot(of: win) else { return }
+        guard let win = pane.window,
+              let root = terminalRoot(of: win, containing: pane) else { return }
         if let entry = paneZoomStates.first(where: { $0.value.root === root }) {
             restorePaneZoom(key: entry.key, refocus: refocus, animated: animated)
         } else if let entry = paneZoomRestoreStates.first(where: { $0.value.root === root }) {
@@ -1969,7 +2298,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func restorePaneZoom(revealing pane: NSView) {
-        guard let win = pane.window, let root = terminalRoot(of: win) else { return }
+        guard let win = pane.window,
+              let root = terminalRoot(of: win, containing: pane) else { return }
         guard let entry = paneZoomStates.first(where: {
             $0.value.root === root && $0.value.pane !== pane
         }) else {
@@ -2155,12 +2485,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func movePaneView(_ source: NSView, relativeTo target: NSView, zone: PaneDropZone) {
         guard source !== target, let win = source.window, target.window === win else { return }
+        guard let root = paneLayoutHost(of: win, containing: source) else { return }
+        _ = PaneLayoutController.normalizeRoot(in: root)
+        guard PaneLayoutController.rootInvariantHolds(in: root) else {
+            PaneLog.log(
+                "ERROR move rejected invalid-root tree=\(PaneLog.describe(root))")
+            recordPaneLedgerFailure(
+                in: win, paneID: paneLedgerPaneID(for: source),
+                reason: "pane-move-invalid-root", origin: "pane-drag")
+            return
+        }
         let beforePanes = paneLeafViews(in: win)
         let beforeIDs = Set(beforePanes.map(ObjectIdentifier.init))
-        let root = terminalRoot(of: win)
         PaneLog.log("move begin zone=\(zone) count=\(beforePanes.count) "
             + "source=\(ObjectIdentifier(source)) target=\(ObjectIdentifier(target)) "
-            + "tree=\(root.map(PaneLog.describe) ?? "nil")")
+            + "tree=\(PaneLog.describe(root))")
         let oldGeometry = beforePanes.map {
             (view: $0, frameInWindow: $0.convert($0.bounds, to: nil))
         }
@@ -2179,30 +2518,51 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let mid = split.isVertical ? split.bounds.width / 2 : split.bounds.height / 2
             split.setPosition(mid, ofDividerAt: 0)
         }
+        PaneLayoutController.stabilizeRoot(in: root)
         win.contentView?.layoutSubtreeIfNeeded()
         let afterPanes = paneLeafViews(in: win)
         let afterIDs = Set(afterPanes.map(ObjectIdentifier.init))
         let missing = beforeIDs.subtracting(afterIDs)
         let added = afterIDs.subtracting(beforeIDs)
+        let validRoot = PaneLayoutController.rootInvariantHolds(in: root)
         let summary = "move end count=\(afterPanes.count) missing=\(missing) added=\(added) "
-            + "tree=\(root.map(PaneLog.describe) ?? "nil")"
-        PaneLog.log(beforeIDs == afterIDs ? summary : "ERROR \(summary)")
-        recordPaneLedgerNote(
-            in: win, paneID: paneLedgerPaneID(for: source), reason: "pane-moved", origin: "pane-drag",
-            sourcePaneID: paneLedgerPaneID(for: target), axis: String(describing: zone))
+            + "validRoot=\(validRoot) tree=\(PaneLog.describe(root))"
+        let moveIsValid = beforeIDs == afterIDs && validRoot
+        PaneLog.log(moveIsValid ? summary : "ERROR \(summary)")
+        if moveIsValid {
+            recordPaneLedgerNote(
+                in: win, paneID: paneLedgerPaneID(for: source),
+                reason: "pane-moved", origin: "pane-drag",
+                sourcePaneID: paneLedgerPaneID(for: target), axis: String(describing: zone))
+        } else {
+            recordPaneLedgerFailure(
+                in: win, paneID: paneLedgerPaneID(for: source),
+                reason: "pane-move-invalid-result", origin: "pane-drag")
+        }
         animatePaneReflow(from: oldGeometry)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self, weak win] in
             guard let self, let win else { return }
             let settled = self.paneLeafViews(in: win)
             let settledIDs = Set(settled.map(ObjectIdentifier.init))
-            let settledRoot = self.terminalRoot(of: win)
+            let settledRoot = self.paneLayoutHost(of: win)
+            let validRoot = settledRoot.map {
+                PaneLayoutController.rootInvariantHolds(in: $0)
+            } ?? false
             let settledSummary = "move settled count=\(settled.count) "
                 + "missing=\(beforeIDs.subtracting(settledIDs)) "
                 + "added=\(settledIDs.subtracting(beforeIDs)) "
+                + "validRoot=\(validRoot) "
                 + "tree=\(settledRoot.map(PaneLog.describe) ?? "nil")"
-            PaneLog.log(beforeIDs == settledIDs ? settledSummary : "ERROR \(settledSummary)")
-            self.recordPaneLedgerNote(
-                in: win, reason: "pane-move-settled", origin: "pane-drag")
+            let settledIsValid = beforeIDs == settledIDs && validRoot
+            PaneLog.log(settledIsValid ? settledSummary : "ERROR \(settledSummary)")
+            if settledIsValid {
+                self.recordPaneLedgerNote(
+                    in: win, reason: "pane-move-settled", origin: "pane-drag")
+            } else {
+                self.recordPaneLedgerFailure(
+                    in: win, paneID: self.paneLedgerPaneID(for: source),
+                    reason: "pane-move-invalid-settled", origin: "pane-drag")
+            }
         }
         win.makeFirstResponder(source)
         refreshPets()
@@ -2364,12 +2724,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     // MARK: - code view
 
     /// Independent utility leaves mixed into each tab's pane tree, in
-    /// creation order. Files and Chat stay one-per-window; Browser may have
+    /// creation order. Files stays one-per-window; Chat and Browser may have
     /// any number of instances, so records are a list rather than keyed by
     /// kind.
     private var utilityPanels: [ObjectIdentifier: [UtilityPanelRecord]] = [:]
-    /// Monotonic counter behind the per-instance "browser-N" ledger IDs.
+    /// Monotonic counters behind per-instance "browser-N" / "chat-N" ledger IDs.
     private var nextBrowserLedgerID = 1
+    private var nextChatLedgerID = 1
     private var nextSurfaceLedgerID = 1
     /// Agent surfaces opened as standalone windows: the controller must stay
     /// alive (it is the WKWebView's script-message handler) until close.
@@ -2381,13 +2742,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         utilityPanels[ObjectIdentifier(win)] ?? []
     }
 
-    /// The most recently created panel of `kind` in `win`. For the singleton
-    /// kinds (Files, Chat) that is the only one; for Browser it is the last
-    /// instance opened, which "open browser" focuses.
+    /// Quick Terminal keeps every internal tab attached to one panel window.
+    /// Scope records by their actual page ancestry whenever a lifecycle
+    /// operation belongs to one of those internal tabs.
+    private func utilityRecords(
+        in win: NSWindow, rootedAt root: NSView?
+    ) -> [UtilityPanelRecord] {
+        guard let root else { return utilityRecords(in: win) }
+        return utilityRecords(in: win).filter {
+            $0.pane === root || $0.pane.isDescendant(of: root)
+        }
+    }
+
+    /// The most recently created panel of `kind` in `win`. For Files that is
+    /// the only one; for Chat/Browser it is the last instance opened, which
+    /// plain "open" focuses.
     private func utilityRecord(
-        _ kind: UtilityPanelKind, in win: NSWindow
+        _ kind: UtilityPanelKind, in win: NSWindow, rootedAt root: NSView? = nil
     ) -> UtilityPanelRecord? {
-        utilityRecords(in: win).last { $0.kind == kind }
+        utilityRecords(in: win, rootedAt: root).last { $0.kind == kind }
     }
 
     /// Resolve a pane leaf back to its record by identity — required once two
@@ -2415,20 +2788,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func toggleCodeView(_ sender: Any?) {
         guard let win = NSApp.keyWindow else { return }
-        toggleCodeView(in: win)
+        _ = toggleCodeView(in: win)
     }
 
-    func toggleCodeView(in win: NSWindow) {
+    @discardableResult
+    func toggleCodeView(in win: NSWindow) -> Bool {
         guard win.tabbingIdentifier == "infinitty",
-              win !== quickTerminal.window else { return }
+              win !== quickTerminal.window else { return false }
         let id = ObjectIdentifier(win)
         if let record = utilityRecord(.files, in: win) {
-            closeUtilityPanel(record, in: win)
+            guard closeUtilityPanel(record, in: win) else { return false }
             sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(false)
             refocusTerminal(in: win)
-            return
+            return true
         }
-        _ = openUtilityPanel(.files, in: win)
+        return openUtilityPanel(.files, in: win) != nil
     }
 
     /// Context-menu form: show/focus Files without toggling an existing pane closed.
@@ -2437,11 +2811,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         _ = openUtilityPanel(.files, in: win)
     }
 
-    /// Start a clean conversation and focus the shared Chat pane.
+    /// Open a new Chat pane (always a fresh leaf, like New Browser). Each pane
+    /// owns its own assistant/threads.
     @objc func newChatPane(_ sender: Any?) {
         guard let win = standardKeyWindow(),
+              let record = openUtilityPanel(
+                  .chat, in: win, forceNewInstance: true)
+        else { return }
+        record.controller?.focusChatInput()
+    }
+
+    /// Open or focus the most recent Chat pane in the key window.
+    @objc func openChatPane(_ sender: Any?) {
+        guard let win = standardKeyWindow(),
               let record = openUtilityPanel(.chat, in: win) else { return }
-        record.assistant?.startNewChat()
         record.controller?.focusChatInput()
     }
 
@@ -2467,10 +2850,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// The view that hosts a window's terminal panes/splits. For standard
     /// windows that's the chrome body (below the custom tab strip); the
     /// quick terminal uses its own tab page; fall back to contentView.
-    private func terminalRoot(of win: NSWindow) -> NSView? {
+    private func terminalRoot(
+        of win: NSWindow, containing view: NSView? = nil
+    ) -> NSView? {
         if let chrome = terminalChromes[ObjectIdentifier(win)] { return chrome.body }
-        if win === quickTerminal.window { return quickTerminal.activeRootView }
+        if win === quickTerminal.window {
+            if let view, let root = quickTerminal.rootView(containing: view) {
+                return root
+            }
+            return quickTerminal.activeRootView
+        }
         return win.contentView
+    }
+
+    /// A real pane host has stable plain-container ownership. The content-view
+    /// fallback above exists for lightweight tests and legacy sidebar callers;
+    /// it must not be interpreted as TerminalChromeView.body when the content
+    /// view itself is an NSSplitView.
+    private func paneLayoutHost(
+        of win: NSWindow, containing view: NSView? = nil
+    ) -> NSView? {
+        if let chrome = terminalChromes[ObjectIdentifier(win)] { return chrome.body }
+        if win === quickTerminal.window {
+            if let view, let root = quickTerminal.paneLayoutHost(containing: view) {
+                return root
+            }
+            if let activeRoot = quickTerminal.activeRootView {
+                return quickTerminal.paneLayoutHost(containing: activeRoot) ?? activeRoot
+            }
+            return nil
+        }
+        return nil
     }
 
     /// Refresh the custom tab strip in every window of `win`'s tab group so
@@ -2539,12 +2949,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func bundledTabIcon(named asset: String) -> NSImage? {
-        guard let url = Bundle.main.url(
-            forResource: asset, withExtension: "svg", subdirectory: "Logos")
-            ?? Bundle.main.url(forResource: asset, withExtension: "svg")
-            ?? Bundle.module.url(
-                forResource: asset, withExtension: "svg", subdirectory: "Logos")
-            ?? Bundle.module.url(forResource: asset, withExtension: "svg"),
+        guard let url = Bundle.infinittyResourceURL(
+            forResource: asset, withExtension: "svg", subdirectory: "Logos"),
             let data = try? Data(contentsOf: url),
             let image = NSImage(data: data), image.isValid
         else { return nil }
@@ -2612,6 +3018,114 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         _ newView: NSView, relativeTo oldView: NSView, vertical: Bool
     ) -> Bool {
         insertPaneView(newView, relativeTo: oldView, vertical: vertical)
+    }
+
+    func installPaneHostForTesting(_ chrome: TerminalChromeView, in window: NSWindow) {
+        terminalChromes[ObjectIdentifier(window)] = chrome
+        window.contentView = chrome
+    }
+
+    func openUtilityPaneForTesting(
+        _ kind: UtilityPanelKind,
+        in window: NSWindow,
+        relativeTo source: NSView,
+        vertical: Bool = true,
+        forceNewInstance: Bool = false
+    ) -> UtilityPaneView? {
+        openUtilityPanel(
+            kind, in: window, relativeTo: source,
+            vertical: vertical, forceNewInstance: forceNewInstance)?.pane
+    }
+
+    @discardableResult
+    func closeUtilityPaneForTesting(
+        _ pane: UtilityPaneView,
+        in window: NSWindow
+    ) -> Bool {
+        guard let record = utilityRecord(forPane: pane) else { return false }
+        return closeUtilityPanel(record, in: window)
+    }
+
+    func utilityPaneCountForTesting(in window: NSWindow) -> Int {
+        utilityRecords(in: window).count
+    }
+
+    func utilityPaneCountForTesting(in window: NSWindow, rootedAt root: NSView) -> Int {
+        utilityRecords(in: window, rootedAt: root).count
+    }
+
+    func ensureQuickTerminalForTesting() -> (NSWindow, TerminalSession)? {
+        guard let (window, session) = quickTerminal.ensureWindow(),
+              let session else { return nil }
+        return (window, session)
+    }
+
+    func newQuickTerminalTabForTesting() -> TerminalSession? {
+        quickTerminal.newTab()
+    }
+
+    func selectQuickTerminalTabForTesting(containing session: TerminalSession) -> Bool {
+        quickTerminal.selectTab(containing: session)
+    }
+
+    func quickTerminalRootForTesting(containing session: TerminalSession) -> NSView? {
+        quickTerminal.rootView(inTabContaining: session)
+    }
+
+    func quickTerminalLayoutHostForTesting(containing view: NSView) -> NSView? {
+        quickTerminal.paneLayoutHost(containing: view)
+    }
+
+    @discardableResult
+    func closeQuickTerminalTabForTesting(containing view: NSView) -> Bool {
+        guard let root = quickTerminal.rootView(containing: view) else { return false }
+        return quickTerminal.requestCloseTab(rootView: root)
+    }
+
+    var quickTerminalActiveRootForTesting: NSView? {
+        quickTerminal.activeRootView
+    }
+
+    var quickTerminalTabCountForTesting: Int {
+        quickTerminal.tabCount
+    }
+
+    @discardableResult
+    func splitTerminalForTesting(
+        relativeTo source: NSView, vertical: Bool
+    ) -> TerminalSession? {
+        splitTerminal(relativeTo: source, vertical: vertical)
+    }
+
+    func sourceSessionForSplitForTesting(relativeTo source: NSView) -> TerminalSession? {
+        guard let window = source.window else { return nil }
+        return sourceSession(relativeTo: source, in: window)
+    }
+
+    func petAssistantForTesting(_ session: TerminalSession) -> PetAssistant {
+        petAssistant(for: session)
+    }
+
+    func installPetAssistantForTesting(
+        _ assistant: PetAssistant, for session: TerminalSession
+    ) {
+        if let previous = petAssistants.updateValue(assistant, forKey: session.id),
+           previous !== assistant {
+            previous.invalidate()
+        }
+        bindAssistant(assistant, to: session)
+    }
+
+    func utilityPaneAssistantForTesting(_ pane: UtilityPaneView) -> PetAssistant? {
+        utilityRecord(forPane: pane)?.assistant
+    }
+
+    func utilityPaneControllerForTesting(_ pane: UtilityPaneView) -> CodeViewController? {
+        utilityRecord(forPane: pane)?.controller
+    }
+
+    func sessionDidExitForTesting(_ session: TerminalSession) {
+        sessionDidExit(session)
     }
 
     private func tabTitle(for win: NSWindow) -> String {
@@ -2810,13 +3324,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         forceNewInstance: Bool = false
     ) -> UtilityPanelRecord? {
         let id = ObjectIdentifier(win)
-        // Files and Chat stay one-per-window; only Browser supports extra
-        // instances, and only when explicitly requested — a plain "open"
-        // focuses the newest existing pane of that kind.
-        let wantsNewInstance = forceNewInstance && kind == .browser
-        if !wantsNewInstance, let existing = utilityRecord(kind, in: win) {
+        // Files stays one-per-window. Chat and Browser support extra instances
+        // when forceNewInstance is set; a plain "open" focuses the newest
+        // existing pane of that kind.
+        let allowsMultiple = kind == .browser || kind == .chat
+        let wantsNewInstance = forceNewInstance && allowsMultiple
+        let requestedRoot = requestedSource.flatMap {
+            terminalRoot(of: win, containing: $0)
+        } ?? (win === quickTerminal.window ? quickTerminal.activeRootView : nil)
+        if !wantsNewInstance,
+           let existing = utilityRecord(kind, in: win, rootedAt: requestedRoot) {
             restorePaneZoom(revealing: existing.pane)
             win.makeFirstResponder(existing.pane)
+            // Focusing Chat again: never leave the pet popover stacked on it.
+            if kind == .chat {
+                existing.assistant?.dismissPopover()
+            }
             recordPaneLedgerNote(
                 in: win, paneID: existing.ledgerID, reason: "pane-focused", origin: "utility-open")
             return existing
@@ -2854,10 +3377,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             background: background,
             blurred: config.backgroundBlur)
         let ledgerID: String
-        if kind == .browser {
+        switch kind {
+        case .browser:
             ledgerID = "browser-\(nextBrowserLedgerID)"
             nextBrowserLedgerID += 1
-        } else {
+        case .chat:
+            ledgerID = "chat-\(nextChatLedgerID)"
+            nextChatLedgerID += 1
+        case .files, .surface:
             ledgerID = kind.rawValue
         }
         let record: UtilityPanelRecord
@@ -2895,23 +3422,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         wireUtilityPane(pane, record: record, in: win)
 
-        let sourceSession = focusedSession(in: win) ?? activeSessions(in: win).first
+        let sourceSession = sourceSession(relativeTo: anchorView, in: win)
         if let controller = codeController {
             if let sourceSession { controller.track(session: sourceSession) }
             if kind == .chat {
-                // A Chat pane can be opened from a Browser-only tab after its
-                // last terminal has closed. Keep that conversation usable;
-                // it will rebind to the next terminal that appears in this
-                // native tab without creating a second assistant.
-                let assistant = sourceSession.map { petAssistant(for: $0) }
-                    ?? PetAssistant(config: config)
+                // Each Chat leaf owns its own assistant so multi-pane chats
+                // don't share transcripts. The first pane opened without
+                // forceNewInstance can still adopt the session's pet
+                // assistant so pet-popover history continues in that leaf.
+                let assistant: PetAssistant
+                if forceNewInstance {
+                    assistant = PetAssistant(config: config)
+                    if let sourceSession {
+                        assistant.attach(to: sourceSession)
+                        bindAssistant(assistant, to: sourceSession)
+                    }
+                } else if let sourceSession {
+                    assistant = petAssistant(for: sourceSession)
+                } else {
+                    assistant = PetAssistant(config: config)
+                }
+                // This Chat surface owns the conversation — drop the pet bubble.
+                assistant.dismissPopover()
                 record.assistant = assistant
-                controller.attachAssistant(assistant)
+                let paneLedger = ledgerID
                 pane.onNewChat = { [weak self, weak win, weak assistant] in
                     if let self, let win {
                         self.recordPaneLedgerNote(
-                            in: win, paneID: "chat", reason: "chat-new", origin: "chat-header")
+                            in: win, paneID: paneLedger, reason: "chat-new",
+                            origin: "chat-header")
                     }
+                    // Pane-header + starts a new *thread* in this pane.
                     assistant?.startNewChat()
                 }
             }
@@ -2923,6 +3464,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 origin: requestedSource == nil ? "utility-open" : "split-chooser")
             removeUtilityRecord(record, windowKey: id)
             return nil
+        }
+        // Building the Shadcn transcript/composer installs required internal
+        // constraints. Do that only after the pane has received its real split
+        // geometry; attaching while the new UtilityPaneView is still `.zero`
+        // produces a transient required-constraint break and can strand a
+        // zero-width Chat.
+        if kind == .chat, let assistant = record.assistant {
+            codeController?.attachAssistant(assistant)
         }
         recordPaneLedgerUtilityAdded(
             paneID: ledgerID, in: win,
@@ -3009,11 +3558,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             window.orderFront(nil)
             surfaceWindowControllers[ObjectIdentifier(window)] = controller
             surfaceWindows[ledgerID] = window
-            var token: NSObjectProtocol?
-            token = NotificationCenter.default.addObserver(
+            // Box so the observer can remove itself without capturing a
+            // mutating local (Sendable-closure diagnostic on `var token`).
+            final class CloseObserver {
+                var token: NSObjectProtocol?
+            }
+            let closeObserver = CloseObserver()
+            closeObserver.token = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification, object: window, queue: .main
             ) { [weak self] note in
-                if let token { NotificationCenter.default.removeObserver(token) }
+                if let token = closeObserver.token {
+                    NotificationCenter.default.removeObserver(token)
+                    closeObserver.token = nil
+                }
                 guard let closing = note.object as? NSWindow else { return }
                 let key = ObjectIdentifier(closing)
                 self?.surfaceWindowControllers[key]?.teardown()
@@ -3058,14 +3615,38 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return ledgerID
     }
 
-    private func closeUtilityPanel(_ record: UtilityPanelRecord, in win: NSWindow) {
+    @discardableResult
+    private func closeUtilityPanel(
+        _ record: UtilityPanelRecord,
+        in win: NSWindow
+    ) -> Bool {
         let id = ObjectIdentifier(win)
         restorePaneZoom(containing: record.pane, refocus: false)
-        if let split = record.pane.superview as? NSSplitView {
-            record.pane.removeFromSuperview()
-            collapse(split, in: win)
+        let lifecycleRoot = paneLayoutHost(of: win, containing: record.pane)
+        let tabRoot = win === quickTerminal.window
+            ? quickTerminal.rootView(containing: record.pane)
+            : lifecycleRoot
+        if let root = lifecycleRoot {
+            let didRemove = PaneLayoutController.removeLeaf(record.pane, from: root)
+            if !didRemove {
+                PaneLog.log(
+                    "ERROR utility removal failed pane=\(record.ledgerID) "
+                        + "tree=\(PaneLog.describe(root))")
+                recordPaneLedgerFailure(
+                    in: win, paneID: record.ledgerID,
+                    reason: "utility-remove-failed", origin: "utility-pane")
+                // The pane is still a live UI owner. Keep its controller,
+                // assistant, and registry record intact so a structural
+                // failure cannot turn it into an untracked black/orphan pane.
+                return false
+            }
         } else {
-            record.pane.removeFromSuperview()
+            if let split = record.pane.superview as? NSSplitView {
+                record.pane.removeFromSuperview()
+                collapse(split, in: win)
+            } else {
+                record.pane.removeFromSuperview()
+            }
         }
         if let browser = record.browser {
             browser.cancelPendingAutomation()
@@ -3075,16 +3656,48 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             surface.teardown()
             appControl.broadcast(["event": "surface-closed", "surface": record.ledgerID])
         }
+        if let assistant = record.assistant {
+            let remainsOwnedByPet = petAssistants.values.contains { $0 === assistant }
+            // A Chat pane may share the terminal's pet assistant. Closing only
+            // that presentation must not cancel a turn still owned by the pet;
+            // final-owner invalidation performs cancellation and backend release.
+            if !remainsOwnedByPet { assistant.invalidate() }
+            record.assistant = nil
+        }
         removeUtilityRecord(record, windowKey: id)
         recordPaneLedgerUtilityRemoved(
             paneID: record.ledgerID, in: win, reason: "utility-close", origin: "utility-pane")
-        if PaneLifecyclePolicy.shouldCloseTab(remainingPaneCount: paneLeafViews(in: win).count) {
-            win.close()
-            return
+        stabilizePaneTree(in: win, root: lifecycleRoot, reason: "utility-close")
+        if PaneLifecyclePolicy.shouldCloseTab(
+            remainingPaneCount: remainingTabLeafCount(in: win, rootedAt: tabRoot)
+        ) {
+            if win === quickTerminal.window, let tabRoot {
+                if !quickTerminal.removeTab(rootView: tabRoot) {
+                    PaneLog.log(
+                        "ERROR quick tab removal failed after utility close "
+                            + "pane=\(record.ledgerID)")
+                }
+            } else {
+                win.close()
+            }
+            return true
         }
         sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
             utilityRecord(.files, in: win) != nil)
-        refocusTerminal(in: win)
+        let ownsActivePage = win !== quickTerminal.window
+            || tabRoot == nil
+            || quickTerminal.activeRootView === tabRoot
+        guard ownsActivePage else { return true }
+        let rootedSessions = sessions(in: win, rootedAt: tabRoot)
+        if rootedSessions.isEmpty {
+            if let remaining = paneLeafViews(in: win, rootedAt: tabRoot).first {
+                win.makeFirstResponder(remaining)
+                updatePaneSelection(in: win, focused: remaining, rootedAt: tabRoot)
+            }
+        } else {
+            refocusTerminal(in: win)
+        }
+        return true
     }
 
     func installSidebarToggle(in win: NSWindow) {
@@ -3097,7 +3710,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let accessory = SidebarToggleAccessory()
         accessory.toggleView.onClick = { [weak self, weak win] in
             guard let self, let win else { return }
-            self.toggleCodeView(in: win)
+            _ = self.toggleCodeView(in: win)
         }
         accessory.toggleView.setSidebarVisible(utilityRecord(.files, in: win) != nil)
         accessory.attach(to: win)
@@ -3212,14 +3825,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let win = source.view.window else { return }
         focusSession(source)
         guard let record = openUtilityPanel(
-            .chat, in: win, relativeTo: source.view, vertical: true)
+            .chat, in: win, relativeTo: source.view, vertical: true,
+            forceNewInstance: true)
         else { return }
-        let assistant = petAssistant(for: source)
+        let assistant = record.assistant ?? PetAssistant(config: config)
+        if record.assistant == nil {
+            bindAssistant(assistant, to: source)
+            record.assistant = assistant
+        }
         assistant.prepareRecovery(
             context: detected.recoveryContext,
             provider: detected.kind == .claude ? .claude : .codex,
             transcriptPath: detected.id)
-        record.assistant = assistant
         record.controller?.track(session: source)
         record.controller?.attachAssistant(assistant)
         record.controller?.focusChatInput()
@@ -3250,10 +3867,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let assistant = record.assistant ?? PetAssistant(config: config)
             record.assistant = assistant
             record.controller?.attachAssistant(assistant)
+            let paneLedger = record.ledgerID
             record.pane.onNewChat = { [weak self, weak win, weak assistant] in
                 if let self, let win {
                     self.recordPaneLedgerNote(
-                        in: win, paneID: "chat", reason: "chat-new", origin: "chat-header")
+                        in: win, paneID: paneLedger, reason: "chat-new",
+                        origin: "chat-header")
                 }
                 assistant?.startNewChat()
             }
@@ -3262,11 +3881,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             broadcastBrowserAnnotationSubmission(annotations)
             return
         }
+        // Prefer an existing Chat pane; don't force a second leaf for browser
+        // feedback — annotations join the focused/most-recent conversation.
         guard let record = openUtilityPanel(.chat, in: win) else { return }
         let assistant = record.assistant ?? petAssistant(for: source)
-        rehomeAssistant(assistant, to: source)
+        if record.assistant == nil {
+            bindAssistant(assistant, to: source)
+            record.controller?.track(session: source)
+        }
         record.assistant = assistant
-        record.controller?.track(session: source)
         record.controller?.attachAssistant(assistant)
         assistant.submitBrowserAnnotations(annotations)
         win.makeFirstResponder(record.pane)
@@ -3303,25 +3926,46 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    /// The pet bubble and the Chat pane must share one assistant instance.
-    /// When focus moves between terminal leaves, move that ownership as well;
-    /// otherwise the next pet click would create a second conversation for the
-    /// same visible Chat surface.
-    private func rehomeAssistant(_ assistant: PetAssistant, to session: TerminalSession) {
-        if let displaced = petAssistants[session.id], displaced !== assistant {
-            displaced.detach()
-        }
-        let staleIDs = petAssistants.compactMap { id, candidate in
+    /// A Chat created from a terminal can share that terminal's pet assistant.
+    /// If the user then splits a new terminal from that Chat, move the existing
+    /// pet ownership to the new terminal before rebinding it. Pane-only
+    /// assistants from additional Chat leaves stay pane-owned.
+    private func bindAssistantAfterChatSplit(
+        _ assistant: PetAssistant, to session: TerminalSession
+    ) {
+        let previousOwnerIDs = petAssistants.compactMap { id, candidate in
             candidate === assistant && id != session.id ? id : nil
         }
-        for id in staleIDs { petAssistants.removeValue(forKey: id) }
-        petAssistants[session.id] = assistant
+        if !previousOwnerIDs.isEmpty {
+            for id in previousOwnerIDs {
+                petAssistants.removeValue(forKey: id)
+            }
+            petAssistants[session.id] = assistant
+        }
         bindAssistant(assistant, to: session)
     }
 
     private func presentPetAssistant(for session: TerminalSession) {
+        let assistant = petAssistant(for: session)
+        // Any visible Chat pane → focus the most recent one. Never stack the
+        // pet popover on top, and never overwrite that pane's assistant (each
+        // multi-chat leaf owns its own transcript).
+        if let win = session.view.window,
+           let chat = utilityRecords(in: win).reversed().first(where: {
+               $0.kind == .chat && !$0.pane.isHiddenOrHasHiddenAncestor
+           }) {
+            assistant.dismissPopover()
+            chat.assistant?.dismissPopover()
+            if let chatAssistant = chat.assistant {
+                chat.controller?.attachAssistant(chatAssistant)
+            }
+            restorePaneZoom(revealing: chat.pane)
+            chat.controller?.focusChatInput()
+            win.makeFirstResponder(chat.pane)
+            return
+        }
         guard let anchor = session.renderer.petHitRect(in: session.view) else { return }
-        petAssistant(for: session).presentInput(anchorRect: anchor, in: session.view)
+        assistant.presentInput(anchorRect: anchor, in: session.view)
     }
 
     private func changePetScale(to scale: CGFloat) {
@@ -3752,8 +4396,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 for win in NSApp.windows {
                     if let record = self.utilityRecords(in: win).first(
                         where: { $0.ledgerID == surfaceID && $0.surface != nil }) {
-                        self.closeUtilityPanel(record, in: win)
-                        return true
+                        return self.closeUtilityPanel(record, in: win)
                     }
                 }
                 return false
@@ -3849,13 +4492,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             _ = onMain { self.quickTerminal.toggle() }
             return "ok"
         case "toggle-sidebar":
-            _ = onMain {
-                if let win = NSApp.keyWindow
-                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) {
-                    self.toggleCodeView(in: win)
-                }
-            }
-            return "ok"
+            let toggled = onMain { () -> Bool in
+                guard let win = NSApp.keyWindow
+                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" })
+                else { return false }
+                return self.toggleCodeView(in: win)
+            } ?? false
+            return toggled ? "ok" : "error: could not toggle sidebar"
         case "sidebar":
             // Compatibility surface: sidebar show|hide|toggle now controls
             // the Files pane, whose internal switch includes Changes.
@@ -3863,16 +4506,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard ["show", "hide", "toggle", ""].contains(action) else {
                 return "error: sidebar show|hide|toggle"
             }
-            _ = onMain {
+            let changed = onMain { () -> Bool in
                 guard let win = NSApp.keyWindow
-                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" }) else { return }
+                    ?? NSApp.windows.first(where: { $0.tabbingIdentifier == "infinitty" })
+                else { return false }
                 switch action {
-                case "show": _ = self.openCodeView(in: win)
-                case "hide": if self.utilityRecord(.files, in: win) != nil { self.toggleCodeView(in: win) }
-                default: self.toggleCodeView(in: win)
+                case "show":
+                    return self.openCodeView(in: win) != nil
+                case "hide":
+                    guard self.utilityRecord(.files, in: win) != nil else { return true }
+                    return self.toggleCodeView(in: win)
+                default:
+                    return self.toggleCodeView(in: win)
                 }
-            }
-            return "ok"
+            } ?? false
+            return changed ? "ok" : "error: could not update sidebar"
         case "sidebar-tab":
             // Compatibility command: Files/Changes share one pane; Chat owns
             // its own independent pane.
@@ -4056,6 +4704,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         titleOverrides.removeValue(forKey: ObjectIdentifier(win))
         tabPins.removeValue(forKey: ObjectIdentifier(win))
         tabTints.removeValue(forKey: ObjectIdentifier(win))
+        var invalidatedAssistants = Set<ObjectIdentifier>()
+        for record in utilityRecords(in: win) {
+            record.browser?.cancelPendingAutomation()
+            record.surface?.teardown()
+            if let assistant = record.assistant,
+               invalidatedAssistants.insert(ObjectIdentifier(assistant)).inserted {
+                assistant.invalidate()
+            }
+            record.assistant = nil
+        }
         utilityPanels.removeValue(forKey: ObjectIdentifier(win))
         sidebarToggleAccessories.removeValue(forKey: ObjectIdentifier(win))?.detach()
         terminalChromes.removeValue(forKey: ObjectIdentifier(win))
@@ -4069,7 +4727,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // whole session graph forever.
         for s in closing {
             pendingLaunchCommands.removeValue(forKey: s.id)
-            petAssistants.removeValue(forKey: s.id)?.detach()
+            petAssistants.removeValue(forKey: s.id)?.invalidate()
             runQueues.removeValue(forKey: s.id)?.forEach { $0.completion(-1) }
         }
         // Repaint the surviving siblings' strips on the next runloop (after
@@ -4174,6 +4832,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         main.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(
+            withTitle: "Design Gallery",
+            action: #selector(AppDelegate.showDesignGallery(_:)),
+            keyEquivalent: "")
         windowMenu.addItem(.separator())
 
         let previousTab = windowMenu.addItem(

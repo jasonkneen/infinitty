@@ -38,9 +38,16 @@ enum CodeSearch {
 
     /// Case-insensitive substring match. Filename hits rank above
     /// path-only hits; result capped so huge repos stay snappy.
+    ///
+    /// `*`, `.`, `all`, or `list` returns the first `limit` paths — used by
+    /// the chat assistant's `SEARCH: *` path when no terminal is attached.
+    /// Empty query still returns nothing (typeahead “no input” state).
     static func filter(_ paths: [String], query: String, limit: Int = 200) -> [String] {
-        let q = query.lowercased()
-        guard !q.isEmpty else { return [] }
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if q.isEmpty { return [] }
+        if q == "*" || q == "." || q == "all" || q == "list" {
+            return Array(paths.prefix(limit))
+        }
         var nameHits: [String] = []
         var pathHits: [String] = []
         for p in paths {

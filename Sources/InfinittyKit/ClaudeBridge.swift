@@ -29,10 +29,21 @@ final class ClaudeBridge: @unchecked Sendable {
     private let turnGate = AgentTurnGate()
     private let executableURLOverride: URL?
     private let mcpExecutableURLOverride: URL?
+    private let eventScopeID: String?
+    /// Claude pins `--session-id`, model, and system prompt at process launch.
+    /// Keyed conversations therefore get independent child bridges/processes;
+    /// the unkeyed path continues to use this bridge's original process.
+    private var conversationBridges: [String: ClaudeBridge] = [:]
+    /// Releasing a keyed conversation blocks late work from recreating its
+    /// child. Only a later explicit warm-up registration clears the marker.
+    private var tombstonedConversationIDs = Set<String>()
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stdoutHandle: FileHandle?
     private var stderrHandle: FileHandle?
+    /// Set only on a keyed child after its owning conversation is released.
+    /// Prevents queued/racing work from restarting an orphaned process.
+    private var isReleased = false
     /// Per-process UUID — passed as `--session-id` so multi-turn stays in
     /// the same Claude session (the CLI keeps context across user
     /// messages within one session id). Regenerated on every spawn:
@@ -51,6 +62,13 @@ final class ClaudeBridge: @unchecked Sendable {
     private var pending: [String: CheckedContinuation<String, Error>] = [:]
     private var currentTurnID: String?
     private var assistantAccumulator = ""
+    /// Live answer callback for the in-flight turn (throttled), so the UI
+    /// can show partial text instead of looking hung.
+    private var onPartial: ((String) -> Void)?
+    /// Reports tool calls as they happen so the transcript can show tool cards
+    /// rather than a log line. Delivered on the main queue.
+    var onToolEvent: ((AssistantToolEvent) -> Void)?
+    private var lastPartialAt: Double = 0
     /// Uptime when the current turn's message was written — for phase timing.
     private var turnStartUptime: Double = 0
     private var sawFirstTextThisTurn = false
@@ -58,11 +76,21 @@ final class ClaudeBridge: @unchecked Sendable {
 
     private static let requestTimeoutSeconds: TimeInterval = 130
 
-    var isRunning: Bool { queue.sync { process?.isRunning == true } }
+    var isRunning: Bool {
+        let state = queue.sync {
+            (process?.isRunning == true, Array(conversationBridges.values))
+        }
+        return state.0 || state.1.contains { $0.isRunning }
+    }
 
-    init(executableURL: URL? = nil, mcpExecutableURL: URL? = nil) {
+    init(
+        executableURL: URL? = nil,
+        mcpExecutableURL: URL? = nil,
+        eventScopeID: String? = nil
+    ) {
         self.executableURLOverride = executableURL
         self.mcpExecutableURLOverride = mcpExecutableURL
+        self.eventScopeID = eventScopeID
     }
 
     // MARK: - Public API
@@ -72,19 +100,62 @@ final class ClaudeBridge: @unchecked Sendable {
     /// with the user still typing their question. Idempotent — a no-op
     /// once the process is live. This is the openclicky trick: warm on
     /// interaction, so the first ask isn't the one paying spawn cost.
-    func warmUp(system: String, model: String? = nil) {
+    func warmUp(
+        system: String,
+        model: String? = nil,
+        conversationID: String? = nil
+    ) {
+        if let conversationID {
+            registerConversationBridge(for: conversationID).warmUpLocally(
+                system: system, model: model)
+            return
+        }
+        warmUpLocally(system: system, model: model)
+    }
+
+    private func warmUpLocally(system: String, model: String?) {
+        guard queue.sync(execute: { !isReleased }) else { return }
         try? ensureProcess(system: system, model: model)
     }
 
     /// Run a single, blocking turn against the warm bridge. Lazy-sprawls
     /// (sic). Returns the assistant's final `result` text.
     func turn(prompt: String, system: String, model: String? = nil,
-              timeout: TimeInterval = requestTimeoutSeconds) async throws -> String {
+              timeout: TimeInterval = requestTimeoutSeconds,
+              conversationID: String? = nil,
+              onPartial: ((String) -> Void)? = nil) async throws -> String {
+        if let conversationID {
+            return try await conversationBridgeForTurn(
+                for: conversationID
+            ).turnLocally(
+                prompt: prompt,
+                system: system,
+                model: model,
+                timeout: timeout,
+                onPartial: onPartial)
+        }
+        return try await turnLocally(
+            prompt: prompt,
+            system: system,
+            model: model,
+            timeout: timeout,
+            onPartial: onPartial)
+    }
+
+    private func turnLocally(
+        prompt: String,
+        system: String,
+        model: String?,
+        timeout: TimeInterval,
+        onPartial: ((String) -> Void)?
+    ) async throws -> String {
         await turnGate.acquire()
         do {
             try Task.checkCancellation()
+            try ensureLocallyActive()
             let result = try await performTurn(
-                prompt: prompt, system: system, model: model, timeout: timeout)
+                prompt: prompt, system: system, model: model, timeout: timeout,
+                onPartial: onPartial)
             await turnGate.release()
             return result
         } catch {
@@ -93,8 +164,27 @@ final class ClaudeBridge: @unchecked Sendable {
         }
     }
 
+    /// Cancel a keyed conversation's active turn. Claude result envelopes do
+    /// not carry a client turn id, so safely cancelling requires terminating
+    /// only that conversation's child process.
+    func cancelConversation(_ conversationID: String) {
+        existingConversationBridge(for: conversationID)?.stopLocally()
+    }
+
+    /// Cancel and forget a keyed conversation. A later explicit warm-up
+    /// registration gets a fresh process and Claude session id; a racing turn
+    /// remains cancelled.
+    func releaseConversation(_ conversationID: String) {
+        let bridge = queue.sync {
+            tombstonedConversationIDs.insert(conversationID)
+            return conversationBridges.removeValue(forKey: conversationID)
+        }
+        bridge?.releaseLocally()
+    }
+
     private func performTurn(
-        prompt: String, system: String, model: String?, timeout: TimeInterval
+        prompt: String, system: String, model: String?, timeout: TimeInterval,
+        onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
         try ensureProcess(system: system, model: model)
         return try await withTaskCancellationHandler(operation: {
@@ -104,12 +194,17 @@ final class ClaudeBridge: @unchecked Sendable {
                     guard let self else {
                         cont.resume(throwing: CancellationError()); return
                     }
+                    guard !self.isReleased else {
+                        cont.resume(throwing: CancellationError()); return
+                    }
                     let warm = self.process?.isRunning == true
                     PetLog.log("ClaudeBridge.turn start turn=\(turnID.prefix(8)) warm=\(warm)")
                     self.currentTurnID = turnID
                     self.turnStartUptime = ProcessInfo.processInfo.systemUptime
                     self.sawFirstTextThisTurn = false
                     self.assistantAccumulator = ""
+                    self.onPartial = onPartial
+                    self.lastPartialAt = 0
                     self.pending[turnID] = cont
                     self.writeUserMessage(turnID: turnID, text: prompt)
                 }
@@ -142,7 +237,30 @@ final class ClaudeBridge: @unchecked Sendable {
     }
 
     func stop() {
+        let children = queue.sync { () -> [ClaudeBridge] in
+            let values = Array(conversationBridges.values)
+            conversationBridges.removeAll()
+            return values
+        }
+        for child in children { child.releaseLocally() }
+        stopLocally()
+    }
+
+    private func stopLocally() {
         queue.sync { teardownLocked() }
+    }
+
+    private func releaseLocally() {
+        queue.sync {
+            isReleased = true
+            teardownLocked()
+        }
+    }
+
+    private func ensureLocallyActive() throws {
+        if queue.sync(execute: { isReleased }) {
+            throw CancellationError()
+        }
     }
 
     /// Must be called on `queue`.
@@ -161,6 +279,7 @@ final class ClaudeBridge: @unchecked Sendable {
         currentModel = nil
         currentSystemPrompt = nil
         stdoutBuffer.removeAll()
+        onPartial = nil
         for (_, c) in pending { c.resume(throwing: CancellationError()) }
         pending.removeAll()
         currentTurnID = nil
@@ -168,10 +287,57 @@ final class ClaudeBridge: @unchecked Sendable {
 
     deinit { stop() }
 
+    private func registerConversationBridge(
+        for conversationID: String
+    ) -> ClaudeBridge {
+        queue.sync {
+            tombstonedConversationIDs.remove(conversationID)
+            if let bridge = conversationBridges[conversationID] {
+                bridge.onToolEvent = onToolEvent
+                return bridge
+            }
+            let bridge = ClaudeBridge(
+                executableURL: executableURLOverride,
+                mcpExecutableURL: mcpExecutableURLOverride,
+                eventScopeID: conversationID)
+            bridge.onToolEvent = onToolEvent
+            conversationBridges[conversationID] = bridge
+            return bridge
+        }
+    }
+
+    private func conversationBridgeForTurn(
+        for conversationID: String
+    ) throws -> ClaudeBridge {
+        try queue.sync {
+            if tombstonedConversationIDs.contains(conversationID) {
+                throw CancellationError()
+            }
+            if let bridge = conversationBridges[conversationID] {
+                bridge.onToolEvent = onToolEvent
+                return bridge
+            }
+            let bridge = ClaudeBridge(
+                executableURL: executableURLOverride,
+                mcpExecutableURL: mcpExecutableURLOverride,
+                eventScopeID: conversationID)
+            bridge.onToolEvent = onToolEvent
+            conversationBridges[conversationID] = bridge
+            return bridge
+        }
+    }
+
+    private func existingConversationBridge(
+        for conversationID: String
+    ) -> ClaudeBridge? {
+        queue.sync { conversationBridges[conversationID] }
+    }
+
     // MARK: - Process
 
     private func ensureProcess(system: String, model: String?) throws {
         try queue.sync {
+            if isReleased { throw CancellationError() }
             let resolvedModel = model ?? Self.defaultModel
             if process?.isRunning == true {
                 if currentModel == resolvedModel, currentSystemPrompt == system { return }
@@ -287,6 +453,7 @@ final class ClaudeBridge: @unchecked Sendable {
                             "Claude bridge exited (\(proc.terminationStatus))."))
                     }
                     self.pending.removeAll()
+                    self.onPartial = nil
                     self.currentTurnID = nil
                 }
             }
@@ -367,10 +534,57 @@ final class ClaudeBridge: @unchecked Sendable {
                         }
                         assistantAccumulator += text
                         assistantAccumulator += "\n"
+                        emitPartialThrottled()
                     } else if kind == "tool_use" {
                         let name = block["name"] as? String ?? "?"
                         PetLog.log(String(format: "ClaudeBridge.toolcall %@ at +%.1fs", name, dt))
+                        let id = block["id"] as? String ?? UUID().uuidString
+                        let input = block["input"].flatMap { value -> String? in
+                            guard JSONSerialization.isValidJSONObject(value),
+                                  let data = try? JSONSerialization.data(
+                                      withJSONObject: value,
+                                      options: [.prettyPrinted, .sortedKeys])
+                            else { return nil }
+                            return String(data: data, encoding: .utf8)
+                        }
+                        let event = AssistantToolEvent(
+                            id: id,
+                            name: name,
+                            state: .running,
+                            input: input,
+                            scopeID: eventScopeID)
+                        if let onToolEvent {
+                            DispatchQueue.main.async { onToolEvent(event) }
+                        }
+                        AssistantToolEventBus.publish(event)
                     }
+                }
+            }
+        case "user":
+            // Tool results come back as a synthetic user turn. Without this the
+            // matching call would sit at `.running` for ever.
+            if let message = event["message"] as? [String: Any],
+               let content = message["content"] as? [[String: Any]] {
+                for block in content where block["type"] as? String == "tool_result" {
+                    guard let id = block["tool_use_id"] as? String else { continue }
+                    let failed = (block["is_error"] as? Bool) ?? false
+                    let text: String?
+                    if let raw = block["content"] as? String {
+                        text = raw
+                    } else if let parts = block["content"] as? [[String: Any]] {
+                        text = parts.compactMap { $0["text"] as? String }
+                            .joined(separator: "\n")
+                    } else {
+                        text = nil
+                    }
+                    AssistantToolEventBus.publish(
+                        AssistantToolEvent(
+                            id: id,
+                            name: "",
+                            state: failed ? .failed : .completed,
+                            output: failed ? nil : text,
+                            errorText: failed ? text : nil,
+                            scopeID: eventScopeID))
                 }
             }
         case "result":
@@ -380,11 +594,22 @@ final class ClaudeBridge: @unchecked Sendable {
         }
     }
 
+    /// Throttle live partial callbacks to ~10/s so the UI isn't flooded.
+    /// Must be called on `queue`.
+    private func emitPartialThrottled() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastPartialAt > 0.1, let onPartial else { return }
+        lastPartialAt = now
+        let snapshot = assistantAccumulator
+        DispatchQueue.main.async { onPartial(snapshot) }
+    }
+
     private func handleResult(_ event: [String: Any]) {
         guard let turnID = currentTurnID,
               let continuation = pending.removeValue(forKey: turnID)
         else { return }
         currentTurnID = nil
+        onPartial = nil
         let subtype = event["subtype"] as? String ?? ""
         let dt = ProcessInfo.processInfo.systemUptime - turnStartUptime
         PetLog.log(String(format: "ClaudeBridge.turn DONE in %.1fs subtype=%@", dt, subtype))
@@ -394,11 +619,17 @@ final class ClaudeBridge: @unchecked Sendable {
             // accumulator so we never return empty for a successful turn.
             let explicit = (event["result"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let accumulated = assistantAccumulator
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             if !explicit.isEmpty {
                 continuation.resume(returning: explicit)
+            } else if !accumulated.isEmpty {
+                continuation.resume(returning: accumulated)
             } else {
-                continuation.resume(returning: assistantAccumulator
-                    .trimmingCharacters(in: .whitespacesAndNewlines))
+                // A "success" with no text at all is a silent dead turn —
+                // surface it as a failure instead of an empty bubble.
+                continuation.resume(throwing: ClaudeBridgeError.rpcError(
+                    "Claude returned an empty response."))
             }
         default:
             let msg = (event["result"] as? String)

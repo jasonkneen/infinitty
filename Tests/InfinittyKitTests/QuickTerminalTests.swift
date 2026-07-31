@@ -289,6 +289,44 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertTrue(text.contains("quick-terminal-animation-duration = 0.15"))
     }
 
+    func testSmartPaneOnlyTabKeepsWindowAndCanBeRemovedByPageIdentity() throws {
+        _ = NSApplication.shared
+        var sessions: [TerminalSession] = []
+        let session = TerminalSession(config: AppConfig(), scale: 2)
+        sessions.append(session)
+        let window = QuickTerminalPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 400),
+            styleMask: [.borderless, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.contentView = session.view
+        let controller = QuickTerminalController(
+            config: AppConfig(),
+            makeWindow: { (window, session) },
+            makeTab: { _ in nil },
+            sessionsInPage: { page in
+                sessions.filter { $0.view.isDescendant(of: page) }
+            },
+            launchSession: { _ in })
+        defer {
+            controller.lastSessionDidExit()
+            session.shutdown()
+        }
+
+        _ = try XCTUnwrap(controller.ensureWindow())
+        let page = try XCTUnwrap(controller.rootView(inTabContaining: session))
+        sessions.removeAll()
+
+        XCTAssertTrue(controller.hasLiveSession)
+        let retained = try XCTUnwrap(controller.ensureWindow())
+        XCTAssertTrue(retained.0 === window)
+        XCTAssertNil(retained.1)
+        XCTAssertTrue(controller.removeTab(rootView: page))
+        XCTAssertFalse(controller.hasLiveSession)
+        XCTAssertEqual(controller.tabCount, 0)
+        XCTAssertNil(controller.window)
+    }
+
     func testConfigSerializationDropsMalformedQuickTerminalKey() {
         var config = AppConfig()
         config.quickTerminalKey = "cmd+not-a-key"

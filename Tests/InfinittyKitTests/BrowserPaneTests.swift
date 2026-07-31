@@ -6,24 +6,35 @@ import XCTest
 @testable import InfinittyKit
 
 final class BrowserPaneTests: XCTestCase {
-    private func annotation(id: String, comment: String, tag: String = "button") -> BrowserAnnotation {
+    private func annotation(
+        id: String,
+        comment: String,
+        tag: String = "button",
+        browserID: String = "browser-test",
+        url: String = "https://example.com/review",
+        title: String = "Example review",
+        accessibleName: String = "Save changes",
+        text: String = "Save changes",
+        selector: String = "button:nth-of-type(1)",
+        screenshotPath: String? = nil
+    ) -> BrowserAnnotation {
         BrowserAnnotation(
             id: id,
-            browserID: "browser-test",
+            browserID: browserID,
             createdAt: Date(timeIntervalSince1970: 1),
-            url: "https://example.com/review",
-            title: "Example review",
+            url: url,
+            title: title,
             documentID: 7,
             anchorRef: "anchor-\(id)",
             ref: "",
             tag: tag,
             role: "button",
-            accessibleName: "Save changes",
-            text: "Save changes",
-            selector: "button:nth-of-type(1)",
+            accessibleName: accessibleName,
+            text: text,
+            selector: selector,
             outerHTML: "",
             comment: comment,
-            screenshotPath: nil)
+            screenshotPath: screenshotPath)
     }
 
     func testBrowserControlCodecPreservesArbitraryTypedText() throws {
@@ -226,6 +237,61 @@ final class BrowserPaneTests: XCTestCase {
         XCTAssertTrue(context.contains("Browser ID: browser-test"))
         XCTAssertTrue(context.contains("User comment: Move this higher"))
         XCTAssertTrue(context.contains("User comment: Use a clearer label"))
+    }
+
+    func testAnnotationBatchContextBoundsEverySerializedValueByUTF8Bytes() {
+        let oversizedField = String(repeating: "é", count: BrowserAnnotation.maximumAIContextFieldBytes)
+            + "-field-tail"
+        let oversizedComment =
+            String(repeating: "界", count: BrowserAnnotation.maximumAIContextCommentBytes)
+            + "-comment-tail"
+        let item = annotation(
+            id: "oversized",
+            comment: oversizedComment,
+            browserID: oversizedField,
+            url: oversizedField,
+            title: oversizedField,
+            accessibleName: oversizedField,
+            text: oversizedField,
+            selector: oversizedField,
+            screenshotPath: oversizedField)
+
+        let context = BrowserAnnotation.aiContext(for: [item])
+
+        XCTAssertLessThanOrEqual(context.utf8.count, BrowserAnnotation.maximumAIContextBytes)
+        XCTAssertFalse(context.contains("-field-tail"))
+        XCTAssertFalse(context.contains("-comment-tail"))
+        XCTAssertGreaterThanOrEqual(
+            context.components(separatedBy: BrowserAnnotation.aiContextTruncationMarker).count - 1,
+            8)
+        XCTAssertLessThanOrEqual(
+            BrowserAnnotation.boundedAIContextValue(
+                oversizedField, maximumBytes: BrowserAnnotation.maximumAIContextFieldBytes
+            ).utf8.count,
+            BrowserAnnotation.maximumAIContextFieldBytes)
+        XCTAssertLessThanOrEqual(
+            BrowserAnnotation.boundedAIContextValue(
+                oversizedComment, maximumBytes: BrowserAnnotation.maximumAIContextCommentBytes
+            ).utf8.count,
+            BrowserAnnotation.maximumAIContextCommentBytes)
+    }
+
+    func testAnnotationBatchContextHardCapsTotalAndRetainsNewestCurrentMarkers() {
+        let annotations = (1...100).map { index in
+            annotation(
+                id: "annotation-\(index)",
+                comment: "comment-\(index)-" + String(repeating: "x", count: 3_900))
+        }
+
+        let context = BrowserAnnotation.aiContext(for: annotations)
+
+        XCTAssertLessThanOrEqual(context.utf8.count, BrowserAnnotation.maximumAIContextBytes)
+        XCTAssertTrue(context.contains("newest annotations retained"))
+        XCTAssertTrue(context.contains("## 100."))
+        XCTAssertTrue(context.contains("comment-100-"))
+        XCTAssertFalse(context.contains("comment-1-"))
+        XCTAssertFalse(context.contains("## 1."))
+        XCTAssertEqual(context, BrowserAnnotation.aiContext(for: annotations))
     }
 
     func testAnnotationMarkerBridgeHasNoPageHtmlInterpolation() {

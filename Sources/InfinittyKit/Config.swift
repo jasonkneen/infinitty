@@ -42,6 +42,9 @@ struct AppConfig {
     /// UI accent for chrome selection (active tab, file-row highlight, chat
     /// bubbles, send button, pinned-tab default). nil = built-in indigo.
     var accentColor: UInt32?
+    /// shadcn base colour driving the app's SwiftUI surfaces
+    /// (neutral | zinc | stone | gray | slate), or a path to a CSS theme.
+    var uiTheme: String?
     var palette: [Int: UInt32] = [:] // index (0-255) -> 0xRRGGBB overrides
     var trafficLights = "circle" // circle | square | rectangle | diamond
     var pet: String? = "infinitty" // built-in name, codex pet name, or directory path
@@ -71,6 +74,18 @@ struct AppConfig {
     var claudeModel: String?
     /// Model override for Codex. Falls back to ProviderDiscovery default.
     var codexModel: String?
+    /// Model overrides for the ACP / amp providers.
+    var opencodeModel: String?
+    var hermesModel: String?
+    var ampModel: String?
+    /// Per-turn bridge timeout in seconds. Falls back to the bridges'
+    /// default (90s) when nil. Raised/lowered to taste; a stalled turn
+    /// fails fast at this bound instead of looking hung.
+    var aiTurnTimeout: Double?
+    /// Recently typed custom model ids (most-recent first), shown at the
+    /// top of the model picker. Persisted so gateway/preview models
+    /// survive relaunch. Stored comma-joined.
+    var recentCustomModels: [String] = []
     /// Auto-register `infinitty-mcp` with Codex (`~/.codex/config.toml`)
     /// and Claude (`~/.claude.json`) on launch so the CLI gains terminal
     /// control tools. Off by default because it touches the user's dotfiles.
@@ -200,6 +215,8 @@ struct AppConfig {
                 selectionBackground = AppConfig.parseColor(value)
             case "accent-color", "accent":
                 accentColor = AppConfig.parseColor(value)
+            case "ui-theme", "uitheme", "theme":
+                uiTheme = value
             case "palette":
                 if let (index, color) = AppConfig.parsePaletteEntry(value) {
                     palette[index] = color
@@ -263,11 +280,24 @@ struct AppConfig {
                 aiModel = value
             case "ai-provider", "ai":
                 let v = value.lowercased()
-                if ["auto", "apple", "codex", "claude"].contains(v) { aiProvider = v }
+                if ["auto", "apple", "codex", "claude", "opencode", "hermes", "amp"].contains(v) { aiProvider = v }
             case "claude-model":
                 claudeModel = value
             case "codex-model":
                 codexModel = value
+            case "opencode-model":
+                opencodeModel = value
+            case "hermes-model":
+                hermesModel = value
+            case "amp-model":
+                ampModel = value
+            case "ai-turn-timeout":
+                if let t = Double(value), t > 0 { aiTurnTimeout = t }
+            case "recent-custom-models":
+                recentCustomModels = value
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
             case "mcp-auto-register", "mcp-register":
                 mcpAutoRegister = AppConfig.parseBool(value)
             case "agent-glow":
@@ -393,6 +423,13 @@ struct AppConfig {
         if aiProvider != "auto" { out += "ai-provider = \(aiProvider)\n" }
         if let v = claudeModel, !v.isEmpty { out += "claude-model = \(v)\n" }
         if let v = codexModel, !v.isEmpty { out += "codex-model = \(v)\n" }
+        if let v = opencodeModel, !v.isEmpty { out += "opencode-model = \(v)\n" }
+        if let v = hermesModel, !v.isEmpty { out += "hermes-model = \(v)\n" }
+        if let v = ampModel, !v.isEmpty { out += "amp-model = \(v)\n" }
+        if let v = aiTurnTimeout { out += "ai-turn-timeout = \(v)\n" }
+        if !recentCustomModels.isEmpty {
+            out += "recent-custom-models = \(recentCustomModels.joined(separator: ","))\n"
+        }
         if mcpAutoRegister { out += "mcp-auto-register = true\n" }
         if markdownCommand != "glow -p" { out += "markdown-command = \(markdownCommand)\n" }
         if markdownRender != "off" { out += "markdown-render = \(markdownRender)\n" }

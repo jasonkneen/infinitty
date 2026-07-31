@@ -176,10 +176,21 @@ final class PetAssistantTests: XCTestCase {
                        "markdown render")
         XCTAssertEqual(PetAssistant.parseSearchDirective("SEARCH:  spaced query  "),
                        "spaced query")
+        XCTAssertEqual(PetAssistant.parseSearchDirective("SEARCH: *"), "*")
+        XCTAssertEqual(PetAssistant.parseSearchDirective("LIST:"), "*")
+        XCTAssertEqual(PetAssistant.parseSearchDirective("LIST"), "*")
         XCTAssertNil(PetAssistant.parseSearchDirective("SEARCH:"))
         XCTAssertNil(PetAssistant.parseSearchDirective("Sure! You could try SEARCH: foo"))
         XCTAssertNil(PetAssistant.parseSearchDirective("Just an answer."))
         XCTAssertNil(PetAssistant.parseSearchDirective(nil))
+    }
+
+    func testWorkspaceDirectoryWithoutTerminalUsesProcessCwd() {
+        let assistant = PetAssistant(config: AppConfig())
+        // No session attached — still a real path so chat SEARCH can run.
+        let cwd = assistant.workspaceDirectoryForChat()
+        XCTAssertFalse(cwd.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cwd))
     }
 
     func testPetHitRectNilWithoutPet() {
@@ -203,8 +214,16 @@ final class PetAssistantTests: XCTestCase {
     }
 
     func testChatTabEmbedsExistingAssistantAtFullHeight() {
+        // Measures the AppKit panel's own subview layout; pin that path.
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
         let controller = CodeViewController(config: AppConfig())
         let assistant = PetAssistant(config: AppConfig())
+        // Capture the detached panel that attachAssistant will mount. Asking
+        // for another panel after attachment intentionally creates a second
+        // multi-pane surface, which has no window geometry or first responder.
+        let panel = assistant.makeSidebarPanelView()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 600),
             styleMask: [.titled, .resizable], backing: .buffered, defer: false)
@@ -218,7 +237,6 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertTrue(controller.chatPageUsesAssistantForTesting(assistant))
         XCTAssertGreaterThan(controller.chatPageFrameForTesting.height, 500)
 
-        let panel = assistant.makeSidebarPanelView()
         XCTAssertEqual(panel.newChatTitleForTesting, "New")
         XCTAssertEqual(
             panel.emptyStateForTesting,
@@ -251,6 +269,11 @@ final class PetAssistantTests: XCTestCase {
     }
 
     func testChatComposerHasEffortAndTransparentSurface() {
+        // Asserts the AppKit panel's own subviews; pin that path so
+        // the ShadKit default doesn't hide what's being measured.
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
         let assistant = PetAssistant(config: AppConfig())
         let panel = assistant.makeSidebarPanelView()
         panel.frame = NSRect(x: 0, y: 0, width: 320, height: 600)
@@ -289,6 +312,9 @@ final class PetAssistantTests: XCTestCase {
     }
 
     func testComposerControlsSitBelowInputAndQueuedTurnsSitAboveIt() {
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
         let panel = PetAssistant(config: AppConfig()).makeSidebarPanelView()
         panel.frame = NSRect(x: 0, y: 0, width: 360, height: 600)
         panel.setQueuedMessages(["second question", "third question"])
@@ -393,14 +419,988 @@ final class PetAssistantTests: XCTestCase {
         panel.newChatForTesting()
         panel.submitForTesting("new chat")
 
-        XCTAssertEqual(panel.queuedMessagesForTesting, ["new chat"])
+        // New chat cancels the previous thread's queue and frees the runner,
+        // so "new chat" starts immediately rather than sitting queued.
+        XCTAssertEqual(started, ["old in flight", "new chat"])
+        XCTAssertEqual(completions.count, 2)
         completions[0]("stale answer", ["Old.swift"], "old")
 
-        XCTAssertEqual(started, ["old in flight", "new chat"])
         XCTAssertFalse(panel.transcriptForTesting.contains("stale answer"))
         XCTAssertFalse(panel.transcriptForTesting.contains("old queued"))
         XCTAssertEqual(panel.transcriptForTesting, "YOU\nnew chat")
         XCTAssertFalse(panel.showsFilesButtonForTesting)
+        XCTAssertTrue(panel.isShowingTypingIndicatorForTesting)
+
+        completions[1]("fresh answer", [], nil)
+        XCTAssertTrue(panel.transcriptForTesting.contains("fresh answer"))
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testNewThreadDoesNotInheritRecoveredSessionContext() throws {
+        var requests: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { request, _, _, _ in requests.append(request) })
+        let panel = assistant.makeSidebarPanelView()
+        assistant.prepareRecovery(
+            context: "PRIVATE RECOVERED SESSION", provider: .codex)
+
+        panel.newChatForTesting()
+        panel.submitForTesting("fresh thread")
+
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request, "fresh thread")
+        XCTAssertFalse(request.contains("PRIVATE RECOVERED SESSION"))
+    }
+
+    func testComposerInputIsHardBoundedByUTF8Bytes() throws {
+        var requests: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { request, _, _, _ in requests.append(request) })
+        let panel = assistant.makeSidebarPanelView()
+        let oversized = String(
+            repeating: "界",
+            count: PetAssistant.maximumComposerInputBytesForTesting)
+            + "-must-not-survive"
+
+        panel.submitForTesting(oversized)
+
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertLessThanOrEqual(
+            request.utf8.count,
+            PetAssistant.maximumComposerInputBytesForTesting)
+        XCTAssertTrue(request.contains("[truncated]"))
+        XCTAssertFalse(request.contains("-must-not-survive"))
+    }
+
+    func testMultiChatKeepsPriorThreadWhenStartingNew() {
+        var completions: [PetAssistant.AskCompletion] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { _, _, _, completion in
+                completions.append(completion)
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("first thread question")
+        XCTAssertEqual(completions.count, 1)
+        completions[0]("first answer", [], nil)
+        XCTAssertTrue(panel.transcriptForTesting.contains("first thread question"))
+        XCTAssertTrue(panel.transcriptForTesting.contains("first answer"))
+
+        panel.newChatForTesting()
+        XCTAssertEqual(panel.transcriptForTesting, "")
+        XCTAssertEqual(assistant.threadCountForTesting, 2)
+        XCTAssertEqual(assistant.activeThreadTitleForTesting, "New chat")
+
+        // Prior thread remains selectable and still has its transcript.
+        let priorId = assistant.threadIdsForTesting[1]
+        assistant.selectThreadForTesting(priorId)
+        XCTAssertTrue(panel.transcriptForTesting.contains("first answer"))
+        XCTAssertEqual(assistant.activeThreadTitleForTesting, "first thread question")
+    }
+
+    func testDroppingActiveThreadResumesQueuedRequestFromAnotherThread() {
+        var started: [String] = []
+        var completions: [PetAssistant.AskCompletion] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { request, _, _, completion in
+                started.append(request)
+                completions.append(completion)
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("thread A seed")
+        completions[0]("thread A answer", [], nil)
+        let threadA = assistant.threadIdsForTesting[0]
+
+        panel.newChatForTesting()
+        let threadB = assistant.threadIdsForTesting[0]
+        panel.submitForTesting("thread B active")
+        assistant.selectThreadForTesting(threadA)
+        panel.submitForTesting("thread A queued")
+        XCTAssertEqual(panel.queuedMessagesForTesting, ["thread A queued"])
+
+        assistant.selectThreadForTesting(threadB)
+        panel.newChatForTesting()
+
+        XCTAssertEqual(
+            started,
+            ["thread A seed", "thread B active", "thread A queued"],
+            "cancelling B must immediately release the global request gate for A")
+        completions[1]("stale B answer", [], nil)
+        completions[2]("queued A answer", [], nil)
+        assistant.selectThreadForTesting(threadA)
+        XCTAssertTrue(panel.transcriptForTesting.contains("queued A answer"))
+        XCTAssertFalse(panel.transcriptForTesting.contains("stale B answer"))
+    }
+
+    func testFileResultsStayWithTheirThreadWhenCompletionArrivesInBackground() {
+        var completions: [PetAssistant.AskCompletion] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { _, _, _, completion in completions.append(completion) })
+        let panel = assistant.makeSidebarPanelView()
+        var shown: [([String], String?)] = []
+        assistant.onShowInSidePanel = { shown.append(($0, $1)) }
+
+        panel.submitForTesting("find alpha")
+        completions[0]("alpha answer", ["Alpha.swift"], "alpha")
+        let alphaThread = assistant.threadIdsForTesting[0]
+
+        panel.newChatForTesting()
+        let betaThread = assistant.threadIdsForTesting[0]
+        panel.submitForTesting("find beta")
+        assistant.selectThreadForTesting(alphaThread)
+        completions[1]("beta answer", ["Beta.swift"], "beta")
+
+        XCTAssertTrue(panel.showsFilesButtonForTesting)
+        panel.showFilesForTesting()
+        XCTAssertEqual(shown.last?.0, ["Alpha.swift"])
+        XCTAssertEqual(shown.last?.1, "alpha")
+
+        assistant.selectThreadForTesting(betaThread)
+        XCTAssertTrue(panel.showsFilesButtonForTesting)
+        panel.showFilesForTesting()
+        XCTAssertEqual(shown.last?.0, ["Beta.swift"])
+        XCTAssertEqual(shown.last?.1, "beta")
+    }
+
+    func testLateBackendPartialCannotPaintTheNewThread() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let firstStarted = expectation(description: "first backend turn")
+        let secondStarted = expectation(description: "second backend turn")
+        let freshFinished = expectation(description: "fresh answer accepted")
+        var turns: [(
+            partial: ((String) -> Void)?,
+            done: (PetAssistant.AIOutcome) -> Void
+        )] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto],
+            backendRunner: { _, _, _, _, _, partial, _, done in
+                DispatchQueue.main.async {
+                    turns.append((partial, done))
+                    (turns.count == 1 ? firstStarted : secondStarted).fulfill()
+                }
+            })
+        assistant.onPetMessage = { answer in
+            if answer == "fresh answer" { freshFinished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("old request")
+        wait(for: [firstStarted], timeout: 2)
+        panel.newChatForTesting()
+        panel.submitForTesting("new request")
+        wait(for: [secondStarted], timeout: 2)
+
+        turns[1].partial?("fresh partial")
+        XCTAssertEqual(panel.streamingTextForTesting, "fresh partial")
+        turns[0].partial?("late stale partial")
+        XCTAssertEqual(
+            panel.streamingTextForTesting, "fresh partial",
+            "a cancelled request must not overwrite the new request's tail")
+
+        turns[0].done(.text("stale answer"))
+        turns[1].done(.text("fresh answer"))
+        wait(for: [freshFinished], timeout: 2)
+        XCTAssertFalse(panel.transcriptForTesting.contains("stale answer"))
+        XCTAssertTrue(panel.transcriptForTesting.contains("fresh answer"))
+    }
+
+    func testStatefulProviderRoundTripReleasesAndBootstrapsVisibleHistory() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-test-a",
+            displayName: "Codex A", symbolName: "o.circle")
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude, modelID: "claude-test-b",
+            displayName: "Claude B", symbolName: "a.circle")
+        let starts = (1...3).map { expectation(description: "turn \($0) started") }
+        let finishes = (1...3).map { expectation(description: "turn \($0) finished") }
+        var prompts: [String] = []
+        var systems: [String] = []
+        var backends: [PetAssistant.Backend] = []
+        var conversationIDs: [String?] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        var releases: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex, claude],
+            backendRunner: { backend, system, user, _, conversationID, _, _, done in
+                DispatchQueue.main.async {
+                    backends.append(backend)
+                    systems.append(system)
+                    prompts.append(user)
+                    conversationIDs.append(conversationID)
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            },
+            conversationReleaser: { releases.append($0) })
+        assistant.onPetMessage = { answer in
+            if let number = Int(answer.replacingOccurrences(of: "answer ", with: "")),
+               (1...3).contains(number) {
+                finishes[number - 1].fulfill()
+            }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("question one")
+        wait(for: [starts[0]], timeout: 2)
+        dones[0](.text("answer 1"))
+        wait(for: [finishes[0]], timeout: 2)
+
+        panel.selectModelForTesting(2)
+        panel.submitForTesting("question two")
+        wait(for: [starts[1]], timeout: 2)
+        dones[1](.text("answer 2"))
+        wait(for: [finishes[1]], timeout: 2)
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("question three")
+        wait(for: [starts[2]], timeout: 2)
+
+        XCTAssertFalse(prompts[0].contains("--- prior chat turns ---"))
+        XCTAssertTrue(prompts[1].contains("question one"))
+        XCTAssertTrue(prompts[1].contains("answer 1"))
+        XCTAssertTrue(prompts[2].contains("question two"))
+        XCTAssertTrue(prompts[2].contains("answer 2"))
+        XCTAssertEqual(backends, [
+            .codex(model: "gpt-test-a"),
+            .claude(model: "claude-test-b"),
+            .codex(model: "gpt-test-a"),
+        ])
+        XCTAssertEqual(
+            Set(conversationIDs.compactMap { $0 }).count, 3,
+            "each provider lifecycle replacement must rotate its transport epoch")
+        XCTAssertTrue(systems.dropFirst().allSatisfy { $0 == systems[0] })
+        XCTAssertEqual(
+            releases.count, 2,
+            "A→B→A must reset keyed state before injecting visible history")
+
+        dones[2](.text("answer 3"))
+        wait(for: [finishes[2]], timeout: 2)
+    }
+
+    func testStatefulCWDChangesReleaseCodexAndClaudeBeforeHistoryBootstrap() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-test",
+            displayName: "Codex", symbolName: "o.circle")
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude, modelID: "claude-test",
+            displayName: "Claude", symbolName: "a.circle")
+        let starts = (1...4).map { expectation(description: "cwd turn \($0)") }
+        let finishes = (1...3).map { expectation(description: "cwd finish \($0)") }
+        var prompts: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        var releases: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex, claude],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    prompts.append(user)
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            },
+            conversationReleaser: { releases.append($0) })
+        assistant.onPetMessage = { answer in
+            if let number = Int(answer.replacingOccurrences(of: "cwd answer ", with: "")),
+               (1...3).contains(number) {
+                finishes[number - 1].fulfill()
+            }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        assistant.setWorkspaceDirectoryForTesting("/tmp/infinitty-cwd-a")
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("codex cwd one")
+        wait(for: [starts[0]], timeout: 2)
+        dones[0](.text("cwd answer 1"))
+        wait(for: [finishes[0]], timeout: 2)
+
+        assistant.setWorkspaceDirectoryForTesting("/tmp/infinitty-cwd-b")
+        panel.submitForTesting("codex cwd two")
+        wait(for: [starts[1]], timeout: 2)
+        XCTAssertTrue(prompts[1].contains("codex cwd one"))
+        XCTAssertEqual(releases.count, 1)
+        dones[1](.text("cwd answer 2"))
+        wait(for: [finishes[1]], timeout: 2)
+
+        panel.selectModelForTesting(2)
+        panel.submitForTesting("claude cwd one")
+        wait(for: [starts[2]], timeout: 2)
+        dones[2](.text("cwd answer 3"))
+        wait(for: [finishes[2]], timeout: 2)
+
+        assistant.setWorkspaceDirectoryForTesting("/tmp/infinitty-cwd-c")
+        panel.submitForTesting("claude cwd two")
+        wait(for: [starts[3]], timeout: 2)
+        XCTAssertTrue(prompts[3].contains("claude cwd one"))
+        XCTAssertEqual(
+            releases.count, 3,
+            "Codex cwd, provider, and Claude cwd transitions each reset keyed state")
+        dones[3](.text("cwd answer 4"))
+    }
+
+    func testCancelledStatefulThreadBootstrapsHistoryWhenResumed() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-test",
+            displayName: "Codex", symbolName: "o.circle")
+        let starts = (1...2).map { expectation(description: "cancel turn \($0)") }
+        let firstFinished = expectation(description: "first turn finished")
+        var prompts: [String] = []
+        var conversationIDs: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        var releases: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { _, _, user, _, conversationID, _, _, done in
+                DispatchQueue.main.async {
+                    prompts.append(user)
+                    conversationIDs.append(conversationID ?? "")
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            },
+            conversationReleaser: { releases.append($0) })
+        assistant.onPetMessage = { answer in
+            if answer == "first answer" { firstFinished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("first question")
+        wait(for: [starts[0]], timeout: 2)
+        let firstToolScope = assistant.activeToolEventScopeIDForTesting
+        dones[0](.text("first answer"))
+        wait(for: [firstFinished], timeout: 2)
+
+        assistant.cancelConversationWork()
+        panel.submitForTesting("after cancellation")
+        wait(for: [starts[1]], timeout: 2)
+
+        XCTAssertTrue(prompts[1].contains("first question"))
+        XCTAssertTrue(prompts[1].contains("first answer"))
+        XCTAssertEqual(releases.count, 1)
+        XCTAssertNotEqual(
+            conversationIDs[0], conversationIDs[1],
+            "cancellation must retry on a new transport epoch")
+        XCTAssertEqual(firstToolScope, conversationIDs[0])
+        XCTAssertEqual(assistant.activeToolEventScopeIDForTesting, conversationIDs[1])
+        XCTAssertNotEqual(
+            firstToolScope, assistant.activeToolEventScopeIDForTesting,
+            "tool-event scope must advance with the cancelled transport epoch")
+        dones[1](.text("resumed answer"))
+    }
+
+    func testCombinedBackendsBoundTheActualModelVisibleItemAndKeepNewestSuffix() {
+        let system = String(
+            repeating: "s", count: PetAssistant.systemPromptBytesForTesting)
+        let newestSuffix = String(repeating: "界", count: 400)
+            + "-CURRENT-REQUEST-END"
+        let user = String(repeating: "old-context-", count: 2_000)
+            + newestSuffix
+        let combinedBackends: [PetAssistant.Backend] = [
+            .command("custom-agent"),
+            .codex(model: "gpt-test"),
+            .opencode(model: "open-test"),
+            .hermes(model: "hermes-test"),
+            .amp(model: "amp-test"),
+        ]
+
+        XCTAssertEqual(
+            PetAssistant.maximumCombinedUserBytesForTesting,
+            PetAssistant.maximumBackendUserBytesForTesting
+                - PetAssistant.systemPromptBytesForTesting - 2)
+        for backend in combinedBackends {
+            let payload = PetAssistant.boundedBackendPayload(
+                for: backend, system: system, user: user)
+            XCTAssertEqual(payload.system, system)
+            XCTAssertLessThanOrEqual(
+                (payload.system + "\n\n" + payload.user).utf8.count,
+                PetAssistant.maximumBackendUserBytesForTesting)
+            XCTAssertTrue(
+                payload.user.hasSuffix(newestSuffix),
+                "\(backend) discarded the newest request suffix")
+        }
+    }
+
+    func testInvalidateBeforeQueuedBackendStartReleasesRegistrationWithoutInvocation() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-gated",
+            displayName: "Codex gated", symbolName: "o.circle")
+        var scheduled: [() -> Void] = []
+        var registrations: [String] = []
+        var releases: [String] = []
+        var backendInvocations = 0
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { _, _, _, _, _, _, _, _ in
+                backendInvocations += 1
+            },
+            backendWorkScheduler: { scheduled.append($0) },
+            conversationRegistrar: { _, _, _, id in registrations.append(id) },
+            conversationReleaser: { releases.append($0) })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("queued request")
+
+        XCTAssertEqual(scheduled.count, 1)
+        XCTAssertEqual(registrations.count, 1)
+        assistant.invalidate()
+        XCTAssertEqual(releases, registrations)
+
+        scheduled[0]()
+        XCTAssertEqual(backendInvocations, 0)
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testCancellationAfterFirstStartGuardStillPreventsBackendInvocation() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-boundary",
+            displayName: "Codex boundary", symbolName: "o.circle")
+        var scheduled: [() -> Void] = []
+        var registrations: [String] = []
+        var releases: [String] = []
+        var backendInvocations = 0
+        weak var weakAssistant: PetAssistant?
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { _, _, _, _, _, _, _, _ in
+                backendInvocations += 1
+            },
+            backendWorkScheduler: { scheduled.append($0) },
+            backendStartBoundaryObserver: {
+                weakAssistant?.cancelConversationWork()
+            },
+            conversationRegistrar: { _, _, _, id in registrations.append(id) },
+            conversationReleaser: { releases.append($0) })
+        weakAssistant = assistant
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("cancel at start boundary")
+        XCTAssertEqual(scheduled.count, 1)
+
+        scheduled[0]()
+        XCTAssertEqual(backendInvocations, 0)
+        XCTAssertEqual(releases, registrations)
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testLeavingCompletedStatefulThreadKeepsItsTransportEpochOnReturn() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-stable",
+            displayName: "Codex stable", symbolName: "o.circle")
+        let starts = (1...2).map { expectation(description: "stable turn \($0)") }
+        let firstFinished = expectation(description: "stable first finished")
+        var conversationIDs: [String] = []
+        var prompts: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        var releases: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { _, _, user, _, conversationID, _, _, done in
+                DispatchQueue.main.async {
+                    conversationIDs.append(conversationID ?? "")
+                    prompts.append(user)
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            },
+            conversationReleaser: { releases.append($0) })
+        assistant.onPetMessage = { answer in
+            if answer == "stable answer one" { firstFinished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("stable question one")
+        wait(for: [starts[0]], timeout: 2)
+        let firstToolScope = assistant.activeToolEventScopeIDForTesting
+        dones[0](.text("stable answer one"))
+        wait(for: [firstFinished], timeout: 2)
+        let completedThread = assistant.threadIdsForTesting[0]
+
+        panel.newChatForTesting()
+        assistant.selectThreadForTesting(completedThread)
+        panel.submitForTesting("stable question two")
+        wait(for: [starts[1]], timeout: 2)
+
+        XCTAssertEqual(conversationIDs[0], conversationIDs[1])
+        XCTAssertEqual(firstToolScope, assistant.activeToolEventScopeIDForTesting)
+        XCTAssertEqual(releases, [])
+        XCTAssertFalse(
+            prompts[1].contains("stable answer one"),
+            "the retained stateful session must not receive duplicate visible history")
+        dones[1](.text("stable answer two"))
+    }
+
+    func testFailedStatefulTransitionRetriesWithReleaseAndHistoryBootstrap() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-before-failure",
+            displayName: "Codex before failure", symbolName: "o.circle")
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude, modelID: "claude-after-failure",
+            displayName: "Claude after failure", symbolName: "a.circle")
+        let starts = (1...3).map { expectation(description: "failure turn \($0)") }
+        let firstFinished = expectation(description: "pre-transition answer finished")
+        let failureFinished = expectation(description: "transition failure finished")
+        var prompts: [String] = []
+        var conversationIDs: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        var registrations: [String] = []
+        var releases: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex, claude],
+            backendRunner: { _, _, user, _, conversationID, _, _, done in
+                DispatchQueue.main.async {
+                    prompts.append(user)
+                    conversationIDs.append(conversationID ?? "")
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            },
+            conversationRegistrar: { _, _, _, id in registrations.append(id) },
+            conversationReleaser: { releases.append($0) })
+        assistant.onPetMessage = { answer in
+            if answer == "before transition answer" {
+                firstFinished.fulfill()
+            } else if answer == "transition failed" {
+                failureFinished.fulfill()
+            }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("before transition question")
+        wait(for: [starts[0]], timeout: 2)
+        dones[0](.text("before transition answer"))
+        wait(for: [firstFinished], timeout: 2)
+
+        panel.selectModelForTesting(2)
+        panel.submitForTesting("failing transition question")
+        wait(for: [starts[1]], timeout: 2)
+        dones[1](.failure("transition failed"))
+        wait(for: [failureFinished], timeout: 2)
+
+        panel.submitForTesting("retry transition question")
+        wait(for: [starts[2]], timeout: 2)
+
+        XCTAssertEqual(
+            Set(conversationIDs).count, 3,
+            "provider replacement and failed-session retry each need a fresh epoch")
+        XCTAssertEqual(registrations.count, 3)
+        XCTAssertEqual(
+            releases.count, 2,
+            "the provider transition and its failed bootstrap retry must both release")
+        XCTAssertTrue(prompts[2].contains("before transition question"))
+        XCTAssertTrue(prompts[2].contains("before transition answer"))
+        XCTAssertTrue(prompts[2].contains("failing transition question"))
+        XCTAssertTrue(prompts[2].contains("transition failed"))
+        dones[2](.text("retry succeeded"))
+    }
+
+    func testSteadyStatefulFailureAlsoReleasesAndBootstrapsRetry() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-steady-failure",
+            displayName: "Codex steady failure", symbolName: "o.circle")
+        let starts = (1...3).map { expectation(description: "steady failure \($0)") }
+        let seedFinished = expectation(description: "steady failure seed finished")
+        let failureFinished = expectation(description: "steady failure displayed")
+        var prompts: [String] = []
+        var conversationIDs: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        var releases: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { _, _, user, _, conversationID, _, _, done in
+                DispatchQueue.main.async {
+                    prompts.append(user)
+                    conversationIDs.append(conversationID ?? "")
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            },
+            conversationReleaser: { releases.append($0) })
+        assistant.onPetMessage = { answer in
+            if answer == "steady seed answer" {
+                seedFinished.fulfill()
+            } else if answer == "steady transport failed" {
+                failureFinished.fulfill()
+            }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("steady seed question")
+        wait(for: [starts[0]], timeout: 2)
+        dones[0](.text("steady seed answer"))
+        wait(for: [seedFinished], timeout: 2)
+
+        panel.submitForTesting("steady failing question")
+        wait(for: [starts[1]], timeout: 2)
+        dones[1](.failure("steady transport failed"))
+        wait(for: [failureFinished], timeout: 2)
+
+        panel.submitForTesting("steady retry question")
+        wait(for: [starts[2]], timeout: 2)
+
+        XCTAssertEqual(releases.count, 1)
+        XCTAssertEqual(conversationIDs[0], conversationIDs[1])
+        XCTAssertNotEqual(conversationIDs[1], conversationIDs[2])
+        XCTAssertTrue(prompts[2].contains("steady seed question"))
+        XCTAssertTrue(prompts[2].contains("steady seed answer"))
+        XCTAssertTrue(prompts[2].contains("steady failing question"))
+        XCTAssertTrue(prompts[2].contains("steady transport failed"))
+        dones[2](.text("steady retry succeeded"))
+    }
+
+    func testStatefulSearchFollowUpSendsOnlySearchResultsAfterBootstrapTurn() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "infinitty-stateful-search-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let matchedName = "backend-session-stateful-result.swift"
+        try Data("let statefulResult = true".utf8).write(
+            to: root.appendingPathComponent(matchedName))
+
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-search-seed",
+            displayName: "Codex search seed", symbolName: "o.circle")
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude, modelID: "claude-search",
+            displayName: "Claude search", symbolName: "a.circle")
+        let starts = (1...3).map { expectation(description: "stateful search \($0)") }
+        let seedFinished = expectation(description: "stateful search seed finished")
+        var prompts: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex, claude],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    prompts.append(user)
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            })
+        assistant.setWorkspaceDirectoryForTesting(root.path)
+        assistant.onPetMessage = { answer in
+            if answer == "stateful seed answer" { seedFinished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("stateful seed question")
+        wait(for: [starts[0]], timeout: 2)
+        dones[0](.text("stateful seed answer"))
+        wait(for: [seedFinished], timeout: 2)
+
+        panel.selectModelForTesting(2)
+        panel.submitForTesting("locate the stateful generated source")
+        wait(for: [starts[1]], timeout: 2)
+        XCTAssertTrue(prompts[1].contains("stateful seed question"))
+        XCTAssertTrue(prompts[1].contains("locate the stateful generated source"))
+        dones[1](.text("SEARCH: backend-session-stateful-result"))
+        wait(for: [starts[2]], timeout: 2)
+
+        XCTAssertTrue(prompts[2].contains(matchedName))
+        XCTAssertFalse(prompts[2].contains("--- prior chat turns ---"))
+        XCTAssertFalse(prompts[2].contains("stateful seed question"))
+        XCTAssertFalse(prompts[2].contains("stateful seed answer"))
+        XCTAssertFalse(prompts[2].contains("locate the stateful generated source"))
+        dones[2](.text("stateful search complete"))
+    }
+
+    func testStatelessSearchFollowUpRetainsHistoryAndCurrentRequest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "infinitty-stateless-search-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let matchedName = "backend-session-stateless-result.swift"
+        try Data("let statelessResult = true".utf8).write(
+            to: root.appendingPathComponent(matchedName))
+
+        let amp = PetAssistant.AgentChoice(
+            kind: .amp, modelID: "amp-stateless",
+            displayName: "Amp stateless", symbolName: "bolt")
+        let starts = (1...3).map { expectation(description: "stateless search \($0)") }
+        let seedFinished = expectation(description: "stateless search seed finished")
+        let historyEnd = "STATELESS-HISTORY-END"
+        let currentEnd = "STATELESS-CURRENT-END"
+        let largeHistoryAnswer = String(repeating: "h", count: 7_000) + historyEnd
+        let currentRequest = String(repeating: "q", count: 450) + currentEnd
+        var prompts: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, amp],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    prompts.append(user)
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            })
+        assistant.setWorkspaceDirectoryForTesting(root.path)
+        assistant.onPetMessage = { answer in
+            if answer.hasSuffix(historyEnd) { seedFinished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("stateless seed question")
+        wait(for: [starts[0]], timeout: 2)
+        dones[0](.text(largeHistoryAnswer))
+        wait(for: [seedFinished], timeout: 2)
+
+        panel.submitForTesting(currentRequest)
+        wait(for: [starts[1]], timeout: 2)
+        dones[1](.text("SEARCH: backend-session-stateless-result"))
+        wait(for: [starts[2]], timeout: 2)
+
+        XCTAssertTrue(prompts[2].contains(matchedName))
+        XCTAssertTrue(prompts[2].contains(historyEnd))
+        XCTAssertTrue(prompts[2].contains(currentEnd))
+        dones[2](.text("stateless search complete"))
+    }
+
+    func testCancelledSearchDirectiveCannotStartFollowUpTransport() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-search-cancel",
+            displayName: "Codex search cancel", symbolName: "o.circle")
+        let firstStarted = expectation(description: "search source turn")
+        var invocations = 0
+        var firstDone: ((PetAssistant.AIOutcome) -> Void)?
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { _, _, _, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    invocations += 1
+                    firstDone = done
+                    firstStarted.fulfill()
+                }
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("search then cancel")
+        wait(for: [firstStarted], timeout: 2)
+        panel.newChatForTesting()
+        firstDone?(.text("SEARCH: no-such-cancelled-search-result"))
+
+        XCTAssertEqual(invocations, 1)
+        XCTAssertEqual(panel.transcriptForTesting, "")
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testBrowserAnnotationContextKeepsNewestMarkerThroughPanelAndBackendBounds() throws {
+        let newestMarker = "NEWEST-MARKER-SURVIVES-END-TO-END"
+        let annotations = (1...40).map { index in
+            BrowserAnnotation(
+                id: "annotation-\(index)",
+                browserID: "browser-e2e",
+                createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
+                url: "https://example.com/review/\(index)",
+                title: "Review page \(index)",
+                documentID: 7,
+                anchorRef: "anchor-\(index)",
+                ref: "",
+                tag: "button",
+                role: "button",
+                accessibleName: "Save item \(index)",
+                text: "Save item \(index)",
+                selector: "button:nth-of-type(\(index))",
+                outerHTML: "",
+                comment: index == 40
+                    ? String(repeating: "n", count: 1_800) + newestMarker
+                    : "older-\(index)-" + String(repeating: "o", count: 1_800),
+                screenshotPath: "/tmp/browser-\(index).png")
+        }
+        let context = BrowserAnnotation.aiContext(for: annotations)
+        XCTAssertLessThanOrEqual(
+            BrowserAnnotation.maximumAIContextBytes,
+            PetAssistant.maximumComposerInputBytesForTesting)
+        XCTAssertLessThanOrEqual(
+            context.utf8.count, BrowserAnnotation.maximumAIContextBytes)
+        let newestSectionRange = try XCTUnwrap(context.range(of: "## 40."))
+        let newestSection = String(context[newestSectionRange.lowerBound...])
+        XCTAssertTrue(newestSection.contains("Browser ID: browser-e2e"))
+        XCTAssertTrue(newestSection.contains("URL: https://example.com/review/40"))
+        XCTAssertTrue(newestSection.contains("Title: Review page 40"))
+        XCTAssertTrue(newestSection.contains("Selected element: button role=button name=Save item 40"))
+        XCTAssertTrue(newestSection.contains("Selector: button:nth-of-type(40)"))
+        XCTAssertTrue(newestSection.contains("Visible text: Save item 40"))
+        XCTAssertTrue(newestSection.contains(newestMarker))
+        XCTAssertTrue(newestSection.contains("Viewport screenshot: /tmp/browser-40.png"))
+
+        var config = AppConfig()
+        config.aiProvider = "codex"
+        config.codexModel = "gpt-browser-context-test"
+        let backendCalled = expectation(description: "bounded browser context reached backend")
+        var backendSystem: String?
+        var backendUser: String?
+        let assistant = PetAssistant(
+            config: config,
+            availableChoices: [.auto],
+            backendRunner: { _, system, user, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    backendSystem = system
+                    backendUser = user
+                    done(.text("review accepted"))
+                    backendCalled.fulfill()
+                }
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting(context)
+        wait(for: [backendCalled], timeout: 2)
+
+        let deliveredSystem = try XCTUnwrap(backendSystem)
+        let delivered = try XCTUnwrap(backendUser)
+        XCTAssertLessThanOrEqual(delivered.utf8.count, 10_000)
+        XCTAssertLessThanOrEqual(
+            (deliveredSystem + "\n\n" + delivered).utf8.count, 10_000)
+        XCTAssertTrue(
+            delivered.contains(newestSection),
+            "the complete newest annotation section must reach the backend intact")
+    }
+
+    func testProductionCommandBackendSuppressesStaleFinishSideEffects() throws {
+        let gate = FileManager.default.temporaryDirectory
+            .appendingPathComponent("infinitty-command-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: gate, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        let quotedGate = gate.path.replacingOccurrences(of: "'", with: "'\\''")
+
+        var config = AppConfig()
+        config.aiProvider = "none"
+        config.hintCommand = """
+        payload="$(cat)"
+        if [[ "$payload" == *"old production request"* ]]; then
+          touch '\(quotedGate)/old-started'
+          while [[ ! -e '\(quotedGate)/new-started' ]]; do sleep 0.01; done
+          print -r -- 'stale production answer'
+          touch '\(quotedGate)/old-finished'
+        else
+          touch '\(quotedGate)/new-started'
+          while [[ ! -e '\(quotedGate)/release-new' ]]; do sleep 0.01; done
+          print -r -- 'fresh production answer'
+        fi
+        """
+        let assistant = PetAssistant(
+            config: config, availableChoices: [.auto])
+        let panel = assistant.makeSidebarPanelView()
+        let staleNotification = expectation(description: "no stale pet notification")
+        staleNotification.isInverted = true
+        let freshNotification = expectation(description: "fresh pet notification")
+        var notifications: [String] = []
+        assistant.onPetMessage = { answer in
+            notifications.append(answer)
+            if answer == "stale production answer" {
+                staleNotification.fulfill()
+            } else if answer == "fresh production answer" {
+                freshNotification.fulfill()
+            }
+        }
+
+        panel.submitForTesting("old production request")
+        waitForFile(gate.appendingPathComponent("old-started"))
+        panel.newChatForTesting()
+        panel.submitForTesting("new production request")
+        waitForFile(gate.appendingPathComponent("new-started"))
+        waitForFile(gate.appendingPathComponent("old-finished"))
+        wait(for: [staleNotification], timeout: 0.35)
+
+        XCTAssertEqual(panel.transcriptForTesting, "YOU\nnew production request")
+        XCTAssertTrue(panel.isShowingTypingIndicatorForTesting)
+        XCTAssertEqual(notifications, [])
+
+        FileManager.default.createFile(
+            atPath: gate.appendingPathComponent("release-new").path,
+            contents: Data())
+        wait(for: [freshNotification], timeout: 2)
+
+        XCTAssertEqual(notifications, ["fresh production answer"])
+        XCTAssertTrue(panel.transcriptForTesting.contains("fresh production answer"))
+        XCTAssertFalse(panel.transcriptForTesting.contains("stale production answer"))
+    }
+
+    func testFullShadcnPanelDeactivatesLegacyLayoutAtZeroWidth() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let panel = PetAssistant(config: AppConfig()).makeSidebarPanelView()
+        panel.frame = .zero
+        panel.setQueuedMessages(["queued visibly"])
+        panel.setThinking(true)
+        panel.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(panel.legacyLayoutConstraintsAreInactiveForTesting)
+        XCTAssertEqual(panel.queuedMessagesForTesting, ["queued visibly"])
+        XCTAssertTrue(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testSwitchingThreadScopeClearsPriorToolCardsAndAcceptsOnlyNewScope() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        var completion: PetAssistant.AskCompletion?
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { _, _, _, done in completion = done })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("seed thread A")
+        completion?("answer A", [], nil)
+        let threadA = assistant.threadIdsForTesting[0]
+        let scopeA = assistant.activeToolEventScopeIDForTesting
+        AssistantToolEventBus.publish(
+            AssistantToolEvent(
+                id: "tool-a", name: "search", state: .running,
+                scopeID: scopeA))
+        XCTAssertEqual(panel.toolCardCountForTesting, 1)
+
+        panel.newChatForTesting()
+        let scopeB = assistant.activeToolEventScopeIDForTesting
+        XCTAssertEqual(panel.toolCardCountForTesting, 0)
+
+        AssistantToolEventBus.publish(
+            AssistantToolEvent(
+                id: "late-a", name: "read", state: .running,
+                scopeID: scopeA))
+        XCTAssertEqual(panel.toolCardCountForTesting, 0)
+        AssistantToolEventBus.publish(
+            AssistantToolEvent(
+                id: "tool-b", name: "write", state: .running,
+                scopeID: scopeB))
+        XCTAssertEqual(panel.toolCardCountForTesting, 1)
+
+        assistant.selectThreadForTesting(threadA)
+        XCTAssertEqual(panel.toolCardCountForTesting, 0)
+    }
+
+    private func waitForFile(_ url: URL, timeout: TimeInterval = 2) {
+        let appeared = expectation(description: "file appeared: \(url.lastPathComponent)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    appeared.fulfill()
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+        wait(for: [appeared], timeout: timeout + 0.25)
     }
 
     func testComposerListsInjectedProviderChoices() {
@@ -442,7 +1442,159 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertFalse(panel.selectProvider(.apple))
         XCTAssertTrue(panel.selectProvider(.codex))
     }
+
+    // MARK: - Provider icons
+
+    /// Every provider must produce an icon. Providers with no SVG (hermes has
+    /// none) must fall through to the SF Symbol — the path that used to trap
+    /// on `Bundle.module` and kill the app when chat opened.
+    func testEveryProviderYieldsAnIconEvenWithoutALogoAsset() {
+        let kinds: [PetAssistant.AgentChoice.Kind] =
+            [.auto, .claude, .codex, .opencode, .hermes, .amp, .apple]
+        for kind in kinds {
+            let choice = PetAssistant.AgentChoice(
+                kind: kind, modelID: nil, displayName: kind.providerLabel,
+                symbolName: kind.symbolName)
+            XCTAssertNotNil(PetAssistantPanelView.providerImage(for: choice),
+                            "\(kind.providerLabel) produced no icon")
+        }
+    }
+
+    /// The resource-bundle lookup must answer nil rather than trapping when
+    /// the bundle is absent, which is how it ships inside Infinitty.app.
+    func testResourceLookupIsNonTrappingForAMissingAsset() {
+        XCTAssertNil(Bundle.infinittyResourceURL(
+            forResource: "definitely-not-a-real-asset", withExtension: "svg",
+            subdirectory: "Logos"))
+    }
+
+    // MARK: - Model menu
+
+    /// Injected choices keep the panel machine-independent — no CLI is spawned.
+    private func panelWithProviders() -> PetAssistantPanelView {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-5.6-sol",
+            displayName: "Codex · GPT-5.6-Sol", symbolName: "o.circle")
+        let opencode = PetAssistant.AgentChoice(
+            kind: .opencode, modelID: nil,
+            displayName: "OpenCode · configured default", symbolName: "terminal")
+        return PetAssistant(config: AppConfig(), availableChoices: [.auto, codex, opencode])
+            .makeSidebarPanelView()
+    }
+
+    func testModelMenuIsProviderSubmenusWithNoTypedInput() {
+        let panel = panelWithProviders()
+
+        XCTAssertEqual(panel.modelMenuTopLevelForTesting, ["Auto", "Codex", "OpenCode"],
+                       "top level stays short: Auto plus one row per provider")
+
+        // The whole point of the change: nowhere in the tree can a model id be
+        // typed. Recursively assert the old escape hatch is gone.
+        func titles(of menu: NSMenu) -> [String] {
+            menu.items.flatMap { [$0.title] + ($0.submenu.map(titles(of:)) ?? []) }
+        }
+        let everything = titles(of: panel.modelMenuForTesting)
+        XCTAssertFalse(everything.contains { $0.hasPrefix("Custom…") },
+                       "found a Custom… row: \(everything)")
+    }
+
+    func testProviderSubmenuMarksTheProvidersOwnDefault() {
+        let panel = panelWithProviders()
+        panel.setDiscoveredForTesting(.loaded([
+            DiscoveredModel(id: "gpt-5.6-sol", name: "GPT-5.6-Sol", description: nil,
+                            isDefault: true, efforts: [], defaultEffort: nil, group: nil),
+            DiscoveredModel(id: "gpt-5.5", name: "GPT-5.5", description: nil,
+                            isDefault: false, efforts: [], defaultEffort: nil, group: nil),
+        ]), for: .codex)
+
+        XCTAssertEqual(panel.modelSubmenuTitlesForTesting(.codex),
+                       ["GPT-5.6-Sol  (default)", "GPT-5.5"])
+    }
+
+    func testProviderSubmenuExplainsItsOwnFailureAndOffersRetry() {
+        let panel = panelWithProviders()
+        panel.setDiscoveredForTesting(
+            .failed("Unrecognized key: plugins"), for: .opencode)
+
+        XCTAssertEqual(panel.modelSubmenuTitlesForTesting(.opencode),
+                       ["⚠ Unrecognized key: plugins", "Retry"])
+        XCTAssertEqual(panel.modelSubmenuEnabledTitlesForTesting(.opencode), ["Retry"],
+                       "the reason is a label; only Retry is clickable")
+    }
+
+    func testLargeProviderNestsBySubProvider() {
+        let panel = panelWithProviders()
+        // 123 real opencode models span opencode / opencode-go / fireworks-ai.
+        let models = (0..<15).map {
+            DiscoveredModel(id: "opencode/m\($0)", name: "M\($0)", description: nil,
+                            isDefault: false, efforts: [], defaultEffort: nil,
+                            group: "opencode")
+        } + (0..<10).map {
+            DiscoveredModel(id: "fireworks-ai/f\($0)", name: "F\($0)", description: nil,
+                            isDefault: false, efforts: [], defaultEffort: nil,
+                            group: "fireworks-ai")
+        }
+        panel.setDiscoveredForTesting(.loaded(models), for: .opencode)
+
+        XCTAssertEqual(panel.modelSubmenuTitlesForTesting(.opencode),
+                       ["opencode", "fireworks-ai"],
+                       "25 models nest one level rather than listing flat")
+    }
+
+    func testSmallProviderStaysFlatEvenWhenPrefixed() {
+        let panel = panelWithProviders()
+        panel.setDiscoveredForTesting(.loaded((0..<3).map {
+            DiscoveredModel(id: "opencode/m\($0)", name: "M\($0)", description: nil,
+                            isDefault: false, efforts: [], defaultEffort: nil,
+                            group: "opencode")
+        }), for: .opencode)
+
+        XCTAssertEqual(panel.modelSubmenuTitlesForTesting(.opencode), ["M0", "M1", "M2"])
+    }
+
+    func testEffortChipFollowsTheSelectedModel() {
+        let sol = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-5.6-sol", displayName: "Codex · GPT-5.6-Sol",
+            symbolName: "o.circle",
+            supportedEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+            defaultEffort: "low")
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude, modelID: "claude-fable-5", displayName: "Claude · Claude Fable 5",
+            symbolName: "a.circle")
+        let panel = PetAssistant(config: AppConfig(), availableChoices: [.auto, sol, claude])
+            .makeSidebarPanelView()
+
+        // Auto reports no efforts, so the fixed list stands.
+        XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "None", "Low", "Medium", "High"])
+
+        panel.selectModelForTesting(1)
+        XCTAssertEqual(panel.effortTitlesForTesting,
+                       ["Auto", "Low", "Medium", "High", "Xhigh", "Max", "Ultra"],
+                       "codex reports six efforts for Sol; the chip offers exactly those")
+
+        // A provider that says nothing about efforts restores the fixed list.
+        panel.selectModelForTesting(2)
+        XCTAssertEqual(panel.effortTitlesForTesting, ["Auto", "None", "Low", "Medium", "High"])
+    }
+
+    func testEffortSelectionSurvivesAModelSwitchThatStillOffersIt() {
+        let sol = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-5.6-sol", displayName: "Codex · Sol",
+            symbolName: "o.circle", supportedEfforts: ["low", "high"], defaultEffort: "low")
+        let panel = PetAssistant(config: AppConfig(), availableChoices: [.auto, sol])
+            .makeSidebarPanelView()
+
+        XCTAssertTrue(panel.selectEffort(named: "High"))
+        panel.selectModelForTesting(1)
+        XCTAssertEqual(panel.effortValueForTesting, "High",
+                       "High survives because Sol still offers it")
+    }
     func testPetClickPresentsIndependentAssistantPanel() throws {
+        // Asserts the AppKit panel's own subviews; pin that path so
+        // the ShadKit default doesn't hide what's being measured.
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
         let assistant = PetAssistant(config: AppConfig())
         let sidebarPanel = assistant.makeSidebarPanelView()
         let window = NSWindow(
@@ -463,7 +1615,7 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(popoverPanel.presentationForTesting, .popover)
         XCTAssertTrue(popoverPanel.showsCloseButtonForTesting)
         XCTAssertTrue(popoverPanel.usesGlassSurfaceForTesting)
-        XCTAssertEqual(popoverPanel.frame.size, NSSize(width: 380, height: 420))
+        XCTAssertEqual(popoverPanel.frame.size, NSSize(width: 400, height: 500))
 
         popoverPanel.submitForTesting("Hello")
         XCTAssertEqual(sidebarPanel.transcriptForTesting, popoverPanel.transcriptForTesting)
@@ -483,6 +1635,74 @@ final class PetAssistantTests: XCTestCase {
     /// (ai-provider set to an unrecognized value so ProviderDiscovery returns
     /// nil regardless of installed CLIs), routing falls through to the
     /// OpenAI endpoint, then the hint-command, then none.
+    func testResolveBackendRoutesCustomModelForNewProviders() {
+        let config = AppConfig()
+        let opencode = PetAssistant.AgentChoice(
+            kind: .opencode, modelID: "openai/gpt-5",
+            displayName: "OpenCode · openai/gpt-5", symbolName: "terminal")
+        XCTAssertEqual(
+            PetAssistant.resolveBackend(choice: opencode, config: config),
+            .opencode(model: "openai/gpt-5"))
+        let hermes = PetAssistant.AgentChoice(
+            kind: .hermes, modelID: "hermes-4",
+            displayName: "Hermes · hermes-4", symbolName: "brain")
+        XCTAssertEqual(
+            PetAssistant.resolveBackend(choice: hermes, config: config),
+            .hermes(model: "hermes-4"))
+        let amp = PetAssistant.AgentChoice(
+            kind: .amp, modelID: "claude-x",
+            displayName: "Amp · claude-x", symbolName: "bolt")
+        XCTAssertEqual(
+            PetAssistant.resolveBackend(choice: amp, config: config),
+            .amp(model: "claude-x"))
+    }
+
+    func testCustomModelChoiceRoundTripsThroughTitleResolution() {
+        // A user-typed gateway model (e.g. qwen) must route its exact id,
+        // not collapse to Auto — this is the "missing models" fix.
+        let custom = PetAssistant.AgentChoice(
+            kind: .claude, modelID: "qwen3.8-max-preview",
+            displayName: "Claude · qwen3.8-max-preview", symbolName: "a.circle")
+        let assistant = PetAssistant(config: AppConfig(), availableChoices: [.auto, custom])
+        XCTAssertEqual(
+            assistant.resolveBackend(forSelectedTitle: "Claude · qwen3.8-max-preview"),
+            .claude(model: "qwen3.8-max-preview"))
+    }
+
+    func testKindHelpersRoundTrip() {
+        for (kind, raw) in [
+            (PetAssistant.AgentChoice.Kind.claude, "claude"),
+            (.codex, "codex"),
+            (.opencode, "opencode"),
+            (.hermes, "hermes"),
+            (.amp, "amp"),
+        ] {
+            XCTAssertEqual(
+                PetAssistant.AgentChoice.Kind(configuredProvider: raw), kind)
+            XCTAssertFalse(kind.providerLabel.isEmpty)
+            XCTAssertFalse(kind.symbolName.isEmpty)
+        }
+        XCTAssertNil(PetAssistant.AgentChoice.Kind(configuredProvider: "bogus"))
+    }
+
+    func testRecentCustomModelsPersistAndDedupe() {
+        RecentCustomModels.clearForTesting()
+        defer { RecentCustomModels.clearForTesting() }
+        RecentCustomModels.record(
+            provider: "claude", id: "qwen3.8-max-preview",
+            name: "Claude · qwen3.8-max-preview")
+        RecentCustomModels.record(
+            provider: "claude", id: "qwen3.8-max-preview",
+            name: "Claude · qwen3.8-max-preview")
+        RecentCustomModels.record(
+            provider: "opencode", id: "openai/gpt-5",
+            name: "OpenCode · openai/gpt-5")
+        let loaded = RecentCustomModels.load()
+        XCTAssertEqual(loaded.count, 2, "duplicate provider+id must dedupe")
+        XCTAssertEqual(loaded.first?.modelID, "openai/gpt-5", "most-recent first")
+        XCTAssertEqual(loaded.first?.kind, .opencode)
+    }
+
     func testResolveBackendFallthroughWhenNoProvider() {
         var config = AppConfig()
         config.aiProvider = "none"  // unrecognized → preferredProvider returns nil

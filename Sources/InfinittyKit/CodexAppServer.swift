@@ -16,12 +16,19 @@ import Foundation
 /// bundled `infinitty-mcp` into Codex's config, so app-server's MCP runtime
 /// handles terminal tools out-of-process.
 final class CodexAppServer: @unchecked Sendable {
+    /// Item types that are the conversation itself rather than work the agent
+    /// did. Observed the hard way: `userMessage` rendered as a tool card until
+    /// it showed up on screen.
+    static let conversationalItemTypes: Set<String> = [
+        "agentMessage", "userMessage", "reasoning", "todoList",
+    ]
+
     static let shared = CodexAppServer()
 
     // MARK: - State
 
     private let queue = DispatchQueue(label: "infinitty.codex.app-server")
-    private let turnGate = AgentTurnGate()
+    private let initializationGate = AgentTurnGate()
     private let executableURLOverride: URL?
     private let mcpExecutableURLOverride: URL?
     private var process: Process?
@@ -37,13 +44,32 @@ final class CodexAppServer: @unchecked Sendable {
     /// Buffer them until the async caller has installed its reducer.
     private var earlyTurnMessages: [String: [[String: Any]]] = [:]
     private var pendingIdleThreadIDs = Set<String>()
-    /// Most recently-created thread id; reused so each thread carries prior
-    /// turn context (matches openclicky's `CodexVoiceSession` model).
-    private var activeThreadID: String?
+    /// A caller-provided conversation id owns one Codex thread and one FIFO
+    /// gate. The legacy key preserves the pre-existing no-id call path.
+    private enum ConversationKey: Hashable {
+        case legacy
+        case identified(String)
+    }
+    private final class ConversationContext: @unchecked Sendable {
+        let token = UUID()
+        let turnGate = AgentTurnGate()
+        let scopeID: String?
+        var threadID: String?
+        var model: String?
+        var isReleased = false
+        var cancellationGeneration = 0
+
+        init(scopeID: String?) {
+            self.scopeID = scopeID
+        }
+    }
+    private var conversations: [ConversationKey: ConversationContext] = [:]
+    /// Explicit release is a lifecycle tombstone, not just dictionary
+    /// removal. A late keyed `turn` must not recreate released state; only
+    /// the next explicit `warmUp` registration may clear this marker.
+    private var tombstonedConversationIDs = Set<String>()
     /// Whether the JSON-RPC initialize handshake has completed.
     private var hasInitialized = false
-    /// Resolved model name used for the current thread.
-    private var currentModel: String?
 
     private static let requestTimeoutSeconds: TimeInterval = 130
 
@@ -65,23 +91,33 @@ final class CodexAppServer: @unchecked Sendable {
         cwd: String,
         model: String,
         effort: String = "medium",
-        timeout: TimeInterval = CodexAppServer.requestTimeoutSeconds
+        timeout: TimeInterval = CodexAppServer.requestTimeoutSeconds,
+        conversationID: String? = nil,
+        onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
-        await turnGate.acquire()
+        let context = try conversationContextForTurn(for: conversationID)
+        await context.turnGate.acquire()
         do {
             try Task.checkCancellation()
+            let generation = queue.sync { context.cancellationGeneration }
+            try ensureContextIsActive(context, generation: generation)
             try ensureProcess()
-            let threadID = try await ensureThread(model: model)
+            let threadID = try await ensureThread(model: model, context: context)
+            try ensureContextIsActive(context, generation: generation)
             let turnID = try await startTurn(
                 threadID: threadID,
                 prompt: prompt,
                 cwd: cwd,
-                effort: effort)
+                effort: effort,
+                context: context,
+                generation: generation,
+                onPartial: onPartial)
+            try ensureContextIsActive(context, generation: generation)
             let result = try await awaitTurn(turnID: turnID, timeout: timeout)
-            await turnGate.release()
+            await context.turnGate.release()
             return result
         } catch {
-            await turnGate.release()
+            await context.turnGate.release()
             throw error
         }
     }
@@ -90,14 +126,39 @@ final class CodexAppServer: @unchecked Sendable {
     /// turn so its cold start (Node init + booting the ~/.codex MCP
     /// servers) overlaps with the user still typing. Idempotent. This is
     /// the openclicky trick — warm on interaction, not on first ask.
-    func warmUp(model: String) {
+    func warmUp(model: String, conversationID: String? = nil) {
+        let context = registerConversationContext(for: conversationID)
         try? ensureProcess()
         Task { [weak self] in
             guard let self else { return }
-            await self.turnGate.acquire()
-            _ = try? await self.ensureThread(model: model)
-            await self.turnGate.release()
+            await context.turnGate.acquire()
+            if (try? self.ensureContextIsActive(context)) != nil {
+                _ = try? await self.ensureThread(model: model, context: context)
+            }
+            await context.turnGate.release()
         }
+    }
+
+    /// Cancel the active turn for one keyed conversation while retaining its
+    /// Codex thread for a later turn.
+    func cancelConversation(_ conversationID: String) {
+        cancelConversation(key: .identified(conversationID), release: false)
+    }
+
+    /// Forget one keyed conversation and cancel any turn it still owns. A
+    /// later explicit `warmUp` registration with the same id starts a fresh
+    /// Codex thread. A racing `turn` cannot silently recreate it.
+    func releaseConversation(_ conversationID: String) {
+        cancelConversation(key: .identified(conversationID), release: true)
+    }
+
+    /// Ask the app-server which models this account actually has. One RPC on
+    /// the already-warm process, so opening the model menu costs no spawn.
+    /// The result carries per-model reasoning efforts, which is what lets the
+    /// effort chip follow the selected model.
+    func listModels() async throws -> [String: Any] {
+        try ensureProcess()
+        return try await sendRequest(method: "model/list", params: [:])
     }
 
     /// Tear the bridge down. Called from `deinit`; safe to invoke multiple
@@ -113,8 +174,8 @@ final class CodexAppServer: @unchecked Sendable {
             if process?.isRunning == true { process?.terminate() }
             process = nil
             hasInitialized = false
-            activeThreadID = nil
-            currentModel = nil
+            for context in conversations.values { context.isReleased = true }
+            conversations.removeAll()
             for (_, continuation) in pending {
                 continuation.resume(throwing: CancellationError())
             }
@@ -152,6 +213,11 @@ final class CodexAppServer: @unchecked Sendable {
                 stdinHandle = nil
                 stdoutHandle = nil
                 stderrHandle = nil
+                hasInitialized = false
+                for context in conversations.values {
+                    context.threadID = nil
+                    context.model = nil
+                }
             }
             guard let executable = executableURLOverride
                     ?? CLIExecutableResolver.resolve(.codex) else {
@@ -199,7 +265,10 @@ final class CodexAppServer: @unchecked Sendable {
                     self.stderrHandle?.readabilityHandler = nil
                     self.process = nil
                     self.hasInitialized = false
-                    self.activeThreadID = nil
+                    for context in self.conversations.values {
+                        context.threadID = nil
+                        context.model = nil
+                    }
                     for (_, continuation) in self.pending {
                         continuation.resume(throwing: CodexBridgeError.processUnavailable(
                             "Codex app-server exited (\(proc.terminationStatus))."))
@@ -241,9 +310,13 @@ final class CodexAppServer: @unchecked Sendable {
 
     // MARK: - JSON-RPC
 
-    private func ensureThread(model: String) async throws -> String {
+    private func ensureThread(
+        model: String,
+        context: ConversationContext
+    ) async throws -> String {
         let cached: String? = queue.sync {
-            (activeThreadID.flatMap { currentModel == model ? $0 : nil })
+            guard !context.isReleased, context.model == model else { return nil }
+            return context.threadID
         }
         if let cached { return cached }
         let threadStart = try await sendRequest(method: "thread/start", params: [
@@ -254,15 +327,24 @@ final class CodexAppServer: @unchecked Sendable {
             throw CodexBridgeError.protocolViolation(
                 "thread/start did not return a thread id.")
         }
-        queue.sync {
-            activeThreadID = id
-            currentModel = model
+        let stored = queue.sync { () -> Bool in
+            guard !context.isReleased else { return false }
+            context.threadID = id
+            context.model = model
+            return true
         }
+        guard stored else { throw CancellationError() }
         return id
     }
 
     private func startTurn(
-        threadID: String, prompt: String, cwd: String, effort: String
+        threadID: String,
+        prompt: String,
+        cwd: String,
+        effort: String,
+        context: ConversationContext,
+        generation: Int,
+        onPartial: ((String) -> Void)?
     ) async throws -> String {
         let input: [[String: Any]] = [["type": "text", "text": prompt]]
         _ = queue.sync { pendingIdleThreadIDs.remove(threadID) }
@@ -282,8 +364,18 @@ final class CodexAppServer: @unchecked Sendable {
         guard let id = (turnResponse["turn"] as? [String: Any])?["id"] as? String else {
             throw CodexBridgeError.protocolViolation("turn/start returned no turn id.")
         }
-        queue.sync {
-            let reducer = TurnReducer(turnID: id, threadID: threadID)
+        let installed = queue.sync { () -> Bool in
+            guard !context.isReleased,
+                  context.cancellationGeneration == generation else {
+                earlyTurnMessages.removeValue(forKey: id)
+                return false
+            }
+            let reducer = TurnReducer(
+                turnID: id,
+                threadID: threadID,
+                conversationToken: context.token,
+                scopeID: context.scopeID,
+                onPartial: onPartial)
             activeTurns[id] = reducer
             let buffered = earlyTurnMessages.removeValue(forKey: id) ?? []
             for message in buffered { handleMessage(message) }
@@ -291,6 +383,11 @@ final class CodexAppServer: @unchecked Sendable {
                !reducer.isFinished, !reducer.snapshot().isEmpty {
                 reducer.finish(reducer.snapshot())
             }
+            return true
+        }
+        guard installed else {
+            interruptTurn(threadID: threadID, turnID: id)
+            throw CancellationError()
         }
         return id
     }
@@ -329,6 +426,7 @@ final class CodexAppServer: @unchecked Sendable {
                 if let r = self.activeTurns[turnID] {
                     r.fail(CancellationError())
                     self.activeTurns.removeValue(forKey: turnID)
+                    self.interruptTurn(threadID: r.threadID, turnID: turnID)
                 }
             }
         }
@@ -375,20 +473,28 @@ final class CodexAppServer: @unchecked Sendable {
     }
 
     private func ensureInitialized() async throws {
-        let already = queue.sync { hasInitialized }
-        guard !already else { return }
-        _ = try await sendRequest(
-            method: "initialize",
-            params: [
-                "clientInfo": [
-                    "name": "infinitty", "title": "infinitty", "version": "0.1",
-                ] as [String: Any],
-                "capabilities": [:] as [String: Any],
-            ],
-            requiresInitialization: false
-        )
-        queue.sync {
-            hasInitialized = true
+        await initializationGate.acquire()
+        do {
+            let already = queue.sync { hasInitialized }
+            if !already {
+                _ = try await sendRequest(
+                    method: "initialize",
+                    params: [
+                        "clientInfo": [
+                            "name": "infinitty", "title": "infinitty", "version": "0.1",
+                        ] as [String: Any],
+                        "capabilities": [:] as [String: Any],
+                    ],
+                    requiresInitialization: false
+                )
+                queue.sync {
+                    hasInitialized = true
+                }
+            }
+            await initializationGate.release()
+        } catch {
+            await initializationGate.release()
+            throw error
         }
         // Codex 0.144 dropped the `initialized` notification (it's
         // absorbed into the initialize response handshake). Sending it
@@ -459,8 +565,46 @@ final class CodexAppServer: @unchecked Sendable {
             let delta  = (params["delta"] as? String)
             if let turnID, let delta, let reducer = activeTurns[turnID] {
                 reducer.append(delta, itemID: itemID)
+                reducer.emitPartial()
+            }
+        // Item types that are the conversation itself rather than work the
+        // agent did. Observed the hard way: `userMessage` was rendering as a
+        // tool card until it showed up on screen.
+        case "item/started", "item/updated":
+            // Anything that isn't the agent talking or thinking is work it did
+            // — surface it as a tool card. The item type doubles as the name,
+            // so this holds up without hardcoding Codex's evolving type list.
+            if let item = params["item"] as? [String: Any],
+               let type = item["type"] as? String,
+               !CodexAppServer.conversationalItemTypes.contains(type),
+               let id = item["id"] as? String {
+                let scopeID = scopeIDForNotification(params)
+                AssistantToolEventBus.publish(
+                    AssistantToolEvent(
+                        id: id,
+                        name: type,
+                        state: .running,
+                        scopeID: scopeID))
             }
         case "item/completed":
+            // Same, for the terminal state.
+            if let item = params["item"] as? [String: Any],
+               let type = item["type"] as? String,
+               !CodexAppServer.conversationalItemTypes.contains(type),
+               let id = item["id"] as? String {
+                let failed = (item["status"] as? String).map {
+                    $0 == "failed" || $0 == "error"
+                } ?? false
+                let scopeID = scopeIDForNotification(params)
+                AssistantToolEventBus.publish(
+                    AssistantToolEvent(
+                        id: id,
+                        // No name on completion keeps the one from the start.
+                        name: "",
+                        state: failed ? .failed : .completed,
+                        output: item["text"] as? String,
+                        scopeID: scopeID))
+            }
             // 0.144 delivers the agent reply as a completed `agentMessage`
             // item carrying the FULL text. If that item never streamed
             // deltas (non-streaming models), take its text wholesale;
@@ -473,6 +617,7 @@ final class CodexAppServer: @unchecked Sendable {
             if let itemID = item["id"] as? String,
                let text = item["text"] as? String {
                 reducer.recordCompletedItem(id: itemID, text: text)
+                reducer.emitPartial()
             }
         case "thread/status/changed":
             guard let threadID = params["threadId"] as? String,
@@ -546,7 +691,8 @@ final class CodexAppServer: @unchecked Sendable {
         method: String, params: [String: Any]
     ) -> String? {
         switch method {
-        case "item/agentMessage/delta", "item/completed", "error":
+        case "item/agentMessage/delta", "item/started", "item/updated",
+             "item/completed", "error":
             return (params["turnId"] as? String) ?? (params["turn_id"] as? String)
         case "turn/completed", "turn/aborted", "turn/failed":
             let turn = params["turn"] as? [String: Any]
@@ -557,6 +703,96 @@ final class CodexAppServer: @unchecked Sendable {
             return nil
         }
     }
+
+    private func scopeIDForNotification(_ params: [String: Any]) -> String? {
+        guard let turnID = (params["turnId"] as? String)
+                ?? (params["turn_id"] as? String) else { return nil }
+        return activeTurns[turnID]?.scopeID
+    }
+
+    private func registerConversationContext(
+        for conversationID: String?
+    ) -> ConversationContext {
+        let key = conversationID.map(ConversationKey.identified) ?? .legacy
+        return queue.sync {
+            if let conversationID {
+                tombstonedConversationIDs.remove(conversationID)
+            }
+            if let context = conversations[key], !context.isReleased {
+                return context
+            }
+            let context = ConversationContext(scopeID: conversationID)
+            conversations[key] = context
+            return context
+        }
+    }
+
+    private func conversationContextForTurn(
+        for conversationID: String?
+    ) throws -> ConversationContext {
+        let key = conversationID.map(ConversationKey.identified) ?? .legacy
+        return try queue.sync {
+            if let conversationID,
+               tombstonedConversationIDs.contains(conversationID) {
+                throw CancellationError()
+            }
+            if let context = conversations[key], !context.isReleased {
+                return context
+            }
+            let context = ConversationContext(scopeID: conversationID)
+            conversations[key] = context
+            return context
+        }
+    }
+
+    private func ensureContextIsActive(
+        _ context: ConversationContext,
+        generation: Int? = nil
+    ) throws {
+        let isCancelled = queue.sync {
+            context.isReleased
+                || generation.map { context.cancellationGeneration != $0 } == true
+        }
+        if isCancelled { throw CancellationError() }
+    }
+
+    private func cancelConversation(
+        key: ConversationKey,
+        release: Bool
+    ) {
+        let turns: [(threadID: String, turnID: String)] = queue.sync {
+            if release, case .identified(let conversationID) = key {
+                tombstonedConversationIDs.insert(conversationID)
+            }
+            guard let context = conversations[key] else { return [] }
+            context.cancellationGeneration &+= 1
+            if release {
+                context.isReleased = true
+                conversations.removeValue(forKey: key)
+            }
+            let matches = activeTurns.values.filter {
+                $0.conversationToken == context.token && !$0.isFinished
+            }
+            for reducer in matches {
+                reducer.fail(CancellationError())
+                activeTurns.removeValue(forKey: reducer.turnID)
+            }
+            return matches.map { ($0.threadID, $0.turnID) }
+        }
+        for turn in turns {
+            interruptTurn(threadID: turn.threadID, turnID: turn.turnID)
+        }
+    }
+
+    /// Best-effort protocol cancellation. The local reducer is failed first,
+    /// so callers never depend on the app-server acknowledging the interrupt.
+    private func interruptTurn(threadID: String, turnID: String) {
+        Task { [weak self] in
+            _ = try? await self?.sendRequest(
+                method: "turn/interrupt",
+                params: ["threadId": threadID, "turnId": turnID])
+        }
+    }
 }
 
 // MARK: - Turn reducer
@@ -564,18 +800,31 @@ final class CodexAppServer: @unchecked Sendable {
 private final class TurnReducer: @unchecked Sendable {
     let turnID: String
     let threadID: String
+    let conversationToken: UUID
+    let scopeID: String?
     private(set) var buffer = ""
     /// Item ids that streamed via `item/agentMessage/delta`. Used to
     /// avoid double-counting when the same item later completes with
     /// its full text.
     private var streamedItemIDs = Set<String>()
     private var onComplete: ((Result<String, Error>) -> Void)?
+    private var onPartial: ((String) -> Void)?
+    private var lastPartialAt: Double = 0
     private var completionResult: Result<String, Error>?
     private let lock = NSLock()
 
-    init(turnID: String, threadID: String) {
+    init(
+        turnID: String,
+        threadID: String,
+        conversationToken: UUID,
+        scopeID: String?,
+        onPartial: ((String) -> Void)?
+    ) {
         self.turnID = turnID
         self.threadID = threadID
+        self.conversationToken = conversationToken
+        self.scopeID = scopeID
+        self.onPartial = onPartial
     }
 
     var isFinished: Bool { lock.withLock { completionResult != nil } }
@@ -600,6 +849,22 @@ private final class TurnReducer: @unchecked Sendable {
 
     func snapshot() -> String { lock.withLock { buffer } }
 
+    /// Throttle live partial callbacks independently for every in-flight turn.
+    func emitPartial() {
+        let delivery: (((String) -> Void), String)? = lock.withLock {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard completionResult == nil,
+                  now - lastPartialAt > 0.1,
+                  let onPartial,
+                  !buffer.isEmpty else { return nil }
+            lastPartialAt = now
+            return (onPartial, buffer)
+        }
+        if let (callback, text) = delivery {
+            DispatchQueue.main.async { callback(text) }
+        }
+    }
+
     func attach(_ completion: @escaping (Result<String, Error>) -> Void) {
         let completed: Result<String, Error>? = lock.withLock {
             if let result = completionResult { return result }
@@ -623,6 +888,7 @@ private final class TurnReducer: @unchecked Sendable {
             completionResult = result
             let saved = onComplete
             onComplete = nil
+            onPartial = nil
             return saved
         }
         callback?(result)

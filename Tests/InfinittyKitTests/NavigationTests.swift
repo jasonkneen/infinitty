@@ -1035,6 +1035,979 @@ final class NavigationTests: XCTestCase {
             .leaf(ObjectIdentifier(chat)))
     }
 
+    /// Multi-chat: terminal | (chat1 / chat2). Closing the terminal must leave
+    /// both chat leaves with non-zero geometry (no black empty chrome body).
+    func testClosingTerminalLeavesTwoChatPanesVisible() throws {
+        let chrome = TerminalChromeView(
+            frame: NSRect(x: 0, y: 0, width: 1_000, height: 700))
+        let root = PaneSplitView(frame: chrome.body.bounds)
+        root.isVertical = true
+        root.autoresizingMask = [.width, .height]
+        let chats = PaneSplitView(frame: .zero)
+        chats.isVertical = false
+        let terminal = TerminalView(frame: .zero)
+        let chat1 = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let chat2 = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        chrome.body.addSubview(root)
+        root.addArrangedSubview(terminal)
+        root.addArrangedSubview(chats)
+        chats.addArrangedSubview(chat1)
+        chats.addArrangedSubview(chat2)
+        chrome.layoutSubtreeIfNeeded()
+        root.adjustSubviews()
+        chats.adjustSubviews()
+
+        XCTAssertTrue(PaneLayoutController.removeLeaf(terminal, from: chrome.body))
+
+        XCTAssertTrue(chat1.superview === chats)
+        XCTAssertTrue(chat2.superview === chats)
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+        XCTAssertEqual(chrome.body.subviews.count, 1)
+        for pane in [chat1, chat2] {
+            let frame = pane.convert(pane.bounds, to: chrome.body)
+            XCTAssertGreaterThan(frame.width, 10, "pane frame=\(frame)")
+            // The live bug: width ~495, height 0 → black window.
+            XCTAssertGreaterThan(frame.height, 10, "zero-height leaf (black screen) frame=\(frame)")
+            XCTAssertTrue(chrome.body.bounds.insetBy(dx: -1, dy: -1).contains(frame),
+                          "pane frame=\(frame)")
+        }
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: chrome.body),
+            .split(vertical: false, children: [
+                .leaf(ObjectIdentifier(chat1)),
+                .leaf(ObjectIdentifier(chat2)),
+            ]))
+    }
+
+    /// Reproduces the live sequence that previously turned two surviving chats
+    /// into overlapping full-window root children after the middle chat closed.
+    func testRemovingMiddleChatKeepsOneRootAndBothSurvivorsVisible() throws {
+        let chrome = TerminalChromeView(
+            frame: NSRect(x: 0, y: 0, width: 1_000, height: 700))
+        let root = PaneSplitView(frame: chrome.body.bounds)
+        root.isVertical = true
+        root.autoresizingMask = [.width, .height]
+        let inner = PaneSplitView(frame: .zero)
+        inner.isVertical = true
+        let terminal = TerminalView(frame: .zero)
+        let chat1 = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let chat2 = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let chat3 = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        chrome.body.addSubview(root)
+        root.addArrangedSubview(terminal)
+        root.addArrangedSubview(inner)
+        inner.addArrangedSubview(chat1)
+        let lastPair = PaneSplitView(frame: .zero)
+        lastPair.isVertical = true
+        inner.addArrangedSubview(lastPair)
+        lastPair.addArrangedSubview(chat2)
+        lastPair.addArrangedSubview(chat3)
+        chrome.layoutSubtreeIfNeeded()
+        root.adjustSubviews()
+        inner.adjustSubviews()
+        lastPair.adjustSubviews()
+
+        XCTAssertTrue(PaneLayoutController.removeLeaf(terminal, from: chrome.body))
+        XCTAssertTrue(PaneLayoutController.removeLeaf(chat2, from: chrome.body))
+
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+        XCTAssertEqual(chrome.body.subviews.count, 1)
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: chrome.body),
+            .split(vertical: true, children: [
+                .leaf(ObjectIdentifier(chat1)),
+                .leaf(ObjectIdentifier(chat3)),
+            ]))
+        let firstFrame = chat1.convert(chat1.bounds, to: chrome.body)
+        let secondFrame = chat3.convert(chat3.bounds, to: chrome.body)
+        for frame in [firstFrame, secondFrame] {
+            XCTAssertGreaterThan(frame.width, 10, "pane frame=\(frame)")
+            XCTAssertGreaterThan(frame.height, 10, "pane frame=\(frame)")
+            XCTAssertTrue(chrome.body.bounds.contains(frame), "pane frame=\(frame)")
+        }
+        XCTAssertTrue(firstFrame.intersection(secondFrame).isEmpty)
+    }
+
+    func testAppDelegateClosesExactMiddleChatWithoutDestroyingSiblings() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.tabbingIdentifier = "infinitty"
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        chrome.autoresizingMask = [.width, .height]
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let chat1 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: anchor,
+            forceNewInstance: true))
+        chrome.layoutSubtreeIfNeeded()
+        let chat2 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: chat1,
+            forceNewInstance: true))
+        chrome.layoutSubtreeIfNeeded()
+        let chat3 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: chat2,
+            forceNewInstance: true))
+        chrome.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(PaneLayoutController.removeLeaf(anchor, from: chrome.body))
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat2, in: window))
+
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 2)
+        XCTAssertNil(chat2.superview)
+        XCTAssertTrue(chat1.isDescendant(of: chrome.body))
+        XCTAssertTrue(chat3.isDescendant(of: chrome.body))
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+        XCTAssertEqual(chrome.body.subviews.count, 1)
+        let firstFrame = chat1.convert(chat1.bounds, to: chrome.body)
+        let thirdFrame = chat3.convert(chat3.bounds, to: chrome.body)
+        XCTAssertTrue(firstFrame.intersection(thirdFrame).isEmpty)
+        XCTAssertGreaterThan(firstFrame.width, 10)
+        XCTAssertGreaterThan(thirdFrame.width, 10)
+    }
+
+    func testTerminalExitThenMiddleChatClosePreservesRealChatPanesAndOwners() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        chrome.autoresizingMask = [.width, .height]
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let bootstrap = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        bootstrap.frame = chrome.body.bounds
+        chrome.body.addSubview(bootstrap)
+        let terminal = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: bootstrap, vertical: true))
+        XCTAssertTrue(PaneLayoutController.removeLeaf(bootstrap, from: chrome.body))
+        let terminalPet = delegate.petAssistantForTesting(terminal)
+        let chat1 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: terminal.view,
+            forceNewInstance: true))
+        let chat2 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: chat1,
+            forceNewInstance: true))
+        let chat3 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: chat2,
+            forceNewInstance: true))
+        let assistant1 = try XCTUnwrap(delegate.utilityPaneAssistantForTesting(chat1))
+        let assistant2 = try XCTUnwrap(delegate.utilityPaneAssistantForTesting(chat2))
+        let assistant3 = try XCTUnwrap(delegate.utilityPaneAssistantForTesting(chat3))
+        chrome.layoutSubtreeIfNeeded()
+
+        delegate.sessionDidExitForTesting(terminal)
+
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 3)
+        XCTAssertNil(terminal.view.superview)
+        XCTAssertNil(terminalPet.onPetMessage)
+        XCTAssertFalse(assistant1.isAttached(to: terminal))
+        XCTAssertFalse(assistant2.isAttached(to: terminal))
+        XCTAssertFalse(assistant3.isAttached(to: terminal))
+        XCTAssertTrue(delegate.utilityPaneAssistantForTesting(chat1) === assistant1)
+        XCTAssertTrue(delegate.utilityPaneAssistantForTesting(chat2) === assistant2)
+        XCTAssertTrue(delegate.utilityPaneAssistantForTesting(chat3) === assistant3)
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+        XCTAssertEqual(chrome.body.subviews.count, 1)
+        chrome.layoutSubtreeIfNeeded()
+        let chat1RatioBeforeMiddleClose =
+            chat1.convert(chat1.bounds, to: chrome.body).width / chrome.body.bounds.width
+
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat2, in: window))
+
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 2)
+        XCTAssertNil(chat2.superview)
+        XCTAssertNil(assistant2.onPetMessage)
+        XCTAssertTrue(delegate.utilityPaneAssistantForTesting(chat1) === assistant1)
+        XCTAssertTrue(delegate.utilityPaneAssistantForTesting(chat3) === assistant3)
+        XCTAssertNotNil(assistant1.onPetMessage)
+        XCTAssertNotNil(assistant3.onPetMessage)
+        XCTAssertTrue(chat1.isDescendant(of: chrome.body))
+        XCTAssertTrue(chat3.isDescendant(of: chrome.body))
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+        XCTAssertEqual(chrome.body.subviews.count, 1)
+        chrome.layoutSubtreeIfNeeded()
+        let firstFrame = chat1.convert(chat1.bounds, to: chrome.body)
+        let thirdFrame = chat3.convert(chat3.bounds, to: chrome.body)
+        XCTAssertEqual(
+            firstFrame.width / chrome.body.bounds.width,
+            chat1RatioBeforeMiddleClose,
+            accuracy: 0.03)
+        for frame in [firstFrame, thirdFrame] {
+            XCTAssertGreaterThan(frame.width, 10, "pane frame=\(frame)")
+            XCTAssertGreaterThan(frame.height, 10, "pane frame=\(frame)")
+            XCTAssertTrue(chrome.body.bounds.contains(frame), "pane frame=\(frame)")
+        }
+        XCTAssertTrue(firstFrame.intersection(thirdFrame).isEmpty)
+    }
+
+    func testChatSplitMovesSharedPetOwnershipAndCloseReopenKeepsSessionsIsolated() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        chrome.autoresizingMask = [.width, .height]
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let source = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: anchor, vertical: true))
+        var submittedRequests: [String] = []
+        var requestCompletion: PetAssistant.AskCompletion?
+        let controlledPet = PetAssistant(
+            config: AppConfig(),
+            availableChoices: [.auto],
+            requestRunner: { request, _, _, completion in
+                submittedRequests.append(request)
+                requestCompletion = completion
+            })
+        delegate.installPetAssistantForTesting(controlledPet, for: source)
+        let sourcePet = delegate.petAssistantForTesting(source)
+        XCTAssertTrue(sourcePet === controlledPet)
+        window.makeFirstResponder(source.view)
+        let chat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: source.view))
+        XCTAssertTrue(delegate.utilityPaneAssistantForTesting(chat) === sourcePet)
+
+        let splitSession = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: chat, vertical: true))
+
+        XCTAssertTrue(sourcePet.isAttached(to: splitSession))
+        XCTAssertTrue(delegate.petAssistantForTesting(splitSession) === sourcePet)
+        let replacementSourcePet = delegate.petAssistantForTesting(source)
+        XCTAssertFalse(replacementSourcePet === sourcePet)
+        XCTAssertTrue(replacementSourcePet.isAttached(to: source))
+
+        sourcePet.submitForQA("finish after the Chat closes")
+        XCTAssertEqual(submittedRequests, ["finish after the Chat closes"])
+        let finishRequest = try XCTUnwrap(requestCompletion)
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat, in: window))
+        let survivingSplitPet = delegate.petAssistantForTesting(splitSession)
+        XCTAssertTrue(survivingSplitPet === sourcePet)
+        XCTAssertTrue(sourcePet.isAttached(to: splitSession))
+        XCTAssertNotNil(sourcePet.onPetMessage)
+        finishRequest("answer survived the ownership handoff", [], nil)
+        let retainedTranscript = survivingSplitPet.makeSidebarPanelView()
+            .transcriptForTesting
+        XCTAssertTrue(retainedTranscript.contains("finish after the Chat closes"))
+        XCTAssertTrue(retainedTranscript.contains("answer survived the ownership handoff"))
+
+        window.makeFirstResponder(source.view)
+        let reopened = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: source.view))
+        XCTAssertTrue(
+            delegate.utilityPaneAssistantForTesting(reopened) === replacementSourcePet)
+        XCTAssertFalse(
+            delegate.utilityPaneAssistantForTesting(reopened) === sourcePet)
+    }
+
+    func testChatSplitUsesItsAttachedTerminalContextInsteadOfFocusedSibling() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let attached = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: anchor, vertical: true))
+        let unrelated = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: attached.view, vertical: false))
+        attached.workingDirectory = "/tmp/chat-attached-context"
+        unrelated.workingDirectory = "/tmp/unrelated-focused-context"
+
+        window.makeFirstResponder(attached.view)
+        let chat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: attached.view))
+        let chatAssistant = try XCTUnwrap(
+            delegate.utilityPaneAssistantForTesting(chat))
+        XCTAssertTrue(chatAssistant.isAttached(to: attached))
+
+        window.makeFirstResponder(unrelated.view)
+        XCTAssertTrue(
+            delegate.sourceSessionForSplitForTesting(relativeTo: chat) === attached)
+        let expectedDirectory = attached.currentDirectory()
+        let split = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: chat, vertical: true))
+
+        XCTAssertEqual(split.workingDirectory, expectedDirectory)
+        XCTAssertTrue(chatAssistant.isAttached(to: split))
+        XCTAssertFalse(chatAssistant.isAttached(to: unrelated))
+    }
+
+    func testForceNewChatSplitKeepsPaneAssistantOutOfPetOwnership() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let source = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: anchor, vertical: true))
+        let sourcePet = delegate.petAssistantForTesting(source)
+        let chat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: source.view,
+            forceNewInstance: true))
+        let paneAssistant = try XCTUnwrap(
+            delegate.utilityPaneAssistantForTesting(chat))
+
+        XCTAssertFalse(paneAssistant === sourcePet)
+        XCTAssertTrue(paneAssistant.isAttached(to: source))
+        XCTAssertNotNil(paneAssistant.onPetMessage)
+
+        let split = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: chat, vertical: true))
+        XCTAssertTrue(paneAssistant.isAttached(to: split))
+        let splitPet = delegate.petAssistantForTesting(split)
+
+        XCTAssertFalse(splitPet === paneAssistant)
+        XCTAssertFalse(splitPet === sourcePet)
+        XCTAssertTrue(splitPet.isAttached(to: split))
+        XCTAssertTrue(sourcePet.isAttached(to: source))
+
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat, in: window))
+        XCTAssertNil(paneAssistant.onPetMessage)
+        XCTAssertNil(paneAssistant.onShowInSidePanel)
+        XCTAssertTrue(splitPet.isAttached(to: split))
+        XCTAssertNotNil(splitPet.onPetMessage)
+        XCTAssertTrue(sourcePet.isAttached(to: source))
+    }
+
+    func testBackgroundQuickTabEOFUsesOwningPageAndRetainsSmartPane() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        var cleanupSessions: [TerminalSession] = []
+        var cleanupPanes: [UtilityPaneView] = []
+        defer {
+            for pane in cleanupPanes {
+                if let window = pane.window {
+                    _ = delegate.closeUtilityPaneForTesting(pane, in: window)
+                }
+            }
+            cleanupSessions.forEach(delegate.sessionDidExitForTesting)
+        }
+
+        let (window, first) = try XCTUnwrap(
+            delegate.ensureQuickTerminalForTesting())
+        cleanupSessions.append(first)
+        let firstRoot = try XCTUnwrap(
+            delegate.quickTerminalRootForTesting(containing: first))
+        let firstChat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: first.view,
+            forceNewInstance: true))
+        cleanupPanes.append(firstChat)
+        let firstAssistant = try XCTUnwrap(
+            delegate.utilityPaneAssistantForTesting(firstChat))
+        let sibling = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: first.view, vertical: true))
+        cleanupSessions.append(sibling)
+
+        let second = try XCTUnwrap(delegate.newQuickTerminalTabForTesting())
+        cleanupSessions.append(second)
+        let secondRoot = try XCTUnwrap(
+            delegate.quickTerminalRootForTesting(containing: second))
+        let secondChat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: second.view,
+            forceNewInstance: true))
+        cleanupPanes.append(secondChat)
+        let secondAssistant = try XCTUnwrap(
+            delegate.utilityPaneAssistantForTesting(secondChat))
+        let firstLayoutHost = try XCTUnwrap(
+            delegate.quickTerminalLayoutHostForTesting(containing: firstChat))
+        let secondLayoutHost = try XCTUnwrap(
+            delegate.quickTerminalLayoutHostForTesting(containing: secondChat))
+
+        XCTAssertTrue(delegate.quickTerminalActiveRootForTesting === secondRoot)
+        XCTAssertEqual(delegate.quickTerminalTabCountForTesting, 2)
+        XCTAssertTrue(firstAssistant.isAttached(to: first))
+        XCTAssertTrue(secondAssistant.isAttached(to: second))
+
+        delegate.sessionDidExitForTesting(first)
+
+        XCTAssertTrue(delegate.quickTerminalActiveRootForTesting === secondRoot)
+        let activeResponder = try XCTUnwrap(window.firstResponder as? NSView)
+        XCTAssertTrue(
+            activeResponder === secondRoot
+                || activeResponder.isDescendant(of: secondRoot))
+        XCTAssertNil(first.view.superview)
+        XCTAssertTrue(sibling.view.isDescendant(of: firstRoot))
+        XCTAssertTrue(firstChat.isDescendant(of: firstRoot))
+        XCTAssertTrue(firstAssistant.isAttached(to: sibling))
+        XCTAssertTrue(secondAssistant.isAttached(to: second))
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(
+            in: window, rootedAt: firstRoot), 1)
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(
+            in: window, rootedAt: secondRoot), 1)
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: firstLayoutHost))
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: secondLayoutHost))
+
+        delegate.sessionDidExitForTesting(sibling)
+
+        XCTAssertEqual(delegate.quickTerminalTabCountForTesting, 2)
+        XCTAssertTrue(delegate.quickTerminalActiveRootForTesting === secondRoot)
+        XCTAssertTrue(firstChat.isDescendant(of: firstRoot))
+        XCTAssertFalse(firstAssistant.isAttached(to: sibling))
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: firstRoot),
+            .leaf(ObjectIdentifier(firstChat)))
+
+        // A real EOF arriving after this explicit teardown is idempotent.
+        delegate.sessionDidExitForTesting(sibling)
+        XCTAssertEqual(delegate.quickTerminalTabCountForTesting, 2)
+        XCTAssertTrue(firstChat.isDescendant(of: firstRoot))
+
+        XCTAssertTrue(delegate.closeQuickTerminalTabForTesting(containing: firstChat))
+        XCTAssertEqual(delegate.quickTerminalTabCountForTesting, 1)
+        XCTAssertTrue(delegate.quickTerminalActiveRootForTesting === secondRoot)
+        XCTAssertTrue(secondChat.isDescendant(of: secondRoot))
+        XCTAssertNil(firstAssistant.onPetMessage)
+        XCTAssertTrue(secondAssistant.isAttached(to: second))
+
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(secondChat, in: window))
+        delegate.sessionDidExitForTesting(second)
+        XCTAssertEqual(delegate.quickTerminalTabCountForTesting, 0)
+    }
+
+    func testUtilityCloseFailureRetainsLivePaneAndBackingRecord() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let source = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: anchor, vertical: true))
+        window.makeFirstResponder(source.view)
+        let chat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: source.view))
+        let retainedAssistant = try XCTUnwrap(
+            delegate.utilityPaneAssistantForTesting(chat))
+        let retainedController = try XCTUnwrap(
+            delegate.utilityPaneControllerForTesting(chat))
+        let retainedSubviewCount = chat.subviews.count
+        let layoutBranch = try XCTUnwrap(chrome.body.subviews.first {
+            PaneLayoutController.snapshot(of: $0) != nil
+        })
+        let invalidWrapper = NSView(frame: layoutBranch.frame)
+        XCTAssertTrue(PaneLayoutController.replace(
+            layoutBranch, with: invalidWrapper, in: chrome.body))
+        layoutBranch.frame = invalidWrapper.bounds
+        layoutBranch.autoresizingMask = [.width, .height]
+        invalidWrapper.addSubview(layoutBranch)
+        XCTAssertFalse(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+
+        XCTAssertFalse(delegate.closeUtilityPaneForTesting(chat, in: window))
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 1)
+        XCTAssertTrue(chat.window === window)
+        XCTAssertTrue(chat.isDescendant(of: chrome.body))
+        XCTAssertEqual(chat.subviews.count, retainedSubviewCount)
+        XCTAssertTrue(
+            delegate.utilityPaneAssistantForTesting(chat) === retainedAssistant)
+        XCTAssertTrue(
+            delegate.utilityPaneControllerForTesting(chat) === retainedController)
+        XCTAssertNotNil(retainedAssistant.onPetMessage)
+    }
+
+    func testTerminalExitFallbackRemovesDeadLeafAndInvalidatesUnownedAssistant() throws {
+        _ = NSApplication.shared
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let session = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: anchor, vertical: true))
+        let assistant = delegate.petAssistantForTesting(session)
+        XCTAssertNotNil(assistant.onPetMessage)
+        let split = try XCTUnwrap(session.view.superview as? NSSplitView)
+        let index = try XCTUnwrap(split.arrangedSubviews.firstIndex(of: session.view))
+        let invalidWrapper = NSView(frame: session.view.frame)
+        split.removeArrangedSubview(session.view)
+        session.view.removeFromSuperview()
+        split.insertArrangedSubview(invalidWrapper, at: index)
+        invalidWrapper.addSubview(session.view)
+
+        delegate.sessionDidExitForTesting(session)
+
+        XCTAssertNil(session.view.superview)
+        XCTAssertNil(assistant.onPetMessage)
+        XCTAssertNil(assistant.onShowInSidePanel)
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+        XCTAssertEqual(PaneLayoutController.snapshot(of: chrome.body),
+                       .leaf(ObjectIdentifier(anchor)))
+    }
+
+    func testTerminalExitFallbackNeverPrunesCorruptWrapperContainingLiveChats() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let session = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: anchor, vertical: true))
+        let firstChat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: session.view,
+            forceNewInstance: true))
+        let secondChat = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: firstChat,
+            forceNewInstance: true))
+        let firstAssistant = try XCTUnwrap(
+            delegate.utilityPaneAssistantForTesting(firstChat))
+        let secondAssistant = try XCTUnwrap(
+            delegate.utilityPaneAssistantForTesting(secondChat))
+
+        // Model a legacy malformed branch with one valid sibling and one
+        // snapshot-less plain wrapper containing two live Chat leaves. The old
+        // EOF fallback saw only the valid sibling and replaced the whole outer
+        // wrapper with it, orphaning both Chats.
+        let layoutBranch = try XCTUnwrap(chrome.body.subviews.first {
+            PaneLayoutController.containsLayoutLeaf($0)
+        })
+        let outerWrapper = NSView(frame: layoutBranch.frame)
+        XCTAssertTrue(PaneLayoutController.replace(
+            layoutBranch, with: outerWrapper, in: chrome.body))
+        for view in [anchor, session.view, firstChat, secondChat] {
+            view.removeFromSuperview()
+        }
+        let corruptChatWrapper = NSView(frame: outerWrapper.bounds)
+        corruptChatWrapper.addSubview(firstChat)
+        corruptChatWrapper.addSubview(secondChat)
+        outerWrapper.addSubview(session.view)
+        outerWrapper.addSubview(corruptChatWrapper)
+        outerWrapper.addSubview(anchor)
+        XCTAssertFalse(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+
+        delegate.sessionDidExitForTesting(session)
+
+        XCTAssertNil(session.view.superview)
+        XCTAssertTrue(firstChat.isDescendant(of: chrome.body))
+        XCTAssertTrue(secondChat.isDescendant(of: chrome.body))
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 2)
+        XCTAssertTrue(
+            delegate.utilityPaneAssistantForTesting(firstChat) === firstAssistant)
+        XCTAssertTrue(
+            delegate.utilityPaneAssistantForTesting(secondChat) === secondAssistant)
+        XCTAssertNotNil(firstAssistant.onPetMessage)
+        XCTAssertNotNil(secondAssistant.onPetMessage)
+    }
+
+    func testTerminalExitFallbackUnwrapsSurvivingUtilityFromLegacyWrapper() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let session = try XCTUnwrap(delegate.splitTerminalForTesting(
+            relativeTo: anchor, vertical: true))
+        var requestCompletion: PetAssistant.AskCompletion?
+        let controlledAssistant = PetAssistant(
+            config: AppConfig(),
+            availableChoices: [.auto],
+            requestRunner: { _, _, _, completion in
+                requestCompletion = completion
+            })
+        delegate.installPetAssistantForTesting(controlledAssistant, for: session)
+        window.makeFirstResponder(session.view)
+        let survivor = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: session.view))
+        let retainedController = try XCTUnwrap(
+            delegate.utilityPaneControllerForTesting(survivor))
+        XCTAssertTrue(
+            delegate.utilityPaneAssistantForTesting(survivor) === controlledAssistant)
+
+        let nestedSplit = try XCTUnwrap(session.view.superview as? NSSplitView)
+        XCTAssertTrue(nestedSplit.arrangedSubviews.contains(survivor))
+        let parent = try XCTUnwrap(nestedSplit.superview)
+        let wrapper = NSView(frame: nestedSplit.frame)
+        XCTAssertTrue(PaneLayoutController.replace(
+            nestedSplit, with: wrapper, in: parent))
+        session.view.removeFromSuperview()
+        survivor.removeFromSuperview()
+        let halfWidth = wrapper.bounds.width / 2
+        session.view.frame = NSRect(
+            x: 0, y: 0, width: halfWidth, height: wrapper.bounds.height)
+        survivor.frame = NSRect(
+            x: halfWidth, y: 0,
+            width: wrapper.bounds.width - halfWidth, height: wrapper.bounds.height)
+        wrapper.addSubview(session.view)
+        wrapper.addSubview(survivor)
+        controlledAssistant.submitForQA("finish after terminal exit")
+        let finishRequest = try XCTUnwrap(requestCompletion)
+
+        delegate.sessionDidExitForTesting(session)
+        chrome.layoutSubtreeIfNeeded()
+        finishRequest("answer retained by surviving Chat", [], nil)
+
+        XCTAssertNil(session.view.superview)
+        XCTAssertTrue(survivor.window === window)
+        XCTAssertTrue(survivor.isDescendant(of: chrome.body))
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 1)
+        XCTAssertTrue(
+            delegate.utilityPaneControllerForTesting(survivor) === retainedController)
+        XCTAssertTrue(
+            delegate.utilityPaneAssistantForTesting(survivor) === controlledAssistant)
+        XCTAssertFalse(controlledAssistant.isAttached(to: session))
+        XCTAssertNotNil(controlledAssistant.onPetMessage)
+        let transcript = controlledAssistant.makeSidebarPanelView()
+            .transcriptForTesting
+        XCTAssertTrue(transcript.contains("finish after terminal exit"))
+        XCTAssertTrue(transcript.contains("answer retained by surviving Chat"))
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: chrome.body))
+        let roots = chrome.body.subviews.filter {
+            PaneLayoutController.snapshot(of: $0) != nil
+        }
+        XCTAssertEqual(roots.count, 1)
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: chrome.body),
+            .split(
+                vertical: true,
+                children: [
+                    .leaf(ObjectIdentifier(anchor)),
+                    .leaf(ObjectIdentifier(survivor)),
+                ]))
+        XCTAssertGreaterThan(survivor.frame.width, 0)
+        XCTAssertGreaterThan(survivor.frame.height, 0)
+
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(survivor, in: window))
+        XCTAssertNil(controlledAssistant.onPetMessage)
+        XCTAssertNil(controlledAssistant.onShowInSidePanel)
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 0)
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: chrome.body),
+            .leaf(ObjectIdentifier(anchor)))
+    }
+
+    func testPaneRemovalPreservesUnaffectedDividerRatio() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 1_000, height: 600))
+        let root = PaneSplitView(frame: host.bounds)
+        root.isVertical = true
+        root.autoresizingMask = [.width, .height]
+        let left = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let right = PaneSplitView(frame: .zero)
+        right.isVertical = false
+        let top = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let bottom = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        host.addSubview(root)
+        root.addArrangedSubview(left)
+        root.addArrangedSubview(right)
+        right.addArrangedSubview(top)
+        right.addArrangedSubview(bottom)
+        root.adjustSubviews()
+        right.adjustSubviews()
+        root.setPosition(320, ofDividerAt: 0)
+        let ratioBefore = left.frame.maxX / root.bounds.width
+
+        XCTAssertTrue(PaneLayoutController.removeLeaf(top, from: host))
+
+        let ratioAfter = left.frame.maxX / root.bounds.width
+        XCTAssertEqual(ratioAfter, ratioBefore, accuracy: 0.02)
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertTrue(right.superview == nil)
+        XCTAssertTrue(bottom.superview === root)
+    }
+
+    func testRootNormalizationRepairsOverlappingLayoutBranches() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let first = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let second = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        first.frame = host.bounds
+        second.frame = host.bounds
+        host.addSubview(first)
+        host.addSubview(second)
+
+        XCTAssertFalse(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertTrue(PaneLayoutController.normalizeRoot(in: host))
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertEqual(host.subviews.count, 1)
+        XCTAssertTrue(first.isDescendant(of: host))
+        XCTAssertTrue(second.isDescendant(of: host))
+        XCTAssertEqual(
+            PaneLayoutController.snapshot(of: host),
+            .split(vertical: true, children: [
+                .leaf(ObjectIdentifier(first)),
+                .leaf(ObjectIdentifier(second)),
+            ]))
+        let firstFrame = first.convert(first.bounds, to: host)
+        let secondFrame = second.convert(second.bounds, to: host)
+        XCTAssertTrue(firstFrame.intersection(secondFrame).isEmpty)
+        XCTAssertGreaterThan(firstFrame.width, 10)
+        XCTAssertGreaterThan(secondFrame.width, 10)
+    }
+
+    func testRootInvariantRejectsPlainWrapperWithMultiplePaneLeaves() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let corruptWrapper = NSView(frame: host.bounds)
+        let terminal = TerminalView(frame: corruptWrapper.bounds)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        chat.frame = corruptWrapper.bounds
+        host.addSubview(corruptWrapper)
+        corruptWrapper.addSubview(terminal)
+        corruptWrapper.addSubview(chat)
+
+        XCTAssertNil(PaneLayoutController.snapshot(of: corruptWrapper))
+        XCTAssertFalse(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertFalse(PaneLayoutController.removeLeaf(chat, from: host))
+        XCTAssertTrue(chat.isDescendant(of: host))
+        XCTAssertTrue(terminal.isDescendant(of: host))
+    }
+
+    func testRootInvariantRejectsCorruptWrapperBesideValidBranch() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let validChat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let corruptWrapper = NSView(frame: host.bounds)
+        let firstHiddenChat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let secondHiddenChat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        host.addSubview(validChat)
+        host.addSubview(corruptWrapper)
+        corruptWrapper.addSubview(firstHiddenChat)
+        corruptWrapper.addSubview(secondHiddenChat)
+
+        XCTAssertFalse(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertFalse(PaneLayoutController.removeLeaf(validChat, from: host))
+        XCTAssertTrue(validChat.isDescendant(of: host))
+        XCTAssertTrue(firstHiddenChat.isDescendant(of: host))
+        XCTAssertTrue(secondHiddenChat.isDescendant(of: host))
+    }
+
+    func testRemovingFinalLeafLeavesEmptyValidHost() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        chat.frame = host.bounds
+        host.addSubview(chat)
+
+        XCTAssertTrue(PaneLayoutController.removeLeaf(chat, from: host))
+
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertTrue(host.subviews.isEmpty)
+        XCTAssertNil(chat.superview)
+    }
+
+    func testRootNormalizationCollapsesLegacySingleChildSplit() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        let redundant = PaneSplitView(frame: host.bounds)
+        redundant.isVertical = true
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        host.addSubview(redundant)
+        redundant.addArrangedSubview(chat)
+
+        XCTAssertFalse(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertTrue(PaneLayoutController.normalizeRoot(in: host))
+
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertTrue(chat.superview === host)
+        XCTAssertNil(redundant.superview)
+        XCTAssertGreaterThan(chat.bounds.width, 0)
+        XCTAssertGreaterThan(chat.bounds.height, 0)
+    }
+
+    func testZeroSizedNestedSurvivorStaysInsideOneRoot() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let outer = PaneSplitView(frame: host.bounds)
+        outer.isVertical = true
+        outer.autoresizingMask = [.width, .height]
+        let terminal = TerminalView(frame: .zero)
+        let nested = PaneSplitView(frame: .zero)
+        nested.isVertical = false
+        let first = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let second = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        host.addSubview(outer)
+        outer.addArrangedSubview(terminal)
+        outer.addArrangedSubview(nested)
+        nested.addArrangedSubview(first)
+        nested.addArrangedSubview(second)
+        first.frame = .zero
+        second.frame = .zero
+
+        XCTAssertTrue(PaneLayoutController.removeLeaf(terminal, from: host))
+
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertEqual(host.subviews.count, 1)
+        XCTAssertTrue(host.subviews.first === nested)
+        XCTAssertTrue(first.isDescendant(of: host))
+        XCTAssertTrue(second.isDescendant(of: host))
+        XCTAssertGreaterThan(first.bounds.width, 0)
+        XCTAssertGreaterThan(first.bounds.height, 0)
+        XCTAssertGreaterThan(second.bounds.width, 0)
+        XCTAssertGreaterThan(second.bounds.height, 0)
+    }
+
+    func testNormalizeThenMoveMaintainsSingleRootAndLeafIdentity() {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let first = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let second = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        let third = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        for pane in [first, second, third] {
+            pane.frame = host.bounds
+            host.addSubview(pane)
+        }
+
+        XCTAssertTrue(PaneLayoutController.normalizeRoot(in: host))
+        let result = PaneLayoutController.move(
+            source: third, target: first, zone: .bottom)
+        XCTAssertTrue(result.changed)
+        PaneLayoutController.stabilizeRoot(in: host)
+
+        XCTAssertTrue(PaneLayoutController.rootInvariantHolds(in: host))
+        XCTAssertEqual(host.subviews.count, 1)
+        XCTAssertEqual(
+            Set([first, second, third].filter { $0.isDescendant(of: host) }
+                .map(ObjectIdentifier.init)),
+            Set([first, second, third].map(ObjectIdentifier.init)))
+    }
+
     func testNestedTerminalCloseKeepsTerminalAndChatGeometry() throws {
         let chrome = TerminalChromeView(
             frame: NSRect(x: 0, y: 0, width: 1_050, height: 646))

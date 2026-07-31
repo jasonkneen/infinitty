@@ -199,10 +199,272 @@ enum PaneLayoutController {
             guard !children.isEmpty else { return nil }
             return .split(vertical: split.isVertical, children: children)
         }
-        for child in view.subviews {
-            if let node = snapshot(of: child) { return node }
+        let children = view.subviews.compactMap(snapshot)
+        // A plain host is not itself a layout node. It may own exactly one
+        // split/leaf root; returning the first of several branches would hide
+        // the overlapping-root corruption this snapshot exists to diagnose.
+        guard children.count == 1 else { return nil }
+        return children[0]
+    }
+
+    /// A pane host is either empty or owns one complete split/leaf tree.
+    /// Multiple direct layout children overlap because TerminalChromeView.body
+    /// gives each root child the full content rectangle.
+    static func rootInvariantHolds(in root: NSView) -> Bool {
+        let children = layoutChildren(in: root)
+        guard children.count <= 1 else { return false }
+        guard let child = children.first else { return true }
+        var leafIDs = Set<ObjectIdentifier>()
+        return validBranch(child, leafIDs: &leafIDs)
+    }
+
+    /// Repair a legacy multi-root host by wrapping all existing branches in one
+    /// split. Fresh mutations maintain the invariant directly; this path lets
+    /// already-corrupted tabs recover without dropping any pane identity.
+    @discardableResult
+    static func normalizeRoot(in root: NSView) -> Bool {
+        var changed = collapseRedundantSplits(in: root)
+        let children = layoutChildren(in: root)
+        guard children.count > 1 else {
+            stabilizeRoot(in: root)
+            return changed
+        }
+
+        let ordered = children.sorted { lhs, rhs in
+            let left = lhs.convert(lhs.bounds, to: root)
+            let right = rhs.convert(rhs.bounds, to: root)
+            if abs(left.minX - right.minX) > 1 { return left.minX < right.minX }
+            if abs(left.maxY - right.maxY) > 1 { return left.maxY > right.maxY }
+            return root.subviews.firstIndex(of: lhs) ?? 0
+                < root.subviews.firstIndex(of: rhs) ?? 0
+        }
+        let split = PaneSplitView(frame: usableBounds(of: root, fallback: root.bounds))
+        split.isVertical = preferredRootAxis(for: ordered, in: root)
+        split.dividerStyle = .thin
+        split.autoresizingMask = [.width, .height]
+        for child in ordered {
+            child.removeFromSuperview()
+            child.autoresizingMask = []
+            split.addArrangedSubview(child)
+        }
+        root.addSubview(split)
+        stabilizeRoot(in: root)
+        equalize(split)
+        root.layoutSubtreeIfNeeded()
+        PaneLog.log(
+            "root normalized branches=\(ordered.count) tree=\(PaneLog.describe(root))")
+        changed = true
+        return changed
+    }
+
+    /// Remove one pane leaf, collapse every now-redundant ancestor, and keep
+    /// unaffected divider ratios. This is the sole structural destruction path
+    /// for terminal and utility leaves.
+    @discardableResult
+    static func removeLeaf(_ leaf: NSView, from root: NSView) -> Bool {
+        _ = normalizeRoot(in: root)
+        // `false` is a fail-closed result: callers retain the pane's controller
+        // and backing state. Refuse to mutate an already-invalid sibling tree,
+        // otherwise the requested leaf could be gone before the postcondition
+        // reports failure and the caller would retain a detached record.
+        guard rootInvariantHolds(in: root) else {
+            PaneLog.log(
+                "ERROR remove invalid-root preflight leaf=\(ObjectIdentifier(leaf)) "
+                    + "tree=\(PaneLog.describe(root))")
+            return false
+        }
+        guard leaf === root || leaf.isDescendant(of: root),
+              leaf is TerminalView || leaf is UtilityPaneView,
+              let parent = leaf.superview else { return false }
+
+        stabilizeRoot(in: root)
+        let ratios = captureDividerRatios(in: root)
+        if let split = parent as? NSSplitView {
+            leaf.removeFromSuperview()
+            collapseAncestors(startingAt: split, root: root)
+        } else if parent === root {
+            leaf.removeFromSuperview()
+        } else {
+            return false
+        }
+
+        _ = normalizeRoot(in: root)
+        stabilizeRoot(in: root, restoring: ratios)
+        let valid = rootInvariantHolds(in: root)
+        if !valid {
+            PaneLog.log(
+                "ERROR remove invalid-root leaf=\(ObjectIdentifier(leaf)) "
+                    + "tree=\(PaneLog.describe(root))")
+        }
+        return valid
+    }
+
+    /// Re-seat the one root branch and restore surviving split ratios after a
+    /// frame change. It never reparents an individual nested leaf.
+    static func stabilizeRoot(in root: NSView, restoring ratios: DividerRatios = []) {
+        let children = layoutChildren(in: root)
+        guard children.count <= 1 else { return }
+        guard let child = children.first else {
+            root.needsLayout = true
+            root.layoutSubtreeIfNeeded()
+            return
+        }
+        prepareFrameManaged(child, filling: usableBounds(of: root, fallback: child.frame))
+        normalizeArrangedSubviewMasks(in: child)
+        root.needsLayout = true
+        root.layoutSubtreeIfNeeded()
+        restoreDividerRatios(ratios)
+        root.layoutSubtreeIfNeeded()
+        repairDegenerateSplits(in: child)
+        root.layoutSubtreeIfNeeded()
+    }
+
+    private static func layoutChildren(in root: NSView) -> [NSView] {
+        // Do not use `snapshot != nil` as the membership test here. A corrupt
+        // plain wrapper with two pane leaves deliberately has no snapshot; if
+        // it were filtered out, an invalid overlapping subtree would look like
+        // an empty (therefore valid) pane host and destruction could proceed.
+        root.subviews.filter(containsLayoutLeaf)
+    }
+
+    /// True when `view` is, or recursively contains, a pane leaf. Destructive
+    /// recovery paths use this instead of `snapshot(of:)`: a deliberately
+    /// invalid plain wrapper has no snapshot but may still own live panes.
+    static func containsLayoutLeaf(_ view: NSView) -> Bool {
+        if view is TerminalView || view is UtilityPaneView {
+            return true
+        }
+        return view.subviews.contains(where: containsLayoutLeaf)
+    }
+
+    private static func validBranch(
+        _ view: NSView, leafIDs: inout Set<ObjectIdentifier>
+    ) -> Bool {
+        if view is TerminalView || view is UtilityPaneView {
+            return leafIDs.insert(ObjectIdentifier(view)).inserted
+        }
+        guard let split = view as? NSSplitView,
+              split.arrangedSubviews.count >= 2 else { return false }
+        return split.arrangedSubviews.allSatisfy {
+            validBranch($0, leafIDs: &leafIDs)
+        }
+    }
+
+    private static func collapseAncestors(startingAt start: NSSplitView, root: NSView) {
+        var current: NSSplitView? = start
+        var safety = 0
+        while let split = current, safety < 32 {
+            safety += 1
+            let parent = split.superview
+            switch split.arrangedSubviews.count {
+            case 0:
+                split.removeFromSuperview()
+                current = parent as? NSSplitView
+            case 1:
+                let next = parent as? NSSplitView
+                guard collapseSingleChildSplit(split) else { return }
+                current = next
+            default:
+                return
+            }
+            if split === root { return }
+        }
+    }
+
+    @discardableResult
+    private static func collapseRedundantSplits(in root: NSView) -> Bool {
+        var changed = false
+        var safety = 0
+        while safety < 32 {
+            safety += 1
+            guard let split = firstRedundantSplit(below: root) else { break }
+            if split.arrangedSubviews.isEmpty {
+                split.removeFromSuperview()
+                changed = true
+            } else if collapseSingleChildSplit(split) {
+                changed = true
+            } else {
+                break
+            }
+        }
+        return changed
+    }
+
+    private static func firstRedundantSplit(below root: NSView) -> NSSplitView? {
+        func find(_ view: NSView) -> NSSplitView? {
+            if let split = view as? NSSplitView {
+                for child in split.arrangedSubviews {
+                    if let nested = find(child) { return nested }
+                }
+                if split.arrangedSubviews.count <= 1 { return split }
+                return nil
+            }
+            for child in view.subviews {
+                if let nested = find(child) { return nested }
+            }
+            return nil
+        }
+        for child in root.subviews {
+            if let redundant = find(child) { return redundant }
         }
         return nil
+    }
+
+    private static func normalizeArrangedSubviewMasks(in view: NSView) {
+        guard let split = view as? NSSplitView else { return }
+        for child in split.arrangedSubviews {
+            child.autoresizingMask = []
+            normalizeArrangedSubviewMasks(in: child)
+        }
+    }
+
+    private static func preferredRootAxis(for children: [NSView], in root: NSView) -> Bool {
+        guard children.count > 1 else { return true }
+        let frames = children.map { $0.convert($0.bounds, to: root) }
+        let xSpread = (frames.map(\.midX).max() ?? 0) - (frames.map(\.midX).min() ?? 0)
+        let ySpread = (frames.map(\.midY).max() ?? 0) - (frames.map(\.midY).min() ?? 0)
+        return xSpread >= ySpread
+    }
+
+    private static func usableBounds(of root: NSView, fallback: NSRect) -> NSRect {
+        root.bounds.width > 1 && root.bounds.height > 1 ? root.bounds : fallback
+    }
+
+    private static func equalize(_ split: NSSplitView) {
+        let count = split.arrangedSubviews.count
+        guard count > 1 else { return }
+        let length = split.isVertical ? split.bounds.width : split.bounds.height
+        guard length > 1 else { return }
+        for index in 0..<(count - 1) {
+            split.setPosition(
+                length * CGFloat(index + 1) / CGFloat(count),
+                ofDividerAt: index)
+        }
+    }
+
+    /// Repair only impossible divider geometry. Valid non-zero splits retain
+    /// their user ratios; a newly inserted split that has not reached its
+    /// deferred centering pass gets an even initial distribution.
+    private static func repairDegenerateSplits(in view: NSView) {
+        guard let split = view as? NSSplitView else { return }
+        split.layoutSubtreeIfNeeded()
+        let count = split.arrangedSubviews.count
+        let axisLength = split.isVertical ? split.bounds.width : split.bounds.height
+        let crossLength = split.isVertical ? split.bounds.height : split.bounds.width
+        if count >= 2, axisLength > CGFloat(count), crossLength > 1 {
+            let hasDegenerateChild = split.arrangedSubviews.contains { child in
+                let childAxis = split.isVertical ? child.frame.width : child.frame.height
+                let childCross = split.isVertical ? child.frame.height : child.frame.width
+                return childAxis < 1 || childCross < 1
+            }
+            if hasDegenerateChild {
+                equalize(split)
+                split.adjustSubviews()
+            }
+        }
+        for child in split.arrangedSubviews {
+            repairDegenerateSplits(in: child)
+        }
     }
 
     @discardableResult
@@ -245,7 +507,8 @@ enum PaneLayoutController {
         source: NSView, target: NSView, zone: PaneDropZone
     ) -> (changed: Bool, insertedSplit: NSSplitView?) {
         guard source !== target, let sourceParent = source.superview,
-              let targetParent = target.superview else {
+              let targetParent = target.superview,
+              topLayoutBranch(of: source) === topLayoutBranch(of: target) else {
             PaneLog.log("ERROR move invalid endpoints source=\(ObjectIdentifier(source)) "
                 + "target=\(ObjectIdentifier(target)) zone=\(zone)")
             return (false, nil)
@@ -321,6 +584,12 @@ enum PaneLayoutController {
         return (true, split)
     }
 
+    private static func topLayoutBranch(of view: NSView) -> NSView {
+        var branch = view
+        while let parent = branch.superview as? NSSplitView { branch = parent }
+        return branch
+    }
+
     private static func normalizeArrangedSubviewMasks(around view: NSView) {
         var root = view
         while let parent = root.superview as? NSSplitView { root = parent }
@@ -350,26 +619,34 @@ enum PaneLayoutController {
         if parent is NSSplitView {
             survivor.removeFromSuperview()
             if !replace(split, with: survivor, in: parent) {
+                split.addArrangedSubview(survivor)
                 PaneLog.log("ERROR collapse replace failed split=\(ObjectIdentifier(split))")
                 return false
             }
             return true
         }
 
-        // Keep a layout child in a plain root container at every point in the
-        // reparenting sequence. This is especially important for chrome.body.
-        let placeholder = NSView(frame: split.frame)
-        placeholder.autoresizingMask = split.autoresizingMask
-        guard replace(split, with: placeholder, in: parent) else {
-            PaneLog.log("ERROR collapse placeholder failed split=\(ObjectIdentifier(split))")
-            return false
-        }
+        // replaceSubview swaps the root atomically; no empty host or temporary
+        // second layout branch is exposed to TerminalChromeView.
+        let fill = usableBounds(of: parent, fallback: split.frame)
         survivor.removeFromSuperview()
-        if !replace(placeholder, with: survivor, in: parent) {
+        if !replace(split, with: survivor, in: parent) {
+            split.addArrangedSubview(survivor)
             PaneLog.log("ERROR collapse survivor failed split=\(ObjectIdentifier(split))")
             return false
         }
+        prepareFrameManaged(survivor, filling: fill)
         return true
+    }
+
+    /// Make `view` the frame-managed child of a plain pane host.
+    /// Internal constraints belong to the pane and must never be stripped.
+    static func prepareFrameManaged(_ view: NSView, filling bounds: NSRect) {
+        view.translatesAutoresizingMaskIntoConstraints = true
+        view.autoresizingMask = [.width, .height]
+        if bounds.width > 1, bounds.height > 1 {
+            view.frame = bounds
+        }
     }
 
     static func captureDividerPositions(in root: NSView) -> DividerPositions {

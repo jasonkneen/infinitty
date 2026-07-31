@@ -396,7 +396,12 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     // MARK: - layout
 
     override func loadView() {
-        let container = NSView()
+        // The controller is constructed before its UtilityPaneView enters the
+        // split tree. Give its required header/search/tree constraints a valid
+        // initial canvas so AppKit never has to solve them against a generated
+        // width/height of zero during that hand-off.
+        let container = NSView(
+            frame: NSRect(x: 0, y: 0, width: 280, height: 500))
 
         pageControl.onChange = { [weak self] index in
             self?.setPage(Page(rawValue: index) ?? .files)
@@ -986,12 +991,20 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     }
 
     func attachAssistant(_ assistant: PetAssistant) {
-        if self.assistant === assistant, !chatHost.subviews.isEmpty { return }
+        // Already hosting this assistant's panel in *this* host — keep it.
+        if self.assistant === assistant,
+           let chatPanel,
+           chatPanel.superview === chatHost {
+            return
+        }
         self.assistant = assistant
         chatHost.subviews.forEach { $0.removeFromSuperview() }
+        // makeSidebarPanelView refuses to reuse a panel already embedded in
+        // another Chat leaf, so multi-pane never blanks a sibling.
         let panel = assistant.makeSidebarPanelView()
         chatPanel = panel
         panel.removeFromSuperview()
+        panel.translatesAutoresizingMaskIntoConstraints = false
         chatHost.addSubview(panel)
         panel.onClose = { [weak self] in self?.setPage(.files) }
         NSLayoutConstraint.activate([

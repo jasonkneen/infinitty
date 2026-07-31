@@ -1062,10 +1062,9 @@ final class IndicatorView: NSView {
         }
         let resource = "pet-\(currentPetID.lowercased())"
         let url = configuredURL
-            ?? Bundle.module.url(
+            ?? Bundle.infinittyResourceURL(
                 forResource: resource, withExtension: "webp",
                 subdirectory: "NotchPets")
-            ?? Bundle.module.url(forResource: resource, withExtension: "webp")
         guard let url, let img = NSImage(contentsOf: url) else { return nil }
         spriteCache[currentPetID] = img
         return img

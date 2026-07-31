@@ -18,6 +18,9 @@ cp -R shell-integration "$APP/Contents/Resources/"
 cp -R Sources/InfinittyKit/Resources/Pets "$APP/Contents/Resources/"
 cp -R Sources/InfinittyKit/Resources/Logos "$APP/Contents/Resources/"
 cp -R Sources/InfinittyKit/Resources/Surfaces "$APP/Contents/Resources/"
+# Every directory under Resources/ must be listed here: the app has no SwiftPM
+# resource bundle, so anything missed is simply absent at runtime.
+cp -R Sources/InfinittyKit/Resources/NotchPets "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

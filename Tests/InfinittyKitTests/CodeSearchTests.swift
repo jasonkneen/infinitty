@@ -31,6 +31,13 @@ final class CodeSearchTests: XCTestCase {
         XCTAssertEqual(CodeSearch.filter(["a.swift"], query: ""), [])
     }
 
+    func testFilterStarListsPrefix() {
+        let paths = (0..<10).map { "file\($0).swift" }
+        XCTAssertEqual(CodeSearch.filter(paths, query: "*", limit: 3),
+                       ["file0.swift", "file1.swift", "file2.swift"])
+        XCTAssertEqual(CodeSearch.filter(paths, query: "all", limit: 2).count, 2)
+    }
+
     /// rg must find files in a real directory tree and respect .gitignore.
     func testListFilesSyncUsesRipgrep() throws {
         let dir = NSTemporaryDirectory() + "/infinitty-search-\(UUID().uuidString)"

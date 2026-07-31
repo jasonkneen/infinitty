@@ -206,6 +206,73 @@ final class ProviderDiscoveryTests: XCTestCase {
         XCTAssertEqual(plain.count, 1)
     }
 
+    // MARK: new providers (opencode / hermes / amp)
+
+    func testNewProviderResolversHonorEnvOverride() {
+        for (kind, envKey) in [
+            (CLIExecutableKind.opencode, "INFINITTY_OPENCODE_EXECUTABLE"),
+            (CLIExecutableKind.hermes, "INFINITTY_HERMES_EXECUTABLE"),
+            (CLIExecutableKind.amp, "INFINITTY_AMP_EXECUTABLE"),
+        ] {
+            let tmp = makeExecutable()
+            defer { try? FileManager.default.removeItem(at: tmp.deletingLastPathComponent()) }
+            let resolved = CLIExecutableResolver.resolve(kind, environment: [envKey: tmp.path])
+            XCTAssertEqual(resolved?.path, tmp.path, "\(kind) should honor \(envKey)")
+        }
+    }
+
+    func testHermesAndAmpProbeHomeLocalBin() {
+        // Hermes and Amp install launchers into ~/.local/bin (like Claude);
+        // that path must be probed even with PATH wiped.
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/dev/null/no/such/bin"
+        for kind in [CLIExecutableKind.hermes, .amp] {
+            let candidates = CLIExecutableResolver.candidates(for: kind, environment: env)
+            XCTAssertTrue(
+                candidates.contains { $0.path.hasSuffix("/.local/bin/\(kind.binaryName)") },
+                "\(kind) must probe ~/.local/bin")
+        }
+    }
+
+    func testPreferredProviderMapsNewAliases() {
+        let env = ProcessInfo.processInfo.environment
+        // Alias resolution maps to the canonical provider when that CLI is
+        // present, else nil — independent of this machine's install state.
+        for (alias, canonical) in [
+            ("openclaw", InfinittyAIProvider.opencode),
+            ("opencode", InfinittyAIProvider.opencode),
+            ("nous", InfinittyAIProvider.hermes),
+            ("sourcegraph", InfinittyAIProvider.amp),
+        ] {
+            let resolved = ProviderDiscovery.preferredProvider(configured: alias, environment: env)
+            if ProviderDiscovery.isAvailable(canonical, environment: env) {
+                XCTAssertEqual(resolved, canonical, "alias \(alias)")
+            } else {
+                XCTAssertNil(resolved, "alias \(alias) with no binary should be nil")
+            }
+        }
+    }
+
+    func testNewProviderMetadata() {
+        XCTAssertEqual(InfinittyAIProvider.opencode.binaryName, "opencode")
+        XCTAssertEqual(InfinittyAIProvider.hermes.binaryName, "hermes")
+        XCTAssertEqual(InfinittyAIProvider.amp.binaryName, "amp")
+        XCTAssertEqual(InfinittyAIProvider.opencode.displayName, "OpenCode")
+        // Every provider exposes a distinct one-char chip label.
+        let labels = Set(InfinittyAIProvider.allCases.map(\.shortLabel))
+        XCTAssertEqual(labels.count, InfinittyAIProvider.allCases.count)
+    }
+
+    func testCLIAvailabilityShapeIsConsistent() {
+        // Whatever the install state, the status label must agree with
+        // isAvailable (never a crash, never a stale "Missing").
+        var env: [String: String] = ["PATH": "/dev/null/no/such/bin"]
+        env["INFINITTY_OPENCODE_EXECUTABLE"] = ""
+        let avail = ProviderDiscovery.cliAvailability(.opencode, environment: env)
+        XCTAssertEqual(avail.provider, .opencode)
+        XCTAssertEqual(avail.statusLabel, avail.isAvailable ? "Detected" : "Missing")
+    }
+
     // MARK: helpers
 
     private func makeExecutable() -> URL {
