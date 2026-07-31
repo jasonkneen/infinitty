@@ -81,6 +81,18 @@ final class UtilityPaneView: NSView {
     var onDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onDragBegan } }
     var onDragMoved: ((NSPoint) -> Void)? { didSet { paneHeader.onDragMoved = onDragMoved } }
     var onDragEnded: ((NSPoint, Bool) -> Void)? { didSet { paneHeader.onDragEnded = onDragEnded } }
+    var onChannelActivate: (() -> Void)? {
+        didSet { paneHeader.onChannelActivate = onChannelActivate }
+    }
+    var onChannelDragBegan: ((NSPoint) -> Void)? {
+        didSet { paneHeader.onChannelDragBegan = onChannelDragBegan }
+    }
+    var onChannelDragMoved: ((NSPoint) -> Void)? {
+        didSet { paneHeader.onChannelDragMoved = onChannelDragMoved }
+    }
+    var onChannelDragEnded: ((NSPoint, Bool) -> Void)? {
+        didSet { paneHeader.onChannelDragEnded = onChannelDragEnded }
+    }
 
     init(
         kind: UtilityPanelKind, contentView: NSView,
@@ -145,6 +157,10 @@ final class UtilityPaneView: NSView {
 
     func setPaneAccent(_ color: NSColor) {
         paneOutline.accentColor = color
+    }
+
+    func setChannel(name: String?, color: NSColor?, memberCount: Int) {
+        paneHeader.setChannel(name: name, color: color, memberCount: memberCount)
     }
 
     var paneAccentColorForTesting: NSColor { paneOutline.accentColor }

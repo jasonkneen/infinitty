@@ -14,6 +14,13 @@ private struct PaneDragState {
     var preview: PaneDropPreviewView?
 }
 
+private struct ChannelConnectorDragState {
+    let sourceView: NSView
+    let sourceEndpoint: CollaborationEndpoint
+    let overlay: ChannelWireOverlay
+    var targetView: NSView?
+}
+
 private struct PaneZoomState {
     let pane: NSView
     let root: NSView
@@ -248,13 +255,31 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var reloadPending = false
     private var settings: NSWindowController?
     private let notch = NotchActivityController()
+    private let collaborationInstanceID = UUID().uuidString.lowercased()
     private let appControl = AppControlServer()
-    private struct RunItem {
-        let id: UUID
-        let command: String
-        let completion: (Int) -> Void
+    private lazy var appInstanceRegistry = AppInstanceRegistry(
+        instanceID: collaborationInstanceID,
+        socketPath: appControl.path)
+    private let collaborationQueue = DispatchQueue(
+        label: "com.infinitty.collaboration", qos: .userInitiated)
+    private lazy var collaborationCoordinator = CollaborationCoordinatorClient(
+        applicationSupportDirectory: collaborationSupportDirectory)
+    private var collaborationSupportDirectory: URL? {
+        if let configured = ProcessInfo.processInfo.environment[
+            "INFINITTY_COLLABORATION_SUPPORT_DIR"],
+           !configured.isEmpty
+        {
+            return URL(fileURLWithPath: configured, isDirectory: true)
+        }
+        if NSClassFromString("XCTestCase") != nil {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "infinitty-app-tests-\(getpid())-\(collaborationInstanceID)",
+                    isDirectory: true)
+        }
+        return nil
     }
-    private var runQueues: [Int: [RunItem]] = [:] // session id -> request queue
+    private var runQueues: [Int: RunCommandQueue] = [:] // session id -> request queue
     private var pendingLaunchCommands: [Int: String] = [:]
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
@@ -265,6 +290,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var terminalChromes: [ObjectIdentifier: TerminalChromeView] = [:]
     private var lastSelectedTabIndex: [ObjectIdentifier: Int] = [:]
     private var paneDragState: PaneDragState?
+    private var channelConnectorDragState: ChannelConnectorDragState?
+    private var channelPopover: NSPopover?
+    /// Main-thread projection only. The authoritative room and its fsyncing
+    /// event store stay on `collaborationQueue`.
+    private var collaborationProjection = CollaborationSnapshot(
+        revision: 0, channels: [])
     private var paneZoomStates: [ObjectIdentifier: PaneZoomState] = [:]
     private var paneZoomRestoreStates: [ObjectIdentifier: PaneZoomState] = [:]
     private var paneDividerAnimations: [ObjectIdentifier: PaneDividerAnimation] = [:]
@@ -352,6 +383,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self?.handleAppRequest(request) ?? "error: shutting down"
         }
         appControl.start()
+        do {
+            try appInstanceRegistry.register()
+        } catch {
+            PaneLog.log("ERROR instance registry unavailable: \(error)")
+        }
+        collaborationQueue.async { [weak self] in
+            guard let self else { return }
+            guard let snapshot = self.collaborationCoordinator.snapshot() else {
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.applyCollaborationProjection(snapshot)
+            }
+        }
         CodePalette.apply(config)
         openWindow(cwd: initialWorkingDirectory)
         launchCompleted = true
@@ -514,6 +559,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let foregroundProcessObserver {
             NotificationCenter.default.removeObserver(foregroundProcessObserver)
         }
+        appInstanceRegistry.unregister()
         appControl.stop()
         // `shutdown()` stops PTYs without necessarily calling `onExited`, so
         // close registered main tabs explicitly before emitting the clean end
@@ -576,6 +622,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let self, let s else { return }
             s.paneTitleOverride = name
             s.view.paneTitle = self.paneHeaderTitle(for: s)
+            self.updateCollaborationMembership(for: s.view)
         }
         // Inline ghost text already shows completions; echoing every hint as
         // a pet bubble was noise. Pet bubbles now carry repo-mined tips
@@ -625,6 +672,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         s.view.onPaneDragEnded = { [weak self] point, cancelled in
             self?.endPaneDrag(at: point, cancelled: cancelled)
         }
+        s.view.onChannelActivate = { [weak self, weak s] in
+            guard let self, let s else { return }
+            self.presentChannelSummary(for: s.view)
+        }
+        s.view.onChannelDragBegan = { [weak self, weak s] point in
+            guard let self, let s else { return }
+            self.beginChannelConnectorDrag(sourceView: s.view, at: point)
+        }
+        s.view.onChannelDragMoved = { [weak self] point in
+            self?.updateChannelConnectorDrag(at: point)
+        }
+        s.view.onChannelDragEnded = { [weak self] point, cancelled in
+            self?.endChannelConnectorDrag(at: point, cancelled: cancelled)
+        }
         s.terminal.onMarker = { [weak self, weak s] kind, exit in
             guard let self, let s else { return }
             let command = kind == UInt8(ascii: "C") ? s.terminal.lastCommandLine() : nil
@@ -639,13 +700,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
                 if kind == UInt8(ascii: "D") {
                     s.petAnimator?.commandEnded(exitCode: exit)
-                    if var queue = self.runQueues[s.id], !queue.isEmpty {
-                        let finishedItem = queue.removeFirst()
-                        self.runQueues[s.id] = queue.isEmpty ? nil : queue
-                        finishedItem.completion(exit)
-                        if let nextItem = queue.first {
+                    if let queue = self.runQueues[s.id], !queue.isEmpty {
+                        // Capture output at the same marker that owns it.
+                        // A following queued command may finish before the
+                        // waiting socket thread is scheduled again.
+                        let output = s.terminal.lastCommandOutput() ?? ""
+                        let nextCommand = queue.completeHead(
+                            exitCode: exit, output: output)
+                        if queue.isEmpty { self.runQueues[s.id] = nil }
+                        if let nextCommand {
                             s.view.showAgentGlow()
-                            s.pty.write(Array(nextItem.command.utf8) + [0x0D])
+                            s.pty.write(Array(nextCommand.utf8) + [0x0D])
                         }
                     }
                     s.processTracker?.poke()
@@ -664,6 +729,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             ])
         }
         sessions.append(s)
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshCollaborationProjection()
+        }
         appControl.broadcast(["event": "pane-opened", "pane": s.id])
         return s
     }
@@ -1540,13 +1608,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 v.removeFromSuperview()
             }
         }
+        leaveCollaborationPane(v)
 
         s.shutdown()
         pendingLaunchCommands.removeValue(forKey: s.id)
         sessions.removeAll { $0 === s }
         let exitingAssistant = petAssistants.removeValue(forKey: s.id)
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
-        runQueues.removeValue(forKey: s.id)?.forEach { $0.completion(-1) }
+        runQueues.removeValue(forKey: s.id)?.cancelAll()
 
         guard let win else {
             exitingAssistant?.invalidate()
@@ -2483,6 +2552,541 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
+    // MARK: - collaboration Channels
+
+    private func collaborationEndpoint(for view: NSView) -> CollaborationEndpoint {
+        let paneID = paneLedgerPaneID(for: view)
+        let kind: CollaborationEndpoint.Kind
+        let label: String
+        let participantID: String?
+        if let terminal = view as? TerminalView {
+            kind = .terminal
+            label = terminal.paneTitle
+            participantID = nil
+        } else if let utility = view as? UtilityPaneView {
+            switch utility.kind {
+            case .chat: kind = .chat
+            case .browser: kind = .browser
+            case .surface: kind = .surface
+            case .files: kind = CollaborationEndpoint.Kind(rawValue: "files")
+            }
+            label = utility.paneHeader.title
+            participantID = utility.kind == .chat
+                ? "\(collaborationInstanceID)/participant/\(paneID)"
+                : nil
+        } else {
+            kind = CollaborationEndpoint.Kind(rawValue: "pane")
+            label = paneID
+            participantID = nil
+        }
+        return CollaborationEndpoint(
+            id: "\(collaborationInstanceID)/\(paneID)",
+            kind: kind,
+            label: label,
+            participantID: participantID,
+            instanceID: collaborationInstanceID)
+    }
+
+    private func collaborationParticipant(for view: NSView)
+        -> CollaborationParticipant?
+    {
+        guard let utility = view as? UtilityPaneView,
+              utility.kind == .chat,
+              let participantID = collaborationEndpoint(for: utility).participantID
+        else { return nil }
+        return CollaborationParticipant(
+            id: participantID,
+            displayName: utility.paneHeader.title,
+            role: "coding agent",
+            capabilities: ["channel.receive", "channel.send"])
+    }
+
+    private func paneHeader(for view: NSView) -> PaneHeaderView? {
+        if let terminal = view as? TerminalView { return terminal.paneHeader }
+        if let utility = view as? UtilityPaneView { return utility.paneHeader }
+        return nil
+    }
+
+    private func liveCollaborationPanes() -> [NSView] {
+        NSApp.windows.flatMap { paneLeafViews(in: $0) }
+    }
+
+    private func channel(for endpointID: String) -> CollaborationChannelState? {
+        collaborationProjection.channels.first {
+            $0.endpoints.contains(where: { $0.id == endpointID })
+        }
+    }
+
+    private func beginChannelConnectorDrag(sourceView: NSView, at point: NSPoint) {
+        endChannelConnectorDrag(at: point, cancelled: true)
+        let endpoint = collaborationEndpoint(for: sourceView)
+        let existing = channel(for: endpoint.id)
+        let color = existing.map { collaborationColor(hex: $0.colorHex) }
+            ?? NSColor.controlAccentColor
+        let anchor = paneHeader(for: sourceView)?.channelConnectorScreenFrame
+        let start = anchor.map { NSPoint(x: $0.midX, y: $0.midY) } ?? point
+        channelConnectorDragState = ChannelConnectorDragState(
+            sourceView: sourceView,
+            sourceEndpoint: endpoint,
+            overlay: ChannelWireOverlay(start: start, color: color),
+            targetView: nil)
+        updateChannelConnectorDrag(at: point)
+    }
+
+    private func updateChannelConnectorDrag(at point: NSPoint) {
+        guard var state = channelConnectorDragState else { return }
+        let target = liveCollaborationPanes().first { candidate in
+            guard candidate !== state.sourceView,
+                  !candidate.isHiddenOrHasHiddenAncestor,
+                  let frame = paneHeader(for: candidate)?.channelConnectorScreenFrame
+            else { return false }
+            return frame.insetBy(dx: -7, dy: -7).contains(point)
+        }
+        if state.targetView !== target {
+            state.targetView.flatMap(paneHeader(for:))?.setChannelDropTarget(false)
+            target.flatMap(paneHeader(for:))?.setChannelDropTarget(true)
+            state.targetView = target
+        }
+        let targetColor = target.flatMap {
+            channel(for: collaborationEndpoint(for: $0).id)
+        }.map { collaborationColor(hex: $0.colorHex) }
+        state.overlay.update(end: point, color: targetColor)
+        channelConnectorDragState = state
+    }
+
+    private func endChannelConnectorDrag(at point: NSPoint, cancelled: Bool) {
+        guard let state = channelConnectorDragState else { return }
+        channelConnectorDragState = nil
+        state.targetView.flatMap(paneHeader(for:))?.setChannelDropTarget(false)
+        state.overlay.close()
+        guard !cancelled, let target = state.targetView else { return }
+        linkCollaborationPanes(source: state.sourceView, target: target)
+    }
+
+    private func linkCollaborationPanes(
+        source: NSView,
+        target: NSView,
+        completion: ((Result<CollaborationSnapshot, Error>) -> Void)? = nil
+    ) {
+        let sourceEndpoint = collaborationEndpoint(for: source)
+        let targetEndpoint = collaborationEndpoint(for: target)
+        let chatParticipants = [source, target]
+            .compactMap(collaborationParticipant(for:))
+        let actor = CollaborationActor(
+            id: "local-user:\(NSUserName())",
+            kind: .human,
+            displayName: NSFullUserName().isEmpty ? NSUserName() : NSFullUserName())
+        let sourceEndpointID = sourceEndpoint.id
+        let commandID = UUID().uuidString.lowercased()
+
+        collaborationQueue.async { [weak self, weak source] in
+            guard let self else { return }
+            do {
+                let request = CollaborationControlRequest(
+                    op: .linkAndJoin,
+                    actor: actor,
+                    idempotencyKey: commandID,
+                    source: sourceEndpoint,
+                    target: targetEndpoint,
+                    participants: chatParticipants)
+                guard let encoded = CollaborationControlCodec.encode(request) else {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "request", reason: "could not encode link")
+                }
+                let result = self.collaborationCoordinator.execute(encoded)
+                guard let snapshot = result.snapshot else {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "coordinator", reason: result.response)
+                }
+                guard snapshot.channels.contains(where: {
+                    $0.endpoints.contains(where: {
+                        $0.id == sourceEndpointID
+                            || $0.id == targetEndpoint.id
+                    })
+                }) else {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "channel", reason: "link produced no Channel")
+                }
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyCollaborationProjection(snapshot)
+                    completion?(.success(snapshot))
+                }
+            } catch {
+                self.appControl.broadcast([
+                    "event": "channel-error",
+                    "commandId": commandID,
+                    "message": String(describing: error),
+                ])
+                DispatchQueue.main.async { [weak self, weak source] in
+                    if let self, let source {
+                        NSSound.beep()
+                        self.presentChannelSummary(
+                            for: source,
+                            errorMessage: String(describing: error))
+                    }
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func applyCollaborationProjection(_ snapshot: CollaborationSnapshot) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        collaborationProjection = snapshot
+        for pane in liveCollaborationPanes() {
+            let endpointID = collaborationEndpoint(for: pane).id
+            let state = channel(for: endpointID)
+            let color = state.map { collaborationColor(hex: $0.colorHex) }
+            let memberCount = state?.endpoints.count ?? 0
+            if let terminal = pane as? TerminalView {
+                terminal.setChannel(
+                    name: state?.name, color: color, memberCount: memberCount)
+                terminal.setPaneAccent(color ?? CodePalette.paneFocusAccent)
+            } else if let utility = pane as? UtilityPaneView {
+                utility.setChannel(
+                    name: state?.name, color: color, memberCount: memberCount)
+                utility.setPaneAccent(color ?? CodePalette.paneFocusAccent)
+            }
+        }
+    }
+
+    private func refreshCollaborationProjection() {
+        applyCollaborationProjection(collaborationProjection)
+    }
+
+    private func configureCollaboration(
+        for record: UtilityPanelRecord,
+        assistant: PetAssistant
+    ) {
+        guard record.kind == .chat else { return }
+        assistant.configureCollaboration(
+            contextProvider: { [weak self, weak record] in
+                guard let self, let record else { return nil }
+                let endpointID = self.collaborationEndpoint(for: record.pane).id
+                return CollaborationChatContext(
+                    snapshot: self.authoritativeCollaborationSnapshot(),
+                    endpointID: endpointID)
+            },
+            messagePublisher: { [weak self, weak record] emission in
+                guard let self, let record else { return }
+                self.publishCollaborationMessage(emission, for: record)
+            },
+            identityPublisher: { [weak self, weak record] provider, model in
+                guard let self, let record else { return }
+                self.updateCollaborationMembership(
+                    for: record.pane,
+                    provenance: (provider, model))
+            })
+    }
+
+    /// Provider turns read through the room's serial lane instead of the
+    /// eventually-applied AppKit projection. `sync` waits behind any prompt or
+    /// response publication already queued by a peer, closing the race where
+    /// a fast next turn could miss a response that was visible in the other
+    /// Chat but not yet painted into `collaborationProjection`.
+    private func authoritativeCollaborationSnapshot() -> CollaborationSnapshot {
+        let fallback = collaborationProjection
+        return collaborationQueue.sync {
+            collaborationCoordinator.snapshot() ?? fallback
+        }
+    }
+
+    private func leaveCollaborationPane(_ pane: NSView) {
+        let endpointID = collaborationEndpoint(for: pane).id
+        let actor = CollaborationActor(
+            id: "local-user:\(NSUserName())",
+            kind: .human,
+            displayName: NSFullUserName().isEmpty
+                ? NSUserName()
+                : NSFullUserName())
+        let result: Result<CollaborationSnapshot?, Error> = collaborationQueue.sync {
+            guard collaborationCoordinator.snapshot()?.channels.contains(where: {
+                      $0.endpoints.contains(where: { $0.id == endpointID })
+                  }) == true
+            else { return .success(nil) }
+            let request = CollaborationControlRequest(
+                op: .leave,
+                actor: actor,
+                idempotencyKey:
+                    "pane-leave:\(endpointID):\(UUID().uuidString)",
+                endpointID: endpointID)
+            guard let encoded = CollaborationControlCodec.encode(request) else {
+                return .failure(CollaborationRoomError.invalidValue(
+                    field: "request", reason: "could not encode leave"))
+            }
+            let executed = collaborationCoordinator.execute(encoded)
+            guard let snapshot = executed.snapshot else {
+                return .failure(CollaborationRoomError.invalidValue(
+                    field: "coordinator", reason: executed.response))
+            }
+            return .success(snapshot)
+        }
+        switch result {
+        case .success(let snapshot):
+            if let snapshot { applyCollaborationProjection(snapshot) }
+        case .failure(let error):
+            appControl.broadcast([
+                "event": "channel-error",
+                "endpointId": endpointID,
+                "message": String(describing: error),
+            ])
+        }
+    }
+
+    private func updateCollaborationMembership(
+        for pane: NSView,
+        provenance: (provider: String?, model: String?)? = nil
+    ) {
+        let endpoint = collaborationEndpoint(for: pane)
+        let snapshot = authoritativeCollaborationSnapshot()
+        guard let channel = snapshot.channels.first(where: {
+            $0.endpoints.contains(where: { $0.id == endpoint.id })
+        }) else { return }
+        let previous = endpoint.participantID.flatMap { participantID in
+            channel.participants.first { $0.id == participantID }
+        }
+        let participant = previous.map {
+            let provider: String?
+            let model: String?
+            if let provenance {
+                provider = provenance.provider
+                model = provenance.model
+            } else {
+                provider = $0.provider
+                model = $0.modelID
+            }
+            return CollaborationParticipant(
+                id: $0.id,
+                displayName: endpoint.label,
+                role: $0.role,
+                provider: provider,
+                modelID: model,
+                capabilities: $0.capabilities)
+        }
+        if channel.endpoints.first(where: { $0.id == endpoint.id }) == endpoint,
+           participant == previous
+        {
+            return
+        }
+        let actor = CollaborationActor(
+            id: "local-user:\(NSUserName())",
+            kind: .human,
+            displayName: NSFullUserName().isEmpty
+                ? NSUserName()
+                : NSFullUserName())
+        do {
+            let updated: CollaborationSnapshot = try collaborationQueue.sync {
+                let request = CollaborationControlRequest(
+                    op: .updateMembership,
+                    actor: actor,
+                    idempotencyKey:
+                        "membership-update:\(endpoint.id):\(UUID().uuidString)",
+                    channelID: channel.id,
+                    endpoint: endpoint,
+                    participant: participant)
+                guard let encoded = CollaborationControlCodec.encode(request) else {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "request",
+                        reason: "could not encode membership update")
+                }
+                let result = collaborationCoordinator.execute(encoded)
+                guard let snapshot = result.snapshot else {
+                    throw CollaborationRoomError.invalidValue(
+                        field: "coordinator", reason: result.response)
+                }
+                return snapshot
+            }
+            applyCollaborationProjection(updated)
+        } catch {
+            if let previous {
+                paneHeader(for: pane)?.title = previous.displayName
+            }
+            appControl.broadcast([
+                "event": "channel-error",
+                "endpointId": endpoint.id,
+                "message": String(describing: error),
+            ])
+            NSSound.beep()
+        }
+    }
+
+    private func publishCollaborationMessage(
+        _ emission: CollaborationChatEmission,
+        for record: UtilityPanelRecord
+    ) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self, weak record] in
+                guard let self, let record else { return }
+                self.publishCollaborationMessage(emission, for: record)
+            }
+            return
+        }
+        let endpoint = collaborationEndpoint(for: record.pane)
+        guard let channel = channel(for: endpoint.id),
+              let participantID = endpoint.participantID
+        else { return }
+
+        let actor: CollaborationActor
+        let authorID: String
+        switch emission.kind {
+        case .humanPrompt:
+            authorID = "human:\(NSUserName())"
+            actor = CollaborationActor(
+                id: authorID,
+                kind: .human,
+                displayName: NSFullUserName().isEmpty
+                    ? NSUserName()
+                    : NSFullUserName())
+        case .agentResponse:
+            authorID = participantID
+            actor = CollaborationActor(
+                id: participantID,
+                kind: .agent,
+                displayName: record.pane.paneHeader.title)
+        }
+        let messageID = UUID().uuidString.lowercased()
+        let message = CollaborationMessage(
+            id: messageID,
+            threadID: emission.threadID,
+            authorID: authorID,
+            text: CollaborationMessage.boundedChannelText(emission.text))
+
+        collaborationQueue.async { [weak self] in
+            guard let self else { return }
+            let request = CollaborationControlRequest(
+                op: .postMessage,
+                actor: actor,
+                idempotencyKey: "chat-message:\(messageID)",
+                channelID: channel.id,
+                message: message)
+            if let encoded = CollaborationControlCodec.encode(request) {
+                let result = self.collaborationCoordinator.execute(encoded)
+                if let snapshot = result.snapshot {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.applyCollaborationProjection(snapshot)
+                    }
+                    return
+                }
+                self.appControl.broadcast([
+                    "event": "channel-error",
+                    "messageId": messageID,
+                    "message": result.response,
+                ])
+            } else {
+                self.appControl.broadcast([
+                    "event": "channel-error",
+                    "messageId": messageID,
+                    "message": "Could not encode Channel message.",
+                ])
+            }
+        }
+    }
+
+    private func collaborationColor(hex: String) -> NSColor {
+        let value = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard value.count == 6, let rgb = UInt32(value, radix: 16) else {
+            return NSColor.controlAccentColor
+        }
+        return NSColor(
+            calibratedRed: CGFloat((rgb >> 16) & 0xff) / 255,
+            green: CGFloat((rgb >> 8) & 0xff) / 255,
+            blue: CGFloat(rgb & 0xff) / 255,
+            alpha: 1)
+    }
+
+    private func presentChannelSummary(
+        for pane: NSView,
+        errorMessage: String? = nil
+    ) {
+        guard let header = paneHeader(for: pane) else { return }
+        channelPopover?.close()
+
+        let endpoint = collaborationEndpoint(for: pane)
+        let state = channel(for: endpoint.id)
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 9
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+
+        func label(_ text: String, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
+            let field = NSTextField(wrappingLabelWithString: text)
+            field.font = .systemFont(ofSize: size, weight: weight)
+            field.textColor = .labelColor
+            field.maximumNumberOfLines = 0
+            field.preferredMaxLayoutWidth = 316
+            return field
+        }
+
+        if let errorMessage {
+            let error = label(errorMessage, size: 12, weight: .medium)
+            error.textColor = .systemRed
+            stack.addArrangedSubview(error)
+        }
+        if let state {
+            let title = label(state.name, size: 16, weight: .semibold)
+            title.textColor = collaborationColor(hex: state.colorHex)
+            stack.addArrangedSubview(title)
+            stack.addArrangedSubview(label(
+                "\(state.endpoints.count) connected panes · revision \(state.revision)",
+                size: 11, weight: .regular))
+            stack.addArrangedSubview(label(
+                state.endpoints.map { "\($0.label) · \($0.kind.rawValue)" }.joined(separator: "\n"),
+                size: 12, weight: .regular))
+            if !state.participants.isEmpty {
+                stack.addArrangedSubview(label(
+                    "Roles\n" + state.participants.map {
+                        "\($0.displayName) · \($0.role)"
+                    }.joined(separator: "\n"),
+                    size: 12, weight: .medium))
+            }
+            if !state.plan.isEmpty {
+                stack.addArrangedSubview(label(
+                    "Plan\n" + state.plan.map {
+                        "\($0.status.rawValue) · \($0.title)"
+                    }.joined(separator: "\n"),
+                    size: 12, weight: .medium))
+            }
+            if !state.messages.isEmpty {
+                stack.addArrangedSubview(label(
+                    "Recent\n" + state.messages.suffix(4).map {
+                        "\($0.authorID): \($0.text)"
+                    }.joined(separator: "\n"),
+                    size: 12, weight: .regular))
+            }
+        } else {
+            stack.addArrangedSubview(label(
+                "No Channel yet", size: 16, weight: .semibold))
+            stack.addArrangedSubview(label(
+                "Drag this connector onto another pane to create a shared Channel.",
+                size: 12, weight: .regular))
+        }
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 348, height: 300))
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.documentView = stack
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+        ])
+        let controller = NSViewController()
+        controller.view = scroll
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentSize = scroll.frame.size
+        popover.contentViewController = controller
+        popover.show(
+            relativeTo: header.channelAnchorView.bounds,
+            of: header.channelAnchorView,
+            preferredEdge: .maxY)
+        channelPopover = popover
+    }
+
     private func movePaneView(_ source: NSView, relativeTo target: NSView, zone: PaneDropZone) {
         guard source !== target, let win = source.window, target.window === win else { return }
         guard let root = paneLayoutHost(of: win, containing: source) else { return }
@@ -3120,6 +3724,39 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         utilityRecord(forPane: pane)?.assistant
     }
 
+    func installUtilityPaneAssistantForTesting(
+        _ assistant: PetAssistant,
+        in pane: UtilityPaneView
+    ) {
+        guard let record = utilityRecord(forPane: pane) else { return }
+        if let previous = record.assistant,
+           previous !== assistant,
+           !petAssistants.values.contains(where: { $0 === previous }) {
+            previous.invalidate()
+        }
+        record.assistant = assistant
+        configureCollaboration(for: record, assistant: assistant)
+        record.controller?.attachAssistant(assistant)
+    }
+
+    func linkCollaborationPanesForTesting(
+        source: NSView,
+        target: NSView,
+        completion: @escaping (Result<CollaborationSnapshot, Error>) -> Void
+    ) {
+        linkCollaborationPanes(
+            source: source, target: target, completion: completion)
+    }
+
+    func collaborationContextForTesting(
+        pane: UtilityPaneView
+    ) -> CollaborationChatContext? {
+        let endpointID = collaborationEndpoint(for: pane).id
+        return CollaborationChatContext(
+            snapshot: authoritativeCollaborationSnapshot(),
+            endpointID: endpointID)
+    }
+
     func utilityPaneControllerForTesting(_ pane: UtilityPaneView) -> CodeViewController? {
         utilityRecord(forPane: pane)?.controller
     }
@@ -3384,6 +4021,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case .chat:
             ledgerID = "chat-\(nextChatLedgerID)"
             nextChatLedgerID += 1
+            pane.paneHeader.title = "Chat \(ledgerID.dropFirst("chat-".count))"
         case .files, .surface:
             ledgerID = kind.rawValue
         }
@@ -3445,6 +4083,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 // This Chat surface owns the conversation — drop the pet bubble.
                 assistant.dismissPopover()
                 record.assistant = assistant
+                configureCollaboration(for: record, assistant: assistant)
                 let paneLedger = ledgerID
                 pane.onNewChat = { [weak self, weak win, weak assistant] in
                     if let self, let win {
@@ -3484,6 +4123,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         sidebarToggleAccessories[id]?.toggleView.setSidebarVisible(
             utilityRecord(.files, in: win) != nil)
         win.makeFirstResponder(pane)
+        refreshCollaborationProjection()
         return record
     }
 
@@ -3512,6 +4152,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let self, let pane else { return }
             self.togglePaneZoom(for: pane)
         }
+        pane.paneHeader.onRenameCommit = { [weak self, weak pane] _ in
+            guard let self, let pane else { return }
+            self.updateCollaborationMembership(for: pane)
+        }
         pane.onFocus = { [weak self, weak win, weak pane] in
             guard let self, let win, let pane else { return }
             self.updatePaneSelection(in: win, focused: pane)
@@ -3527,6 +4171,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         pane.onDragMoved = { [weak self] point in self?.updatePaneDrag(at: point) }
         pane.onDragEnded = { [weak self] point, cancelled in
             self?.endPaneDrag(at: point, cancelled: cancelled)
+        }
+        pane.onChannelActivate = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.presentChannelSummary(for: pane)
+        }
+        pane.onChannelDragBegan = { [weak self, weak pane] point in
+            guard let self, let pane else { return }
+            self.beginChannelConnectorDrag(sourceView: pane, at: point)
+        }
+        pane.onChannelDragMoved = { [weak self] point in
+            self?.updateChannelConnectorDrag(at: point)
+        }
+        pane.onChannelDragEnded = { [weak self] point, cancelled in
+            self?.endChannelConnectorDrag(at: point, cancelled: cancelled)
         }
     }
 
@@ -3648,6 +4306,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 record.pane.removeFromSuperview()
             }
         }
+        leaveCollaborationPane(record.pane)
         if let browser = record.browser {
             browser.cancelPendingAutomation()
             appControl.broadcast(["event": "browser-closed", "browserId": browser.browserID])
@@ -3832,6 +4491,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if record.assistant == nil {
             bindAssistant(assistant, to: source)
             record.assistant = assistant
+            configureCollaboration(for: record, assistant: assistant)
         }
         assistant.prepareRecovery(
             context: detected.recoveryContext,
@@ -3866,6 +4526,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard let record = openUtilityPanel(.chat, in: win) else { return }
             let assistant = record.assistant ?? PetAssistant(config: config)
             record.assistant = assistant
+            configureCollaboration(for: record, assistant: assistant)
             record.controller?.attachAssistant(assistant)
             let paneLedger = record.ledgerID
             record.pane.onNewChat = { [weak self, weak win, weak assistant] in
@@ -3890,6 +4551,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             record.controller?.track(session: source)
         }
         record.assistant = assistant
+        configureCollaboration(for: record, assistant: assistant)
         record.controller?.attachAssistant(assistant)
         assistant.submitBrowserAnnotations(annotations)
         win.makeFirstResponder(record.pane)
@@ -4250,6 +4912,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return response
     }
 
+    private func handleCollaborationControl(_ encoded: String) -> String {
+        return collaborationQueue.sync {
+            let result = collaborationCoordinator.execute(encoded)
+            if let snapshot = result.snapshot {
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyCollaborationProjection(snapshot)
+                }
+            }
+            return result.response
+        }
+    }
+
     private func handleAppRequest(_ request: String) -> String {
         let parts = request.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
         let cmd = parts.first.map(String.init) ?? ""
@@ -4267,21 +4941,63 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return "pong"
         case "version":
             return "infinitty 0.1"
+        case "instance":
+            let descriptor: [String: Any] = [
+                "id": collaborationInstanceID,
+                "pid": Int(getpid()),
+                "socket": appControl.path,
+                "protocolVersion": 1,
+            ]
+            let data = (try? JSONSerialization.data(withJSONObject: descriptor))
+                ?? Data("{}".utf8)
+            return String(decoding: data, as: UTF8.self)
         case "browser":
             return handleBrowserControl(arg)
+        case "channel":
+            return handleCollaborationControl(arg)
+        case "channel-project":
+            if let snapshot = CollaborationCoordinatorClient.projectedSnapshot(
+                from: arg)
+            {
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyCollaborationProjection(snapshot)
+                }
+                return "ok"
+            }
+            return "error: invalid Channel projection"
         case "list":
             let panes = onMain { () -> [[String: Any]] in
                 let key = NSApp.keyWindow
-                return self.sessions.map { s in
-                    [
-                        "id": s.id,
-                        "title": s.title,
-                        "windowTitle": s.view.window?.title ?? "",
-                        "focused": key?.firstResponder === s.view,
-                        "cols": s.terminal.cols,
-                        "rows": s.terminal.rows,
-                        "socket": s.control.path,
+                return self.liveCollaborationPanes().compactMap { pane in
+                    let endpoint = self.collaborationEndpoint(for: pane)
+                    var descriptor: [String: Any] = [
+                        "id": endpoint.id,
+                        "title": endpoint.label,
+                        "windowTitle": pane.window?.title ?? "",
+                        "focused": key?.firstResponder === pane,
+                        "kind": endpoint.kind.rawValue,
+                        "channelEndpoint": [
+                            "id": endpoint.id,
+                            "kind": endpoint.kind.rawValue,
+                            "label": endpoint.label,
+                            "participantID": endpoint.participantID ?? "",
+                            "instanceID": endpoint.instanceID ?? "",
+                        ],
                     ]
+                    if let terminal = pane as? TerminalView,
+                       let session = self.sessions.first(where: {
+                           $0.view === terminal
+                       })
+                    {
+                        // Preserve the legacy numeric terminal handle while
+                        // exposing every utility pane through the same list.
+                        descriptor["id"] = session.id
+                        descriptor["terminalSessionID"] = session.id
+                        descriptor["cols"] = session.terminal.cols
+                        descriptor["rows"] = session.terminal.rows
+                        descriptor["socket"] = session.control.path
+                    }
+                    return descriptor
                 }
             } ?? []
             let data = (try? JSONSerialization.data(withJSONObject: panes)) ?? Data("[]".utf8)
@@ -4457,31 +5173,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let itemID = UUID()
             let sem = DispatchSemaphore(value: 0)
             var exitCode = -1
+            var commandOutput = ""
             _ = onMain {
-                let item = RunItem(id: itemID, command: text) { code in
+                let item = RunCommandQueue.Item(id: itemID, command: text) { code, output in
                     exitCode = code
+                    commandOutput = output
                     sem.signal()
                 }
-                var queue = self.runQueues[s.id, default: []]
-                queue.append(item)
+                let queue = self.runQueues[s.id] ?? RunCommandQueue()
                 self.runQueues[s.id] = queue
-                if queue.count == 1 {
+                if queue.enqueue(item) {
                     s.view.showAgentGlow()
                     s.pty.write(Array(text.utf8) + [0x0D])
                 }
             }
             guard sem.wait(timeout: .now() + 120) == .success else {
                 _ = onMain {
-                    if var queue = self.runQueues[s.id] {
-                        queue.removeAll { $0.id == itemID }
-                        self.runQueues[s.id] = queue.isEmpty ? nil : queue
+                    if let queue = self.runQueues[s.id] {
+                        _ = queue.cancelTimedOut(id: itemID)
+                        if queue.isEmpty { self.runQueues[s.id] = nil }
                     }
                 }
                 return "error: timed out waiting for completion (is OSC 133 shell integration enabled?)"
             }
             let payload: [String: Any] = [
                 "exitCode": exitCode,
-                "output": s.terminal.lastCommandOutput() ?? "",
+                "output": commandOutput,
             ]
             let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
             return String(decoding: data, as: UTF8.self)
@@ -4706,6 +5423,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         tabTints.removeValue(forKey: ObjectIdentifier(win))
         var invalidatedAssistants = Set<ObjectIdentifier>()
         for record in utilityRecords(in: win) {
+            leaveCollaborationPane(record.pane)
             record.browser?.cancelPendingAutomation()
             record.surface?.teardown()
             if let assistant = record.assistant,
@@ -4720,7 +5438,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         updateIndicators.removeValue(forKey: ObjectIdentifier(win))
         win.subtitle = ""
         let closing = sessions.filter { $0.view.window === win }
-        for s in closing { s.shutdown() }
+        for s in closing {
+            leaveCollaborationPane(s.view)
+            s.shutdown()
+        }
         sessions.removeAll { s in closing.contains { $0 === s } }
         // Free per-session state now instead of waiting for the PTY EOF —
         // a child that keeps the pty open (nohup) would otherwise pin the
@@ -4728,7 +5449,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         for s in closing {
             pendingLaunchCommands.removeValue(forKey: s.id)
             petAssistants.removeValue(forKey: s.id)?.invalidate()
-            runQueues.removeValue(forKey: s.id)?.forEach { $0.completion(-1) }
+            runQueues.removeValue(forKey: s.id)?.cancelAll()
         }
         // Repaint the surviving siblings' strips on the next runloop (after
         // AppKit drops this window from the tab group); without this a closed

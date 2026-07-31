@@ -44,7 +44,7 @@ anything slow while holding it.
 
 - **Parsing**: single-pass VT state machine with a bulk fast path — printable
   ASCII runs are blitted straight into row memory, skipping the state machine
-  per byte. 16-byte POD cells, `-Ounchecked` release build.
+  per byte. 16-byte POD cells in an optimized release build.
 - **Rendering**: instanced Metal quads — one draw call for run-merged
   background rects, one for glyphs, one for decorations. Glyphs rasterize once
   (CoreText, device-pixel scale) into an R8 shelf-packed atlas; after warmup a
@@ -107,6 +107,46 @@ Plus per-pane proxies (`send`, `send-line`, `screen`, `history`,
 `last-output`, `last-command`, `exit-code` — all `<cmd> <pane-id> …`).
 `subscribe` streams `pane-opened`, `pane-closed`, `title`, and `marker`
 events as JSON lines. Socket-driven input lights the agent glow.
+
+### Connected Chat Channels
+
+Every Chat pane has a stable process-local identity (`Chat 1`, `Chat 2`, …).
+Drag the circular connector in one pane header onto another pane's connector to
+create or join a Channel. Linked headers show a visible badge such as
+`Channel 1 · 2`, not color alone.
+
+For linked Chat panes, Channel membership is part of every real provider turn:
+the agent receives its own participant name, the Channel name, exact peer
+names, roles, and the bounded recent Channel transcript. Accepted user prompts
+and provider responses are appended to the durable room log, so a peer's next
+turn can read and reference the handoff. Amp participates through the same
+provider-facing context path; it is not the headless host. Renames update the
+stored participant identity, closing a pane removes it from every peer's live
+membership, and long provider replies are explicitly bounded for the shared
+transcript without shortening the local answer.
+
+Visual and headless processes use one local Channel coordinator and one
+tamper-evident journal. Linking endpoints from different Infinitty instances
+therefore updates the same authoritative room; live instances receive the new
+projection, and another process replays the journal and takes over if the
+coordinator owner exits.
+
+### Headless terminal/app host
+
+Run Infinitty as a genuine windowless terminal host:
+
+```sh
+infinitty --headless ~/Documents/GitHub/myrepo
+```
+
+This path does not create `NSApplication`, windows, Metal layers, renderers, or
+display links. It still launches real PTYs and exposes instance discovery,
+per-terminal sockets, the app control socket, Channel state, event
+subscriptions, and the same MCP terminal/Channel tools. UI-only operations such
+as browser panes return an explicit unavailable error.
+
+Amp remains an agent provider. Its non-interactive provider transport is
+separate from Infinitty's headless app mode.
 
 ### MCP server
 

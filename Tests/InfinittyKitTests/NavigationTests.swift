@@ -731,6 +731,38 @@ final class NavigationTests: XCTestCase {
             header.titleFrameForTesting.midY,
             header.splitRightFrameForTesting.midY - 3,
             accuracy: 1)
+        XCTAssertEqual(
+            header.channelConnectorAccessibilityLabelForTesting,
+            "Connect pane to a Channel")
+        XCTAssertTrue(header.channelAnchorView.isAccessibilityElement())
+        var channelActivated = false
+        header.onChannelActivate = { channelActivated = true }
+        XCTAssertTrue(header.channelAnchorView.accessibilityPerformPress())
+        XCTAssertTrue(channelActivated)
+        XCTAssertEqual(header.channelConnectorFrameForTesting.width, 28)
+        XCTAssertLessThanOrEqual(
+            header.channelConnectorFrameForTesting.maxX,
+            header.splitRightFrameForTesting.minX)
+    }
+
+    func testPaneHeaderConnectorReflectsChannelMembership() {
+        let header = PaneHeaderView(
+            frame: NSRect(x: 0, y: 0, width: 500, height: PaneHeaderView.height))
+        header.setChannel(name: "Release", color: .systemPurple, memberCount: 6)
+        header.setChannelDropTarget(true)
+
+        XCTAssertEqual(
+            header.channelConnectorAccessibilityLabelForTesting,
+            "Channel Release, 6 connected panes")
+        XCTAssertEqual(header.channelBadgeTextForTesting, "Release · 6")
+        XCTAssertFalse(header.channelBadgeIsHiddenForTesting)
+        header.setChannel(name: "Channel 1", color: .systemBlue, memberCount: 2)
+        XCTAssertEqual(
+            header.channelConnectorAccessibilityLabelForTesting,
+            "Channel 1, 2 connected panes")
+        XCTAssertEqual(header.channelBadgeTextForTesting, "Channel 1 · 2")
+        header.setChannel(name: nil, color: nil, memberCount: 0)
+        XCTAssertTrue(header.channelBadgeIsHiddenForTesting)
     }
 
     func testPaneHeaderIconBecomesCloseButtonOnHoverWhenClosable() {
@@ -1169,6 +1201,9 @@ final class NavigationTests: XCTestCase {
             forceNewInstance: true))
         chrome.layoutSubtreeIfNeeded()
 
+        XCTAssertEqual(chat1.paneHeader.title, "Chat 1")
+        XCTAssertEqual(chat2.paneHeader.title, "Chat 2")
+        XCTAssertEqual(chat3.paneHeader.title, "Chat 3")
         XCTAssertTrue(PaneLayoutController.removeLeaf(anchor, from: chrome.body))
         XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat2, in: window))
 
@@ -1183,6 +1218,153 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(firstFrame.intersection(thirdFrame).isEmpty)
         XCTAssertGreaterThan(firstFrame.width, 10)
         XCTAssertGreaterThan(thirdFrame.width, 10)
+    }
+
+    func testConnectedChatPanesReceiveNamesMembershipAndPeerMessages() throws {
+        _ = NSApplication.shared
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.tabbingIdentifier = "infinitty"
+        window.isReleasedWhenClosed = false
+        let chrome = TerminalChromeView(frame: window.contentView?.bounds ?? .zero)
+        chrome.autoresizingMask = [.width, .height]
+        delegate.installPaneHostForTesting(chrome, in: window)
+        chrome.layoutSubtreeIfNeeded()
+        defer {
+            delegate.windowWillClose(Notification(
+                name: NSWindow.willCloseNotification, object: window))
+            window.close()
+        }
+        let anchor = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        anchor.frame = chrome.body.bounds
+        chrome.body.addSubview(anchor)
+        let chat1 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: anchor,
+            forceNewInstance: true))
+        let chat2 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: chat1,
+            forceNewInstance: true))
+
+        let firstTurn = expectation(description: "Chat 1 provider turn")
+        let secondTurn = expectation(description: "Chat 2 provider turn")
+        var firstProviderContext = ""
+        var secondProviderContext = ""
+        let assistant1 = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    firstProviderContext = user
+                    done(.text("Chat 1 has completed the implementation."))
+                    firstTurn.fulfill()
+                }
+            })
+        let assistant2 = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    secondProviderContext = user
+                    done(.text("Chat 2 received Chat 1's handoff."))
+                    secondTurn.fulfill()
+                }
+            })
+        delegate.installUtilityPaneAssistantForTesting(assistant1, in: chat1)
+        delegate.installUtilityPaneAssistantForTesting(assistant2, in: chat2)
+
+        let linked = expectation(description: "Channel link committed")
+        delegate.linkCollaborationPanesForTesting(
+            source: chat1, target: chat2
+        ) { result in
+            if case .failure(let error) = result {
+                XCTFail("Channel link failed: \(error)")
+            }
+            linked.fulfill()
+        }
+        wait(for: [linked], timeout: 3)
+
+        XCTAssertEqual(chat1.paneHeader.title, "Chat 1")
+        XCTAssertEqual(chat2.paneHeader.title, "Chat 2")
+        XCTAssertEqual(chat1.paneHeader.channelBadgeTextForTesting, "Channel 1 · 2")
+        XCTAssertEqual(chat2.paneHeader.channelBadgeTextForTesting, "Channel 1 · 2")
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .peers.map(\.displayName),
+            ["Chat 2"])
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat2)?
+                .peers.map(\.displayName),
+            ["Chat 1"])
+
+        let firstTranscript = assistant1.makeSidebarPanelView()
+        assistant1.submitForQA("Tell the Channel what you completed.")
+        wait(for: [firstTurn], timeout: 3)
+        let visibleAnswerDeadline = Date(timeIntervalSinceNow: 3)
+        while !firstTranscript.transcriptForTesting.contains(
+            "Chat 1 has completed the implementation."),
+            Date() < visibleAnswerDeadline
+        {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+        XCTAssertTrue(firstTranscript.transcriptForTesting.contains(
+            "Chat 1 has completed the implementation."))
+        XCTAssertTrue(firstProviderContext.contains("Your participant name: \"Chat 1\""))
+        XCTAssertTrue(firstProviderContext.contains("- \"Chat 2\" [chat]"))
+
+        // Submit as soon as Chat 1's answer is visible. Chat 2's provider
+        // context must wait behind the queued durable publication instead of
+        // racing the eventually-applied AppKit projection.
+        assistant2.submitForQA("What did the other Chat report?")
+        wait(for: [secondTurn], timeout: 3)
+        XCTAssertTrue(secondProviderContext.contains("Your participant name: \"Chat 2\""))
+        XCTAssertTrue(secondProviderContext.contains("- \"Chat 1\" [chat]"))
+        XCTAssertTrue(secondProviderContext.contains(
+            "- \"Chat 1\": \"Chat 1 has completed the implementation.\""))
+
+        let chat3 = try XCTUnwrap(delegate.openUtilityPaneForTesting(
+            .chat, in: window, relativeTo: chat2,
+            forceNewInstance: true))
+        let thirdLinked = expectation(description: "third Chat joined")
+        delegate.linkCollaborationPanesForTesting(
+            source: chat1, target: chat3
+        ) { result in
+            if case .failure(let error) = result {
+                XCTFail("Third Channel link failed: \(error)")
+            }
+            thirdLinked.fulfill()
+        }
+        wait(for: [thirdLinked], timeout: 3)
+        XCTAssertEqual(chat1.paneHeader.channelBadgeTextForTesting, "Channel 1 · 3")
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .peers.map(\.displayName),
+            ["Chat 2", "Chat 3"])
+        chat1.paneHeader.title = "Lead Agent"
+        chat1.paneHeader.onRenameCommit?("Lead Agent")
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .identity.displayName,
+            "Lead Agent")
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat3)?
+                .peers.map(\.displayName),
+            ["Chat 2", "Lead Agent"])
+
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat2, in: window))
+        XCTAssertEqual(chat1.paneHeader.channelBadgeTextForTesting, "Channel 1 · 2")
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .peers.map(\.displayName),
+            ["Chat 3"])
+        XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat3, in: window))
+        XCTAssertEqual(chat1.paneHeader.channelBadgeTextForTesting, "Channel 1 · 1")
+        XCTAssertEqual(
+            delegate.collaborationContextForTesting(pane: chat1)?
+                .peers.map(\.displayName),
+            [])
     }
 
     func testTerminalExitThenMiddleChatClosePreservesRealChatPanesAndOwners() throws {

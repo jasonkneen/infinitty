@@ -1805,6 +1805,18 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private var extraSidebarPanels: [WeakPetAssistantPanel] = []
     /// Last known project root for file SEARCH/LIST when no terminal is attached.
     private var lastWorkspaceDirectory: String?
+    /// Dynamic Channel state is resolved at the beginning of every turn. It is
+    /// intentionally not cached in the provider's constant system prompt:
+    /// membership, peer names, and room messages can change while a stateful
+    /// provider process remains warm.
+    private var collaborationContextProvider: (() -> CollaborationChatContext?)?
+    /// Both sides of an accepted Chat turn are appended to the durable Channel
+    /// transcript. AppDelegate supplies the room adapter; PetAssistant remains
+    /// unaware of AppKit panes and persistence.
+    private var collaborationMessagePublisher: ((CollaborationChatEmission) -> Void)?
+    /// Publishes the provider/model selected for this turn before Channel
+    /// context is resolved, so peers see the live agent provenance.
+    private var collaborationIdentityPublisher: ((String?, String?) -> Void)?
 
     private var sidebarMessages: [AssistantChatMessage] {
         get { activeThread?.messages ?? [] }
@@ -1930,6 +1942,16 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     func isAttached(to candidate: TerminalSession) -> Bool {
         session === candidate
+    }
+
+    func configureCollaboration(
+        contextProvider: @escaping () -> CollaborationChatContext?,
+        messagePublisher: @escaping (CollaborationChatEmission) -> Void,
+        identityPublisher: ((String?, String?) -> Void)? = nil
+    ) {
+        collaborationContextProvider = contextProvider
+        collaborationMessagePublisher = messagePublisher
+        collaborationIdentityPublisher = identityPublisher
     }
 
     /// Workspace used for chat-side file listing when a terminal is absent.
@@ -2280,6 +2302,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         appendMessage(
             AssistantChatMessage(role: "You", text: request.text),
             to: request.threadId, titleFromUser: true)
+        collaborationMessagePublisher?(CollaborationChatEmission(
+            kind: .humanPrompt,
+            text: request.text,
+            threadID: request.threadId.uuidString.lowercased()))
         updatePanels()
         // Only the active thread shows the thinking chrome.
         if request.threadId == activeThreadId {
@@ -2454,6 +2480,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 role: "Assistant", text: answer,
                 tokenCount: AssistantChatMessage.approximateTokenCount(for: answer)),
             to: request.threadId)
+        collaborationMessagePublisher?(CollaborationChatEmission(
+            kind: .agentResponse,
+            text: answer,
+            threadID: request.threadId.uuidString.lowercased()))
         // Move completed thread to the top of the switcher.
         if let idx = threadIndex(request.threadId), idx > 0 {
             let thread = threads.remove(at: idx)
@@ -2532,6 +2562,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         session = nil
         onShowInSidePanel = nil
         onPetMessage = nil
+        collaborationContextProvider = nil
+        collaborationMessagePublisher = nil
+        collaborationIdentityPublisher = nil
     }
 
     // MARK: - input bubble
@@ -2610,7 +2643,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     infinitty_run, infinitty_send, infinitty_screen, infinitty_history, \
     infinitty_last_output, infinitty_exit_code, infinitty_new_tab, \
     infinitty_split, infinitty_focus, infinitty_close, infinitty_surface, \
-    infinitty_todos). To SHOW the user something rich — a plan, a doc, a \
+    infinitty_todos, infinitty_channels, infinitty_channel_link, \
+    infinitty_channel_apply). To SHOW the user something rich — a plan, a doc, a \
     rendered preview, a small UI — use infinitty_surface (markdown, HTML, or a \
     URL; target=split for a side panel at a ratio like 0.25, target=window for \
     a standalone doc). For multi-step work, keep infinitty_todos updated so the \
@@ -2646,6 +2680,16 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     listing files in the project, reply with EXACTLY one line \
     "SEARCH: <filename or path keywords>" or "SEARCH: *" and nothing else; you \
     will receive the matching files to compose the final answer in chat.
+
+    CHANNEL AWARENESS:
+    - A turn may contain an "ACTIVE INFINITTY CHANNEL" section. When present, \
+    it is authoritative live app state: you are connected to that Channel as \
+    the named participant and the listed peer endpoints are connected with you.
+    - Never describe yourself as a solo chat when an active Channel section is \
+    present. If asked about the connection, state your participant name, the \
+    Channel name, and the exact connected peer names.
+    - Read recent Channel messages as shared collaboration context and refer to \
+    other participants by their displayed names.
     """
 
     private func ask(
@@ -2663,6 +2707,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         let activeSession = session
         activeSession?.petAnimator?.startThinking()
         let backend = resolveBackend(forSelectedTitle: model)
+        let provenance = Self.collaborationProvenance(for: backend)
+        collaborationIdentityPublisher?(provenance.provider, provenance.model)
         // Keep the system prompt CONSTANT: the CLI bridges pin --system-prompt
         // at process launch, so folding effort in here forced a full cold
         // respawn on every effort change (and invalidated the prewarm). The
@@ -2671,6 +2717,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         let system = Self.systemPrompt
         let effortNote = Self.effortDirective(effort)
         let runCwd = workspaceDirectoryForChat()
+        let activeCollaborationContext = collaborationContextProvider?()
         let sessionSignature = Self.backendSessionSignature(for: backend, cwd: runCwd)
         let previousSignature: String?
         let needsBackendBootstrap: Bool
@@ -2758,10 +2805,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 terminal output. Browser tools remain available for page work.
                 """
             }
-            let user = Self.boundedSuffix(
-                context + "\n--- user request ---\n" + requestWithHistory
-                    + (effortNote.isEmpty ? "" : "\n" + effortNote),
-                to: Self.maxBackendUserBytes)
+            let requestItem = requestWithHistory
+                + (effortNote.isEmpty ? "" : "\n" + effortNote)
+            let user = Self.composedBackendUser(
+                for: backend,
+                system: system,
+                baseContext: context,
+                collaborationContext: activeCollaborationContext,
+                request: requestItem)
             let initialPayload = Self.boundedBackendPayload(
                 for: backend, system: system, user: user)
 
@@ -2798,15 +2849,13 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                         // Stateless transports need the request again, but the
                         // SEARCH result is the new information. Reserve its
                         // complete bounded section at the retained end.
-                        let retainedSource = context
-                            + "\n--- user request ---\n" + requestWithHistory
-                        let retainedBudget = max(
-                            followUpBudget - searchResultContext.utf8.count - 1, 0)
-                        let retained = Self.boundedSuffix(
-                            retainedSource, to: retainedBudget)
-                        followUp = retained.isEmpty
-                            ? searchResultContext
-                            : retained + "\n" + searchResultContext
+                        followUp = Self.composedBackendUser(
+                            for: backend,
+                            system: system,
+                            baseContext: context,
+                            collaborationContext: activeCollaborationContext,
+                            request: requestWithHistory
+                                + "\n" + searchResultContext)
                     }
                     let followUpPayload = Self.boundedBackendPayload(
                         for: backend, system: system, user: followUp)
@@ -2965,6 +3014,31 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
     }
 
+    private static func collaborationProvenance(
+        for backend: Backend
+    ) -> (provider: String?, model: String?) {
+        switch backend {
+        case .none:
+            return (nil, nil)
+        case .command:
+            return ("command", nil)
+        case .openai(_, _, let model):
+            return ("openai", model)
+        case .codex(let model):
+            return ("codex", model)
+        case .claude(let model):
+            return ("claude", model)
+        case .opencode(let model):
+            return ("opencode", model)
+        case .hermes(let model):
+            return ("hermes", model)
+        case .amp(let model):
+            return ("amp", model)
+        case .foundation:
+            return ("apple-foundation-models", nil)
+        }
+    }
+
     private static func combinesSystemAndUser(_ backend: Backend) -> Bool {
         switch backend {
         case .command, .codex, .opencode, .hermes, .amp:
@@ -2990,6 +3064,36 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 .utf8.count
         }
         return max(maxBackendUserBytes - systemBytes - separatorBytes, 0)
+    }
+
+    /// Composes the provider-visible user item by reserving complete space for
+    /// the active Channel block and newest request before admitting older
+    /// terminal/history context. Combined-system bridges therefore cannot
+    /// suffix-truncate the identity that tells an agent which room it is in.
+    private static func composedBackendUser(
+        for backend: Backend,
+        system: String,
+        baseContext: String,
+        collaborationContext: CollaborationChatContext?,
+        request: String
+    ) -> String {
+        let budget = backendUserBudget(for: backend, system: system)
+        let channel = collaborationContext?.modelContext() ?? ""
+        let requestHeader = "--- user request ---\n"
+        let separators = channel.isEmpty ? 1 : 2
+        let fixedBytes = channel.utf8.count
+            + requestHeader.utf8.count + separators
+        let requestBudget = max(budget - fixedBytes, 0)
+        let boundedRequest = boundedSuffix(request, to: requestBudget)
+        let retainedBytes = fixedBytes + boundedRequest.utf8.count
+        let baseBudget = max(budget - retainedBytes, 0)
+        let boundedBase = boundedSuffix(baseContext, to: baseBudget)
+
+        var sections: [String] = []
+        if !boundedBase.isEmpty { sections.append(boundedBase) }
+        if !channel.isEmpty { sections.append(channel) }
+        sections.append(requestHeader + boundedRequest)
+        return sections.joined(separator: "\n")
     }
 
     /// Builds a complete SEARCH section within at most half of the available
@@ -3268,6 +3372,20 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     static var maximumCombinedUserBytesForTesting: Int {
         max(maxBackendUserBytes - systemPrompt.utf8.count - 2, 0)
     }
+
+    static func composedBackendUserForTesting(
+        backend: Backend,
+        baseContext: String,
+        collaborationContext: CollaborationChatContext?,
+        request: String
+    ) -> String {
+        composedBackendUser(
+            for: backend,
+            system: systemPrompt,
+            baseContext: baseContext,
+            collaborationContext: collaborationContext,
+            request: request)
+    }
     var activeToolEventScopeIDForTesting: String {
         backendConversationID(for: activeThreadId)
     }
@@ -3448,7 +3566,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                    conversationID: conversationID,
                    onPartial: onPartial, timeout: timeout, done: done)
         case .amp(let model):
-            askAmp(model: model, system: system, user: user,
+            askAmp(model: model, system: system, user: user, cwd: cwd,
                    onPartial: onPartial, timeout: timeout, done: done)
         case .foundation:
             #if canImport(FoundationModels)
@@ -3562,11 +3680,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
     }
 
-    /// Amp best-effort one-shot (TUI-only CLI; fails fast with an
-    /// actionable message rather than hanging — see AmpBridge).
+    /// Amp one-shot through its supported non-interactive execute contract.
     private static func askAmp(
-        model: String?,
-        system: String, user: String,
+        model: String?, system: String, user: String, cwd: String,
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -3576,6 +3692,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 do {
                     let reply = try await AmpBridge.shared.turn(
                         prompt: user, system: system, model: model,
+                        cwd: cwd,
                         timeout: timeout ?? defaultTurnTimeout,
                         onPartial: onPartial)
                     done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))

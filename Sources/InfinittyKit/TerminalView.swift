@@ -30,6 +30,18 @@ final class TerminalView: NSView {
     var onPaneDragBegan: ((NSPoint) -> Void)? { didSet { paneHeader.onDragBegan = onPaneDragBegan } }
     var onPaneDragMoved: ((NSPoint) -> Void)? { didSet { paneHeader.onDragMoved = onPaneDragMoved } }
     var onPaneDragEnded: ((NSPoint, Bool) -> Void)? { didSet { paneHeader.onDragEnded = onPaneDragEnded } }
+    var onChannelActivate: (() -> Void)? {
+        didSet { paneHeader.onChannelActivate = onChannelActivate }
+    }
+    var onChannelDragBegan: ((NSPoint) -> Void)? {
+        didSet { paneHeader.onChannelDragBegan = onChannelDragBegan }
+    }
+    var onChannelDragMoved: ((NSPoint) -> Void)? {
+        didSet { paneHeader.onChannelDragMoved = onChannelDragMoved }
+    }
+    var onChannelDragEnded: ((NSPoint, Bool) -> Void)? {
+        didSet { paneHeader.onChannelDragEnded = onChannelDragEnded }
+    }
 
     private(set) lazy var paneHeader: PaneHeaderView = {
         let header = PaneHeaderView(frame: .zero)
@@ -52,6 +64,10 @@ final class TerminalView: NSView {
 
     func setPaneAccent(_ color: NSColor) {
         paneOutline.accentColor = color
+    }
+
+    func setChannel(name: String?, color: NSColor?, memberCount: Int) {
+        paneHeader.setChannel(name: name, color: color, memberCount: memberCount)
     }
 
     var paneAccentColorForTesting: NSColor { paneOutline.accentColor }

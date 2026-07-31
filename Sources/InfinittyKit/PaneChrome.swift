@@ -742,6 +742,240 @@ private final class PaneSplitButton: NSButton {
     }
 }
 
+/// The small, persistent collaboration port in every pane header. A click
+/// opens the channel surface; dragging the port to another pane asks the room
+/// kernel to link the two endpoints. The callback coordinates are in global
+/// screen space so a drag can cross native windows without changing meaning.
+final class ChannelConnectorView: NSView {
+    var onActivate: (() -> Void)?
+    var onDragBegan: ((NSPoint) -> Void)?
+    var onDragMoved: ((NSPoint) -> Void)?
+    var onDragEnded: ((NSPoint, Bool) -> Void)?
+
+    private(set) var channelName: String?
+    private(set) var memberCount = 0
+    private(set) var channelColor = NSColor.secondaryLabelColor
+    private var isDropTarget = false
+    private var isDragging = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        updateAccessibility()
+        toolTip = "Drag to connect this pane to a Channel"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override var acceptsFirstResponder: Bool { true }
+
+    func setChannel(name: String?, color: NSColor?, memberCount: Int) {
+        channelName = name
+        channelColor = color ?? NSColor.secondaryLabelColor
+        self.memberCount = max(memberCount, 0)
+        toolTip = name.map {
+            "\($0), \(self.memberCount) connected panes. Drag to extend or click to open."
+        } ?? "Drag to connect this pane to a Channel"
+        updateAccessibility()
+        needsDisplay = true
+    }
+
+    func setDropTarget(_ active: Bool) {
+        guard isDropTarget != active else { return }
+        isDropTarget = active
+        needsDisplay = true
+    }
+
+    var isDropTargetForTesting: Bool { isDropTarget }
+    var accessibilityLabelForTesting: String { accessibilityLabel() ?? "" }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onActivate else { return false }
+        onActivate()
+        return true
+    }
+
+    private func updateAccessibility() {
+        if let channelName {
+            let spokenName = channelName.lowercased().hasPrefix("channel")
+                ? channelName
+                : "Channel \(channelName)"
+            setAccessibilityLabel(
+                "\(spokenName), \(memberCount) connected panes")
+        } else {
+            setAccessibilityLabel("Connect pane to a Channel")
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let connected = channelName != nil
+        let outer = bounds.insetBy(dx: 5, dy: 5)
+        let color = connected ? channelColor : NSColor.secondaryLabelColor
+
+        if isDropTarget || isDragging {
+            color.withAlphaComponent(isDropTarget ? 0.24 : 0.14).setFill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
+        }
+
+        let ring = NSBezierPath(ovalIn: outer)
+        ring.lineWidth = isDropTarget ? 2.5 : 1.5
+        color.withAlphaComponent(connected ? 0.95 : 0.55).setStroke()
+        ring.stroke()
+
+        let center = NSPoint(x: bounds.midX, y: bounds.midY)
+        let dot = NSRect(x: center.x - 2, y: center.y - 2, width: 4, height: 4)
+        color.withAlphaComponent(connected ? 0.95 : 0.44).setFill()
+        NSBezierPath(ovalIn: dot).fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.buttonNumber == 0, let window else { return }
+        let startWindowPoint = event.locationInWindow
+        let startScreenPoint = window.convertPoint(toScreen: startWindowPoint)
+        var dragging = false
+
+        while let next = window.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp, .keyDown])
+        {
+            let screenPoint = window.convertPoint(toScreen: next.locationInWindow)
+            switch next.type {
+            case .leftMouseDragged:
+                if !dragging,
+                   hypot(
+                    next.locationInWindow.x - startWindowPoint.x,
+                    next.locationInWindow.y - startWindowPoint.y) > 4
+                {
+                    dragging = true
+                    isDragging = true
+                    needsDisplay = true
+                    onDragBegan?(startScreenPoint)
+                }
+                if dragging { onDragMoved?(screenPoint) }
+            case .leftMouseUp:
+                if dragging {
+                    isDragging = false
+                    needsDisplay = true
+                    onDragEnded?(screenPoint, false)
+                } else {
+                    onActivate?()
+                }
+                return
+            case .keyDown where next.keyCode == 53:
+                if dragging {
+                    isDragging = false
+                    needsDisplay = true
+                    onDragEnded?(screenPoint, true)
+                }
+                return
+            default:
+                break
+            }
+        }
+
+        if dragging {
+            isDragging = false
+            needsDisplay = true
+            onDragEnded?(startScreenPoint, true)
+        }
+    }
+}
+
+/// A short-lived, click-through overlay used only while a connector is being
+/// dragged. One panel per display avoids a giant cross-display backing store.
+/// Points remain in AppKit screen coordinates and are projected by each view.
+final class ChannelWireOverlay {
+    private final class WireView: NSView {
+        let screenFrame: NSRect
+        var start = NSPoint.zero
+        var end = NSPoint.zero
+        var color = NSColor.controlAccentColor
+
+        init(screenFrame: NSRect) {
+            self.screenFrame = screenFrame
+            super.init(frame: NSRect(origin: .zero, size: screenFrame.size))
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            let localStart = NSPoint(
+                x: start.x - screenFrame.minX, y: start.y - screenFrame.minY)
+            let localEnd = NSPoint(
+                x: end.x - screenFrame.minX, y: end.y - screenFrame.minY)
+            let delta = max(abs(localEnd.x - localStart.x) * 0.42, 36)
+            let path = NSBezierPath()
+            path.move(to: localStart)
+            path.curve(
+                to: localEnd,
+                controlPoint1: NSPoint(
+                    x: localStart.x + copysign(delta, localEnd.x - localStart.x),
+                    y: localStart.y),
+                controlPoint2: NSPoint(
+                    x: localEnd.x - copysign(delta, localEnd.x - localStart.x),
+                    y: localEnd.y))
+            path.lineWidth = 2
+            path.lineCapStyle = .round
+            color.withAlphaComponent(0.9).setStroke()
+            path.stroke()
+        }
+    }
+
+    private struct Entry {
+        let panel: NSPanel
+        let wire: WireView
+    }
+
+    private var entries: [Entry] = []
+
+    init(start: NSPoint, color: NSColor) {
+        for screen in NSScreen.screens {
+            let wire = WireView(screenFrame: screen.frame)
+            wire.start = start
+            wire.end = start
+            wire.color = color
+            let panel = NSPanel(
+                contentRect: screen.frame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false,
+                screen: screen)
+            panel.contentView = wire
+            panel.backgroundColor = .clear
+            panel.isOpaque = false
+            panel.hasShadow = false
+            panel.ignoresMouseEvents = true
+            panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.orderFrontRegardless()
+            entries.append(Entry(panel: panel, wire: wire))
+        }
+    }
+
+    func update(end: NSPoint, color: NSColor? = nil) {
+        for entry in entries {
+            entry.wire.end = end
+            if let color { entry.wire.color = color }
+            entry.wire.needsDisplay = true
+        }
+    }
+
+    func close() {
+        for entry in entries { entry.panel.close() }
+        entries.removeAll()
+    }
+
+    deinit { close() }
+}
+
 final class PaneHeaderView: NSView {
     static let height: CGFloat = 28
 
@@ -756,6 +990,18 @@ final class PaneHeaderView: NSView {
     var onDragBegan: ((NSPoint) -> Void)?
     var onDragMoved: ((NSPoint) -> Void)?
     var onDragEnded: ((NSPoint, Bool) -> Void)?
+    var onChannelActivate: (() -> Void)? {
+        didSet { channelConnector.onActivate = onChannelActivate }
+    }
+    var onChannelDragBegan: ((NSPoint) -> Void)? {
+        didSet { channelConnector.onDragBegan = onChannelDragBegan }
+    }
+    var onChannelDragMoved: ((NSPoint) -> Void)? {
+        didSet { channelConnector.onDragMoved = onChannelDragMoved }
+    }
+    var onChannelDragEnded: ((NSPoint, Bool) -> Void)? {
+        didSet { channelConnector.onDragEnded = onChannelDragEnded }
+    }
     /// When set, hovering the pane icon turns it into a close button.
     var onClose: (() -> Void)? {
         didSet { iconView.toolTip = onClose == nil ? nil : "Close Pane" }
@@ -766,8 +1012,11 @@ final class PaneHeaderView: NSView {
     private let splitRightButton = PaneSplitButton()
     private let splitDownButton = PaneSplitButton()
     private let todoButton = PaneSplitButton()
+    private let channelBadge = NSTextField(labelWithString: "")
+    private let channelConnector = ChannelConnectorView()
     private var todoTotal = 0
     private let bottomHairline = NSView()
+    private var channelHairlineColor: NSColor?
     private var closeHoverActive = false
     private var iconTrackingArea: NSTrackingArea?
     private weak var renameEditor: TabRenameTextView?
@@ -798,9 +1047,44 @@ final class PaneHeaderView: NSView {
     var isRenamingForTesting: Bool { renameEditor != nil }
     var todoButtonIsVisibleForTesting: Bool { !todoButton.isHidden }
     var todoTooltipForTesting: String { todoButton.toolTip ?? "" }
+    var channelConnectorFrameForTesting: NSRect { channelConnector.frame }
+    var channelConnectorAccessibilityLabelForTesting: String {
+        channelConnector.accessibilityLabelForTesting
+    }
+    var channelBadgeTextForTesting: String { channelBadge.stringValue }
+    var channelBadgeIsHiddenForTesting: Bool { channelBadge.isHidden }
 
     /// Anchor for the todo popover.
     var todoAnchorView: NSView { todoButton }
+    var channelAnchorView: NSView { channelConnector }
+
+    var channelConnectorScreenFrame: NSRect? {
+        guard let window = channelConnector.window else { return nil }
+        let frameInWindow = channelConnector.convert(channelConnector.bounds, to: nil)
+        return window.convertToScreen(frameInWindow)
+    }
+
+    func setChannel(name: String?, color: NSColor?, memberCount: Int) {
+        channelHairlineColor = name == nil ? nil : color
+        channelConnector.setChannel(name: name, color: color, memberCount: memberCount)
+        channelBadge.stringValue = name.map { "\($0) · \(memberCount)" } ?? ""
+        channelBadge.isHidden = name == nil
+        channelBadge.textColor = (color ?? NSColor.controlAccentColor)
+            .blended(withFraction: 0.22, of: .white)
+            ?? color
+            ?? NSColor.labelColor
+        channelBadge.layer?.backgroundColor = (color ?? NSColor.controlAccentColor)
+            .withAlphaComponent(0.16).cgColor
+        channelBadge.setAccessibilityLabel(
+            name.map { "\($0), \(memberCount) connected panes" })
+        bottomHairline.layer?.backgroundColor = channelHairlineColor?
+            .withAlphaComponent(0.5).cgColor ?? NSColor.clear.cgColor
+        needsLayout = true
+    }
+
+    func setChannelDropTarget(_ active: Bool) {
+        channelConnector.setDropTarget(active)
+    }
 
     /// Show/hide the checklist icon and reflect progress in its tooltip and
     /// tint (accent while work remains, green when everything is done).
@@ -848,6 +1132,16 @@ final class PaneHeaderView: NSView {
             todoButton, symbol: "checklist",
             label: "Agent todo list", action: #selector(todoPressed))
         todoButton.isHidden = true
+
+        channelBadge.font = .monospacedSystemFont(ofSize: 10.5, weight: .semibold)
+        channelBadge.alignment = .center
+        channelBadge.lineBreakMode = .byTruncatingTail
+        channelBadge.wantsLayer = true
+        channelBadge.layer?.cornerRadius = 8
+        channelBadge.layer?.masksToBounds = true
+        channelBadge.isHidden = true
+        addSubview(channelBadge)
+        addSubview(channelConnector)
 
         bottomHairline.wantsLayer = true
         bottomHairline.layer?.backgroundColor = NSColor.clear.cgColor
@@ -929,9 +1223,27 @@ final class PaneHeaderView: NSView {
         todoButton.frame = NSRect(
             x: splitRightButton.frame.minX - (todoButton.isHidden ? 0 : buttonSize), y: 1,
             width: buttonSize, height: buttonSize)
+        let connectorSize: CGFloat = 28
+        channelConnector.frame = NSRect(
+            x: todoButton.frame.minX - connectorSize, y: 0,
+            width: connectorSize, height: connectorSize)
+        let badgeWidth: CGFloat
+        if channelBadge.isHidden {
+            badgeWidth = 0
+            channelBadge.frame = .zero
+        } else {
+            let textWidth = ceil(channelBadge.stringValue.size(withAttributes: [
+                .font: channelBadge.font as Any,
+            ]).width)
+            badgeWidth = min(max(textWidth + 16, 62), 132)
+            channelBadge.frame = NSRect(
+                x: channelConnector.frame.minX - badgeWidth - 4,
+                y: 5, width: badgeWidth, height: 18)
+        }
         iconView.frame = NSRect(x: 10, y: 6, width: 16, height: 16)
-        let titleLimit = todoButton.isHidden
-            ? splitRightButton.frame.minX : todoButton.frame.minX
+        let titleLimit = channelBadge.isHidden
+            ? channelConnector.frame.minX
+            : channelBadge.frame.minX
         titleLabel.frame = NSRect(
             x: 32, y: 1,
             width: max(titleLimit - 39, 0), height: 20)
@@ -1072,8 +1384,16 @@ final class PaneHeaderView: NSView {
         editor.removeFromSuperview()
         titleLabel.isHidden = false
         if committing, !value.isEmpty {
-            title = value
-            onRenameCommit?(value)
+            var bounded = ""
+            var bytes = 0
+            for character in value {
+                let part = String(character)
+                guard bytes + part.utf8.count <= 80 else { break }
+                bounded.append(character)
+                bytes += part.utf8.count
+            }
+            title = bounded
+            onRenameCommit?(bounded)
         }
         onFocus?()
     }

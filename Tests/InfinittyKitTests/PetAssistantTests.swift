@@ -193,6 +193,127 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: cwd))
     }
 
+    func testConnectedChatInjectsIdentityAndPublishesBothSidesOfTurn() throws {
+        let endpointOne = CollaborationEndpoint(
+            id: "instance/chat-1", kind: .chat, label: "Chat 1",
+            participantID: "participant-chat-1", instanceID: "instance")
+        let endpointTwo = CollaborationEndpoint(
+            id: "instance/chat-2", kind: .chat, label: "Chat 2",
+            participantID: "participant-chat-2", instanceID: "instance")
+        let context = try XCTUnwrap(CollaborationChatContext(
+            snapshot: CollaborationSnapshot(
+                revision: 3,
+                channels: [
+                    CollaborationChannelState(
+                        id: "channel-1", name: "Channel 1", colorHex: "#3366FF",
+                        createdAt: Date(), revision: 3,
+                        endpoints: [endpointOne, endpointTwo],
+                        participants: [
+                            CollaborationParticipant(
+                                id: "participant-chat-1", displayName: "Chat 1",
+                                role: "coding agent", provider: "codex"),
+                            CollaborationParticipant(
+                                id: "participant-chat-2", displayName: "Chat 2",
+                                role: "coding agent", provider: "claude"),
+                        ],
+                        responsibilities: [], plan: [], messages: []),
+                ]),
+            endpointID: endpointTwo.id))
+
+        let backendStarted = expectation(description: "provider received Channel context")
+        let responsePublished = expectation(description: "assistant response published")
+        var providerUser = ""
+        var emissions: [CollaborationChatEmission] = []
+        var provenance: (String?, String?)?
+        let amp = PetAssistant.AgentChoice(
+            kind: .amp, modelID: "amp-test",
+            displayName: "Amp test", symbolName: "bolt")
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, amp],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                DispatchQueue.main.async {
+                    providerUser = user
+                    backendStarted.fulfill()
+                    done(.text("I am Chat 2 in Channel 1 with Chat 1."))
+                }
+            })
+        assistant.configureCollaboration(
+            contextProvider: { context },
+            messagePublisher: { emission in
+                emissions.append(emission)
+                if emission.kind == .agentResponse {
+                    responsePublished.fulfill()
+                }
+            },
+            identityPublisher: { provider, model in
+                provenance = (provider, model)
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("Are you connected to another chat?")
+        wait(for: [backendStarted, responsePublished], timeout: 2)
+
+        XCTAssertTrue(providerUser.contains("ACTIVE INFINITTY CHANNEL"))
+        XCTAssertTrue(providerUser.contains("Your participant name: \"Chat 2\""))
+        XCTAssertTrue(providerUser.contains("Channel: \"Channel 1\""))
+        XCTAssertTrue(providerUser.contains("- \"Chat 1\" [chat]"))
+        XCTAssertTrue(providerUser.contains("Are you connected to another chat?"))
+        XCTAssertEqual(emissions.map(\.kind), [.humanPrompt, .agentResponse])
+        XCTAssertEqual(emissions.first?.text, "Are you connected to another chat?")
+        XCTAssertEqual(
+            emissions.last?.text,
+            "I am Chat 2 in Channel 1 with Chat 1.")
+        XCTAssertEqual(emissions.first?.threadID, emissions.last?.threadID)
+        XCTAssertEqual(provenance?.0, "amp")
+        XCTAssertEqual(provenance?.1, "amp-test")
+    }
+
+    func testCombinedBackendRetainsCompleteChannelIdentityWithMaximumRequest()
+        throws
+    {
+        let one = CollaborationEndpoint(
+            id: "instance/chat-1", kind: .chat, label: "Chat 1",
+            participantID: "participant-1")
+        let two = CollaborationEndpoint(
+            id: "instance/chat-2", kind: .chat, label: "Chat 2",
+            participantID: "participant-2")
+        let context = try XCTUnwrap(CollaborationChatContext(
+            snapshot: CollaborationSnapshot(
+                revision: 1,
+                channels: [
+                    CollaborationChannelState(
+                        id: "channel", name: "Release Channel",
+                        colorHex: "#3366FF", createdAt: Date(), revision: 1,
+                        endpoints: [one, two],
+                        participants: [
+                            CollaborationParticipant(
+                                id: "participant-1", displayName: "Chat 1",
+                                role: "agent"),
+                            CollaborationParticipant(
+                                id: "participant-2", displayName: "Chat 2",
+                                role: "agent"),
+                        ],
+                        responsibilities: [], plan: [], messages: []),
+                ]),
+            endpointID: one.id))
+        let requestEnd = "CURRENT-REQUEST-END"
+        let user = PetAssistant.composedBackendUserForTesting(
+            backend: .amp(model: "amp-test"),
+            baseContext: String(repeating: "old-terminal-", count: 2_000),
+            collaborationContext: context,
+            request: String(repeating: "q", count: 6_000) + requestEnd)
+
+        XCTAssertLessThanOrEqual(
+            user.utf8.count, PetAssistant.maximumCombinedUserBytesForTesting)
+        XCTAssertTrue(user.contains("--- ACTIVE INFINITTY CHANNEL ---"))
+        XCTAssertTrue(user.contains("Your participant name: \"Chat 1\""))
+        XCTAssertTrue(user.contains("Channel: \"Release Channel\""))
+        XCTAssertTrue(user.contains("- \"Chat 2\" [chat]"))
+        XCTAssertTrue(user.contains("--- END ACTIVE INFINITTY CHANNEL ---"))
+        XCTAssertTrue(user.hasSuffix(requestEnd))
+    }
+
     func testPetHitRectNilWithoutPet() {
         let renderer = Renderer(config: AppConfig(), scale: 2)
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
