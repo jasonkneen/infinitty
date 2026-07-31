@@ -6487,6 +6487,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return handleChatControl(arg)
         case "channel":
             return handleCollaborationControl(arg)
+        case "audit":
+            return collaborationCoordinator.executeAudit(arg)
         case "channel-panel":
             return handleChannelPanelControl(arg)
         case "channel-project":

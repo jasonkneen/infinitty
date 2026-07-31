@@ -1262,7 +1262,20 @@ struct CollaborationAuditRecord: Codable, Equatable, Sendable {
 
 protocol CollaborationEventStore: AnyObject {
     func load() throws -> [CollaborationAuditRecord]
+    func scan(
+        _ visit: (CollaborationAuditRecord) throws -> Void
+    ) throws
     func append(_ record: CollaborationAuditRecord) throws
+}
+
+extension CollaborationEventStore {
+    func scan(
+        _ visit: (CollaborationAuditRecord) throws -> Void
+    ) throws {
+        for record in try load() {
+            try visit(record)
+        }
+    }
 }
 
 final class MemoryCollaborationEventStore: CollaborationEventStore {
@@ -1281,6 +1294,15 @@ final class MemoryCollaborationEventStore: CollaborationEventStore {
 
     func load() throws -> [CollaborationAuditRecord] {
         records
+    }
+
+    func scan(
+        _ visit: (CollaborationAuditRecord) throws -> Void
+    ) throws {
+        let snapshot = records
+        for record in snapshot {
+            try visit(record)
+        }
     }
 
     func append(_ record: CollaborationAuditRecord) throws {
@@ -1305,13 +1327,20 @@ final class JSONLCollaborationEventStore: CollaborationEventStore {
     }
 
     func load() throws -> [CollaborationAuditRecord] {
+        var records: [CollaborationAuditRecord] = []
+        try scan { records.append($0) }
+        return records
+    }
+
+    func scan(
+        _ visit: (CollaborationAuditRecord) throws -> Void
+    ) throws {
         lock.lock()
         defer { lock.unlock() }
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         let readHandle = try FileHandle(forReadingFrom: url)
         defer { try? readHandle.close() }
 
-        var records: [CollaborationAuditRecord] = []
         var pending = Data()
         while let chunk = try readHandle.read(upToCount: 64 * 1024), !chunk.isEmpty {
             pending.append(chunk)
@@ -1323,7 +1352,7 @@ final class JSONLCollaborationEventStore: CollaborationEventStore {
                         field: "audit record", reason: "record exceeds byte limit")
                 }
                 if !line.isEmpty {
-                    records.append(try CollaborationJSON.decoder.decode(
+                    try visit(CollaborationJSON.decoder.decode(
                         CollaborationAuditRecord.self, from: line))
                 }
             }
@@ -1333,10 +1362,9 @@ final class JSONLCollaborationEventStore: CollaborationEventStore {
             }
         }
         if !pending.isEmpty {
-            records.append(try CollaborationJSON.decoder.decode(
+            try visit(CollaborationJSON.decoder.decode(
                 CollaborationAuditRecord.self, from: pending))
         }
-        return records
     }
 
     func append(_ record: CollaborationAuditRecord) throws {
@@ -1377,7 +1405,7 @@ final class JSONLCollaborationEventStore: CollaborationEventStore {
     }
 }
 
-private enum CollaborationJSON {
+enum CollaborationJSON {
     static var encoder: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
@@ -2024,15 +2052,43 @@ final class CollaborationRoom {
     }
 
     private func replay(_ record: CollaborationAuditRecord) throws {
+        func fail() throws -> Never {
+            throw CollaborationRoomError.auditIntegrityFailure(
+                sequence: record.sequence)
+        }
         switch record.body {
         case let .channelCreated(channel), let .channelCreatedAndLinked(channel):
+            guard channels[channel.id] == nil,
+                  channel.id == record.channelID,
+                  channel.revision == 1,
+                  channel.createdAt == record.timestamp,
+                  Set(channel.endpoints.map(\.id)).count
+                    == channel.endpoints.count,
+                  channel.endpoints.allSatisfy({
+                      endpointChannels[$0.id] == nil
+                  })
+            else {
+                try fail()
+            }
             channels[channel.id] = channel
             for endpoint in channel.endpoints {
                 endpointChannels[endpoint.id] = channel.id
             }
         case let .endpointsLinked(channelID, endpoints):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID,
+                  !endpoints.isEmpty,
+                  Set(endpoints.map(\.id)).count == endpoints.count,
+                  endpoints.allSatisfy({
+                      endpointChannels[$0.id] == nil
+                  })
+            else {
+                try fail()
+            }
             let existing = Set(channel.endpoints.map(\.id))
+            guard endpoints.allSatisfy({ !existing.contains($0.id) }) else {
+                try fail()
+            }
             channel.endpoints.append(contentsOf: endpoints.filter { !existing.contains($0.id) })
             channel.endpoints = Self.sortedEndpoints(channel.endpoints)
             channel.revision += 1
@@ -2042,7 +2098,21 @@ final class CollaborationRoom {
             }
         case let .endpointsLinkedAndParticipantsJoined(
             channelID, endpoints, participants):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID,
+                  !endpoints.isEmpty || !participants.isEmpty,
+                  Set(endpoints.map(\.id)).count == endpoints.count,
+                  Set(participants.map(\.id)).count == participants.count,
+                  endpoints.allSatisfy({
+                      endpointChannels[$0.id] == nil
+                  }),
+                  Set(participants.map(\.id)).isSubset(
+                      of: Set(
+                          (channel.endpoints + endpoints)
+                              .compactMap(\.participantID)))
+            else {
+                try fail()
+            }
             let endpointIDs = Set(endpoints.map(\.id))
             channel.endpoints.removeAll { endpointIDs.contains($0.id) }
             channel.endpoints.append(contentsOf: endpoints)
@@ -2059,7 +2129,16 @@ final class CollaborationRoom {
                 endpointChannels[endpoint.id] = channelID
             }
         case let .endpointLeft(channelID, endpointID, participantID):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID,
+                  let existingEndpoint = channel.endpoints.first(where: {
+                      $0.id == endpointID
+                  }),
+                  existingEndpoint.participantID == participantID,
+                  endpointChannels[endpointID] == channelID
+            else {
+                try fail()
+            }
             channel.endpoints.removeAll { $0.id == endpointID }
             endpointChannels.removeValue(forKey: endpointID)
             if let participantID,
@@ -2080,10 +2159,17 @@ final class CollaborationRoom {
             }
         case let .membershipUpdated(channelID, endpoint, participant):
             guard var channel = channels[channelID],
+                  channelID == record.channelID,
                   let index = channel.endpoints.firstIndex(where: {
                       $0.id == endpoint.id
-                  })
-            else { return }
+                  }),
+                  endpointChannels[endpoint.id] == channelID,
+                  participant?.id == endpoint.participantID
+                    || (participant == nil
+                        && endpoint.participantID == nil)
+            else {
+                try fail()
+            }
             let previousParticipantID = channel.endpoints[index].participantID
             channel.endpoints[index] = endpoint
             channel.endpoints = Self.sortedEndpoints(channel.endpoints)
@@ -2105,31 +2191,57 @@ final class CollaborationRoom {
             channel.revision += 1
             channels[channelID] = channel
         case let .participantJoined(channelID, participant):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID
+            else {
+                try fail()
+            }
             channel.participants.removeAll { $0.id == participant.id }
             channel.participants.append(participant)
             channel.participants.sort { $0.id < $1.id }
             channel.revision += 1
             channels[channelID] = channel
         case let .responsibilityClaimed(channelID, claim):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID,
+                  channel.participants.contains(where: {
+                      $0.id == claim.ownerID
+                  })
+            else {
+                try fail()
+            }
             channel.responsibilities.removeAll { $0.id == claim.id }
             channel.responsibilities.append(claim)
             channel.responsibilities.sort { $0.id < $1.id }
             channel.revision += 1
             channels[channelID] = channel
         case let .responsibilityReleased(channelID, claimID):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID,
+                  channel.responsibilities.contains(where: {
+                      $0.id == claimID
+                  })
+            else {
+                try fail()
+            }
             channel.responsibilities.removeAll { $0.id == claimID }
             channel.revision += 1
             channels[channelID] = channel
         case let .planReplaced(channelID, items):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID
+            else {
+                try fail()
+            }
             channel.plan = items
             channel.revision += 1
             channels[channelID] = channel
         case let .messagePosted(channelID, message):
-            guard var channel = channels[channelID] else { return }
+            guard var channel = channels[channelID],
+                  channelID == record.channelID
+            else {
+                try fail()
+            }
             channel.messages.append(message)
             if channel.messages.count > Self.maximumRetainedMessages {
                 channel.messages.removeFirst(
@@ -2209,8 +2321,12 @@ final class CollaborationRoom {
                 }
             }
             proposals = replacements
-        case .commandNoOp:
-            break
+        case let .commandNoOp(channelID, _):
+            guard channelID == record.channelID,
+                  channels[channelID] != nil
+            else {
+                try fail()
+            }
         }
     }
 

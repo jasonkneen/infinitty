@@ -550,6 +550,8 @@ public final class HeadlessAppHost: @unchecked Sendable {
             return handleChat(argument)
         case "channel":
             return collaborationCoordinator.execute(argument).response
+        case "audit":
+            return collaborationCoordinator.executeAudit(argument)
         case "channel-panel":
             return handleChannelPanel(argument)
         case "channel-project":

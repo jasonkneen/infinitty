@@ -140,6 +140,17 @@ list/open/focus/close/snapshot/thread-selection/message/role controls through
 MCP; a headless process keeps a virtual Channel pane with the same stable
 `channel-panel-<channel-id>` identity.
 
+The local audit surface is independently queryable through
+`infinitty_audit_query`. Pages contain bounded summaries, are pinned to the
+first page's verified journal tip, and are returned only after both hash-chain
+verification and fail-closed semantic replay. `infinitty_audit_export` writes
+the complete canonical journal to an app-owned private JSONL artifact and signs
+it with Infinitty's local Ed25519 authority; callers cannot choose a destination
+path. `infinitty_audit_verify` rechecks the signature, payload digest, manifest,
+record chain, and semantic replay without invoking provider, pane, worktree, or
+other external effects. This is a verified local audit export, not a claim of
+WORM retention or third-party compliance certification.
+
 ### Headless terminal/app host
 
 Run Infinitty as a genuine windowless terminal host:

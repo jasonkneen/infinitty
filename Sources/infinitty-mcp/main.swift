@@ -312,6 +312,29 @@ func channelCall(
     return infinittyRequest("channel \(encoded)")
 }
 
+private let maximumAuditRequestBytes = 16_000
+
+func auditCall(
+    _ operation: String,
+    arguments: [String: Any] = [:]
+) -> String {
+    var payload = arguments
+    payload["v"] = 1
+    payload["op"] = operation
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload) else {
+        return "error: could not encode audit request"
+    }
+    guard data.count <= maximumAuditRequestBytes else {
+        return "error: audit request exceeds \(maximumAuditRequestBytes) bytes"
+    }
+    let encoded = data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return infinittyRequest("audit \(encoded)")
+}
+
 func channelPanelCall(
     _ operation: String,
     arguments: [String: Any] = [:]
@@ -452,6 +475,67 @@ let tools: [Tool] = [
             + "participants and roles, responsibility claims, plans, and recent messages.",
         schema: ["type": "object", "properties": [:]],
         invoke: { _ in channelCall("snapshot") }
+    ),
+    Tool(
+        name: "infinitty_audit_query",
+        description: "Read a bounded, hash-chain and semantic-replay verified page of "
+            + "local Channel audit summaries. The opaque cursor pins the original "
+            + "journal tip, so concurrent writes cannot create gaps or duplicates. "
+            + "Raw message and proposal bodies are never returned inline.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "cursor": ["type": "string"],
+                "channelID": ["type": "string"],
+                "actorID": ["type": "string"],
+                "eventKinds": [
+                    "type": "array",
+                    "items": ["type": "string"],
+                    "maxItems": 32,
+                ],
+                "from": [
+                    "type": "number",
+                    "description": "Inclusive Unix timestamp in milliseconds.",
+                ],
+                "through": [
+                    "type": "number",
+                    "description": "Inclusive Unix timestamp in milliseconds.",
+                ],
+                "limit": [
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                ],
+            ],
+        ],
+        invoke: { args in
+            auditCall("query", arguments: ["query": args])
+        }
+    ),
+    Tool(
+        name: "infinitty_audit_export",
+        description: "Create a canonical Ed25519-signed JSONL export of the complete "
+            + "verified local Channel journal. Infinitty chooses an app-owned private "
+            + "path; callers cannot select or overwrite a destination.",
+        schema: ["type": "object", "properties": [:]],
+        invoke: { _ in auditCall("export") }
+    ),
+    Tool(
+        name: "infinitty_audit_verify",
+        description: "Verify the digest, Infinitty signing authority, record hash chain, "
+            + "manifest range, and semantic replay of an app-owned audit export.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "exportID": ["type": "string"],
+            ],
+            "required": ["exportID"],
+        ],
+        invoke: { args in
+            auditCall("verify", arguments: [
+                "exportID": args["exportID"] as? String ?? "",
+            ])
+        }
     ),
     Tool(
         name: "infinitty_channel_link",

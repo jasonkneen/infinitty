@@ -13,6 +13,7 @@ final class CollaborationCoordinatorClient {
     private let stateLock = NSLock()
     private var ownedServer: AppControlServer?
     private var ownedRoom: CollaborationRoom?
+    private var ownedAuditService: CollaborationAuditService?
 
     init(applicationSupportDirectory: URL? = nil) {
         supportDirectory = applicationSupportDirectory
@@ -33,6 +34,7 @@ final class CollaborationCoordinatorClient {
         let server = ownedServer
         ownedServer = nil
         ownedRoom = nil
+        ownedAuditService = nil
         stateLock.unlock()
         server?.stop()
     }
@@ -53,6 +55,10 @@ final class CollaborationCoordinatorClient {
         snapshot: CollaborationSnapshot?
     ) {
         request("channel-local-human \(encoded)")
+    }
+
+    func executeAudit(_ encoded: String) -> String {
+        request("audit-local \(encoded)").response
     }
 
     func snapshot() -> CollaborationSnapshot? {
@@ -80,17 +86,22 @@ final class CollaborationCoordinatorClient {
             return true
         }
 
-        let journal = supportDirectory
+        let collaborationDirectory = supportDirectory
             .appendingPathComponent("Infinitty", isDirectory: true)
             .appendingPathComponent("Collaboration", isDirectory: true)
+        let journal = collaborationDirectory
             .appendingPathComponent("coordinator.jsonl")
         let room: CollaborationRoom
+        let eventStore = JSONLCollaborationEventStore(url: journal)
         do {
             room = try CollaborationRoom(
-                store: JSONLCollaborationEventStore(url: journal))
+                store: eventStore)
         } catch {
             return false
         }
+        let auditService = CollaborationAuditService(
+            store: eventStore,
+            rootDirectory: collaborationDirectory)
 
         unlink(socketPath)
         let server = AppControlServer(
@@ -98,8 +109,8 @@ final class CollaborationCoordinatorClient {
             publishesCurrentLink: false,
             replacesExistingSocket: false)
         server.contextualHandler = {
-            [weak self, weak room] context, request in
-            guard let self, let room else {
+            [weak self, weak room, weak auditService] context, request in
+            guard let self, let room, let auditService else {
                 return CollaborationControlCodec.response(
                     error: "coordinator_stopping",
                     message: "The shared Channel coordinator is stopping.")
@@ -115,6 +126,11 @@ final class CollaborationCoordinatorClient {
                     message: "Unknown coordinator request.")
             }
             let encoded = String(parts[1])
+            if parts.first == "audit-local" {
+                return CollaborationAuditControlCodec.execute(
+                    encoded,
+                    service: auditService)
+            }
             let result: (
                 response: String,
                 snapshot: CollaborationSnapshot?
@@ -162,6 +178,7 @@ final class CollaborationCoordinatorClient {
         }
         guard server.start() else { return false }
         ownedRoom = room
+        ownedAuditService = auditService
         ownedServer = server
         return true
     }
