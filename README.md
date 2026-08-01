@@ -131,19 +131,51 @@ identity, closing a pane removes it from every peer's live membership, and long
 provider replies are explicitly bounded for the shared transcript without
 shortening the local answer.
 
+#### Terminal CLI awareness
+
 Agents launched inside ordinary terminal panes use the pane's authenticated
 `$INFINITTY_SOCKET` rather than pretending they are Infinitty-owned Chat panes.
 The bundled MCP server automatically registers recognized Claude Code, Codex,
-Amp, OpenCode, Gemini, Grok, and Aider clients as unique participants such as
-`Claude 1` and `Amp 2`. Its initialization instructions require a live
-`infinitty_channel_self` refresh at the start of every user turn. That tool
-returns the terminal's authoritative endpoint, participant name, Channel,
-peers, roles, plan, responsibilities, and recent messages;
-`infinitty_channel_post` publishes with the author and Channel derived
-server-side from the owning pane. A caller cannot select another pane or forge
-an author ID. MCP registrations are bound to the server-observed MCP process;
-normal exit unregisters immediately, forced termination is reaped by the host,
-and an older MCP process cannot unregister a newer owner of the same pane.
+Amp, OpenCode, Gemini, Grok, Aider, Qwen, Copilot, Cursor, Droid, Kimi, and
+Goose clients as unique participants such as `Claude 1` and `Amp 2`. MCP
+initialization now includes the first bounded live
+Channel snapshot, so an agent does not need a discovery/tool round before it
+knows its room. `infinitty_channel_self` remains available for explicit refresh
+and verification; `infinitty_channel_post` publishes with the author and
+Channel derived server-side from the owning pane. A caller cannot select
+another pane or forge an author ID. MCP registrations are bound to the
+server-observed MCP process; normal exit unregisters immediately, forced
+termination is reaped by the host, and an older MCP process cannot unregister a
+newer owner of the same pane.
+
+For per-turn context without model tool selection, enable **Install Channel
+context hooks** in Infinitty settings (or set `mcp-auto-register = true`). The
+toggle is off by default because enabling it edits user configuration files.
+The initial MCP snapshot and the explicit wrapper do not require the toggle;
+native per-turn hooks do. Enabling it merges Claude `SessionStart` and
+`UserPromptSubmit` hooks without overwriting existing hooks. The
+provider-neutral `infinitty-agent` edge can wrap any CLI:
+
+```sh
+infinitty-agent run -- claude
+infinitty-agent run --provider amp -- amp
+```
+
+When `shell-integration/infinitty.zsh` is sourced inside an Infinitty pane,
+recognized CLIs are wrapped automatically. Set
+`INFINITTY_AGENT_AUTO_WRAP=0` to disable that behavior. The wrapper registers
+the process and preserves its PID/TTY; the context helper is also usable from
+provider plugins or hooks:
+
+```sh
+infinitty-agent context --format plain
+infinitty-agent context --format claude --event UserPromptSubmit
+```
+
+Even without the shell wrapper, the visual host registers a recognized
+foreground CLI as soon as it appears in a pane. The wrapper remains the
+provider-neutral path for headless sessions and CLIs that Infinitty does not
+recognize by process name.
 
 The same provider-neutral bridge is available to any local process through the
 pane socket. Membership is queried dynamically, so joining or leaving a
@@ -264,8 +296,16 @@ separate from Infinitty's headless app mode.
 `infinitty_activity`, and more:
 
 ```sh
-claude mcp add infinitty -- ~/Documents/GitHub/infinitty/.build/release/infinitty-mcp
+# Installed npm/tarball release:
+claude mcp add infinitty -- infinitty-mcp
+
+# Source checkout:
+swift build -c release
+claude mcp add infinitty -- /path/to/titerm-agent-channels/.build/out/Products/Release/infinitty-mcp
 ```
+
+The signed app, release tarball, and npm package include both
+`infinitty-mcp` and the provider-neutral `infinitty-agent` helper.
 
 `infinitty_run` is the headline: it types the command, waits for the OSC 133
 done-marker, and returns `{"exitCode": …, "output": …}` in one tool call.
@@ -309,7 +349,7 @@ Or grab the tarball from [GitHub Releases](https://github.com/jasonkneen/infinit
 
 ```sh
 swift build -c release
-.build/release/infinitty
+.build/out/Products/Release/infinitty
 ```
 
 ### Releasing
@@ -320,7 +360,7 @@ process, one-time setup, and cert-recovery steps are in
 
 ```sh
 swift build -c release --arch arm64 --arch x86_64
-./scripts/ship-signed.sh 0.1.1
+./scripts/ship-signed.sh X.Y.Z
 ```
 
 Requires macOS 14+ and Xcode command line tools. `$SHELL` is spawned as a
@@ -510,7 +550,7 @@ OSC 0/2 titles, OSC 133 semantic prompts.
 
 ```
 Sources/CPty/            C shim: forkpty + TIOCSWINSZ (zero Swift/C friction)
-Sources/infinitty/
+Sources/InfinittyKit/
   Terminal.swift         cell grid, scrollback ring, VT parser, OSC 133 markers
   Theme.swift            16-byte Cell, color encoding, 256-color palette
   GlyphAtlas.swift       CoreText -> shelf-packed R8 Metal atlas
@@ -522,7 +562,9 @@ Sources/infinitty/
   Session.swift          one pane = terminal + pty + renderer + view + socket
   Config.swift           INFINITTY_* environment configuration
   App.swift, main.swift  windows, native tabs, split panes, menu
-shell-integration/       OSC 133 zsh hook
+Sources/infinitty-agent/ provider-neutral CLI wrapper/context edge
+Sources/infinitty-mcp/   MCP server and terminal/Channel tools
+shell-integration/       OSC 133 zsh integration plus agent hooks/wrappers
 ```
 
 ## License

@@ -51,5 +51,6 @@ fetch(url, tarball, 0, (err) => {
   fs.rmSync(tarball, { force: true });
   fs.chmodSync(path.join(vendor, "Infinitty.app", "Contents", "MacOS", "infinitty"), 0o755);
   fs.chmodSync(path.join(vendor, "infinitty-mcp"), 0o755);
-  console.log("infinitty: installed. Run `infinitty` to launch, `infinitty-mcp` for the MCP server.");
+  fs.chmodSync(path.join(vendor, "infinitty-agent"), 0o755);
+  console.log("infinitty: installed. Run `infinitty` to launch, `infinitty-mcp` for MCP, or `infinitty-agent run -- <cli>` for Channel-aware CLIs.");
 });

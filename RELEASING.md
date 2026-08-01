@@ -6,24 +6,27 @@ infinitty ships **signed + notarized from a local Mac**, not from CI (see
 ## TL;DR — cut a release
 
 ```sh
+VERSION=0.1.1
+
 # 1. bump the version wherever it appears, commit, tag
-git tag v0.1.1 && git push origin v0.1.1
+git tag "v$VERSION" && git push origin "v$VERSION"
 
 # 2. build universal, then sign + notarize + upload — one command
 swift build -c release --arch arm64 --arch x86_64
-./scripts/ship-signed.sh 0.1.1
+./scripts/ship-signed.sh "$VERSION"
 ```
 
-`ship-signed.sh` finds the Developer ID cert, signs the app + `infinitty-mcp`
-with hardened runtime, builds the drag-to-Applications DMG, notarizes both
-with Apple, staples the tickets, rebuilds the tarball, and uploads all four
-assets to the matching GitHub release. After the first run it needs **zero
+`ship-signed.sh` finds the Developer ID cert, signs the app plus the bundled
+`infinitty-mcp` and `infinitty-agent` executables with hardened runtime, builds
+the drag-to-Applications DMG, notarizes both with Apple, staples the tickets,
+rebuilds the tarball, and uploads all four assets to the matching GitHub
+release. After the first run it needs **zero
 prompts** (notary credentials are cached in the Keychain).
 
 If the GitHub release for the tag doesn't exist yet, create it first:
 
 ```sh
-gh release create v0.1.1 --title "infinitty v0.1.1" --generate-notes
+gh release create "v$VERSION" --title "infinitty v$VERSION" --generate-notes
 ```
 
 ## One-time setup
@@ -92,7 +95,13 @@ Users then get:
 npm install -g @jasonkneen/infinitty
 infinitty
 claude mcp add infinitty -- infinitty-mcp
+infinitty-agent run -- claude
 ```
+
+The npm package and release tarball expose the same provider-neutral helper;
+`infinitty-agent run -- <cli>` preserves the wrapped CLI's process/TTY
+lifecycle, while `infinitty-agent context --format plain` is suitable for
+provider hooks and plugins.
 
 ## Verifying a release is clean
 
@@ -113,7 +122,7 @@ xcrun stapler validate Infinitty-*.dmg   # want: "The validate action worked!"
 | `scripts/make-icns.sh` | `assets/icon.png` → `assets/AppIcon.icns` (masks corners) |
 | `scripts/make-app.sh <bin-dir> <ver> [out]` | assemble `Infinitty.app` |
 | `scripts/make-dmg.sh <app> <ver> [identity]` | drag-to-Applications DMG |
-| `scripts/ship-signed.sh <ver>` | the whole release: sign→notarize→staple→upload |
+| `scripts/ship-signed.sh <ver>` | the whole release: sign app + MCP/helper → notarize → staple → upload |
 
 ## Why not CI
 

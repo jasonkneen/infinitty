@@ -24,7 +24,8 @@ die()  { print -P "%F{red}ERROR:%f $1"; exit 1; }
 find_bin() {
   BIN=""
   for d in .build/out/Products/Release .build/apple/Products/Release; do
-    if [ -x "$d/infinitty" ] && [ -x "$d/infinitty-mcp" ]; then BIN="$d"; break; fi
+    if [ -x "$d/infinitty" ] && [ -x "$d/infinitty-mcp" ] \
+      && [ -x "$d/infinitty-agent" ]; then BIN="$d"; break; fi
   done
 }
 

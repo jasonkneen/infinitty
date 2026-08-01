@@ -30,10 +30,13 @@ BIN=.build/apple/Products/Release
 if [ -x .build/out/Products/Release/infinitty ]; then BIN=.build/out/Products/Release; fi
 scripts/make-app.sh "$BIN" "$VERSION" dist >/dev/null
 cp "$BIN/infinitty-mcp" dist/
+cp "$BIN/infinitty-agent" dist/
 
 echo "Signing…"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-mcp
+codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-agent
 codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
+codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-agent
 codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
 codesign -vvv --strict dist/Infinitty.app
 
@@ -52,7 +55,7 @@ xcrun notarytool submit notarize-app.zip --keychain-profile infinitty --wait
 xcrun stapler staple dist/Infinitty.app
 
 STAGE="infinitty-$VERSION"; rm -rf pkg; mkdir -p "pkg/$STAGE"
-cp -R dist/Infinitty.app "pkg/$STAGE/"; cp dist/infinitty-mcp "pkg/$STAGE/"
+cp -R dist/Infinitty.app "pkg/$STAGE/"; cp dist/infinitty-mcp dist/infinitty-agent "pkg/$STAGE/"
 cp -R shell-integration "pkg/$STAGE/"; cp infinitty.conf.example README.md LICENSE "pkg/$STAGE/"
 tar -czf "infinitty-$VERSION-macos.tar.gz" -C pkg "$STAGE"
 shasum -a 256 "Infinitty-$VERSION.dmg" > "Infinitty-$VERSION.dmg.sha256"

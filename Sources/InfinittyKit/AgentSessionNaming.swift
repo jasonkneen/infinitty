@@ -34,6 +34,30 @@ enum AgentSessionNaming {
         }?.display
     }
 
+    /// Stable provider identifier shared by foreground-process registration
+    /// and the MCP/wrapper adapters. Keeping this beside the display manifest
+    /// prevents a pane from being named as one CLI while registered as another.
+    static func provider(forProcessName name: String) -> String? {
+        let value = name.lowercased()
+        let tokens = Set(
+            value.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
+        return knownAgents.first {
+            tokens.contains($0.match) || ($0.match.count >= 5 && value.contains($0.match))
+        }?.display
+    }
+
+    /// Stable participant label used by the visual host when it owns the
+    /// registration instead of an MCP process. The pane/session ordinal keeps
+    /// the label unique and matches the MCP/wrapper convention.
+    static func registrationDisplayName(forProvider provider: String, ordinal: Int) -> String {
+        let label: String
+        switch provider.lowercased() {
+        case "opencode": label = "OpenCode"
+        default: label = provider.capitalized
+        }
+        return "\(label) \(max(ordinal, 1))"
+    }
+
     /// Immediate name shown until a real session title is known.
     static func fallbackName(agent: String, cwd: String?) -> String {
         guard let cwd, !cwd.isEmpty else { return agent }

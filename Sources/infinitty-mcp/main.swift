@@ -347,12 +347,13 @@ func channelCall(
 
 func paneChannelCall(
     _ operation: String,
-    arguments: [String: Any] = [:]
+    arguments: [String: Any] = [:],
+    timeout: Int32 = 2
 ) -> String {
     if operation == "context"
         || (operation == "unregister" && arguments.isEmpty)
     {
-        return infinittyPaneRequest("channel-\(operation)")
+        return infinittyPaneRequest("channel-\(operation)", timeout: timeout)
     }
     var payload = arguments
     payload["v"] = 1
@@ -366,7 +367,7 @@ func paneChannelCall(
         .replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_")
         .replacingOccurrences(of: "=", with: "")
-    return infinittyPaneRequest("channel-\(operation) \(encoded)")
+    return infinittyPaneRequest("channel-\(operation) \(encoded)", timeout: timeout)
 }
 
 private let knownTerminalAgents: [(match: String, provider: String, display: String)] = [
@@ -377,6 +378,12 @@ private let knownTerminalAgents: [(match: String, provider: String, display: Str
     ("amp", "amp", "Amp"),
     ("grok", "grok", "Grok"),
     ("aider", "aider", "Aider"),
+    ("qwen", "qwen", "Qwen"),
+    ("copilot", "copilot", "Copilot"),
+    ("cursor", "cursor", "Cursor"),
+    ("droid", "droid", "Droid"),
+    ("kimi", "kimi", "Kimi"),
+    ("goose", "goose", "Goose"),
 ]
 
 func inferredTerminalAgent() -> (
@@ -472,7 +479,7 @@ func managedTerminalUnregistration() -> String {
 
 func bootstrapTerminalChannel() -> String? {
     guard paneSocketPath != nil else { return nil }
-    let current = paneChannelCall("context")
+    let current = paneChannelCall("context", timeout: 1)
     guard let agent = inferredTerminalAgent() else { return current }
     let environment = ProcessInfo.processInfo.environment
     let ordinal = terminalEndpointOrdinal(from: current)
@@ -496,9 +503,24 @@ func bootstrapTerminalChannel() -> String? {
     return managedTerminalRegistration(registration)
 }
 
+func bootstrapModelContext(from response: String?) -> String? {
+    guard let response,
+          let data = response.data(using: .utf8),
+          let envelope = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any],
+          envelope["ok"] as? Bool == true,
+          let result = envelope["result"] as? [String: Any],
+          let context = result["modelContext"] as? String,
+          !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else { return nil }
+    return context.utf8.count <= 1_600
+        ? context
+        : String(context.prefix(1_600)) + "\n[context truncated]"
+}
+
 func terminalChannelInstructions() -> String {
     """
-    This agent is running inside an Infinitty terminal pane. At the start of every user turn, call infinitty_channel_self with action=context before making claims about room membership, identity, peers, responsibilities, or messages. If connected, use infinitty_channel_post for messages intended for Channel peers. Pane identity and message authorship are bound by Infinitty; never invent or override them.
+    This agent is running inside an Infinitty terminal pane. The initial live Channel snapshot is included below when available, and provider hooks may refresh it before each turn. Treat that snapshot as authoritative for room membership, identity, peers, responsibilities, and messages. Call infinitty_channel_self with action=context only when the snapshot is missing or stale. If connected, use infinitty_channel_post for messages intended for Channel peers. Pane identity and message authorship are bound by Infinitty; never invent or override them.
     """
 }
 
@@ -1708,9 +1730,14 @@ func isToolError(_ text: String) -> Bool {
     return !ok
 }
 
-_ = bootstrapTerminalChannel()
+let terminalBootstrapResponse = bootstrapTerminalChannel()
 let terminalBootstrapInstructions = paneSocketPath.map { _ in
-    terminalChannelInstructions()
+    var instructions = terminalChannelInstructions()
+    if let context = bootstrapModelContext(from: terminalBootstrapResponse) {
+        instructions += "\n\nInitial live Channel snapshot (refresh with infinitty_channel_self on later turns):\n"
+            + context
+    }
+    return instructions
 }
 
 startEventSubscriber()

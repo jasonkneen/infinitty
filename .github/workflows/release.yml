@@ -36,6 +36,7 @@ jobs:
           if [ -x .build/out/Products/Release/infinitty ]; then BIN=.build/out/Products/Release; fi
           scripts/make-app.sh "$BIN" "$VERSION" dist
           cp "$BIN/infinitty-mcp" dist/
+          cp "$BIN/infinitty-agent" dist/
 
       - name: Verify release credentials
         env:
@@ -67,7 +68,9 @@ jobs:
           rm cert.p12
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" build.keychain > /dev/null
           codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-mcp
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-agent
           codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-agent
           codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
           codesign -vvv --strict dist/Infinitty.app
 
@@ -86,6 +89,10 @@ jobs:
           xcrun notarytool submit notarize-mcp.zip \
             --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" --wait
+          ditto -c -k dist/infinitty-agent notarize-agent.zip
+          xcrun notarytool submit notarize-agent.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait
 
       - name: Package
         run: |
@@ -93,7 +100,7 @@ jobs:
           STAGE="infinitty-$VERSION"
           mkdir -p "pkg/$STAGE"
           cp -R dist/Infinitty.app "pkg/$STAGE/"
-          cp dist/infinitty-mcp "pkg/$STAGE/"
+          cp dist/infinitty-mcp dist/infinitty-agent "pkg/$STAGE/"
           cp -R shell-integration "pkg/$STAGE/"
           cp infinitty.conf.example README.md "pkg/$STAGE/"
           tar -czf "infinitty-$VERSION-macos.tar.gz" -C pkg "$STAGE"

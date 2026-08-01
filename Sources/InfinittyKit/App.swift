@@ -684,6 +684,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             onUnregistered: { [weak self, weak s] in
                 DispatchQueue.main.async {
                     guard let self, let s else { return }
+                    // A managed MCP process can disappear while its CLI stays
+                    // foreground. Re-run detection so the visual host takes
+                    // ownership again instead of leaving the pane unregistered
+                    // until the next process transition.
+                    self.updateAgentSessionName(for: s)
                     s.view.paneTitle = self.paneHeaderTitle(for: s)
                     self.quickTerminal.setTitle(
                         self.paneHeaderTitle(for: s),
@@ -913,16 +918,44 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func updateAgentSessionName(for session: TerminalSession) {
         let process = session.processTracker?.current
         guard let process, process.pid != session.pty.pid,
-              let agent = AgentSessionNaming.agentName(
+              let provider = AgentSessionNaming.provider(
                   forProcessName: "\(process.displayName) \(process.rawName)")
         else {
+            if session.channelRegistration?.lifetimeToken == nil,
+               session.channelRegistration != nil
+            {
+                _ = session.control.channelUnregisterHandler?("", getpid())
+            }
             session.agentSessionName = nil
             return
         }
-        guard session.agentSessionName == nil else { return }
+        let agent = provider
+        if let registration = session.channelRegistration,
+           registration.lifetimeToken == nil,
+           registration.provider != provider
+        {
+            _ = session.control.channelUnregisterHandler?("", getpid())
+            session.agentSessionName = nil
+        }
+        let needsSessionName = session.agentSessionName == nil
         let cwd = session.currentDirectory()
-        session.agentSessionName = AgentSessionNaming.fallbackName(agent: agent, cwd: cwd)
-        guard agent == "claude", let cwd else { return }
+        if needsSessionName {
+            session.agentSessionName = AgentSessionNaming.fallbackName(agent: agent, cwd: cwd)
+        }
+        if session.channelRegistration == nil {
+            let payload: [String: Any] = [
+                "v": 1,
+                "displayName": AgentSessionNaming.registrationDisplayName(
+                    forProvider: provider, ordinal: session.id),
+                "role": "terminal agent",
+                "provider": provider,
+                "capabilities": ["channel.receive", "channel.send"],
+            ]
+            if let encoded = BrowserControlCodec.encode(payload) {
+                _ = session.control.channelRegisterHandler?(encoded, process.pid)
+            }
+        }
+        guard needsSessionName, agent == "claude", let cwd else { return }
         // The transcript appears only after the first prompt is sent; probe a
         // few times, accepting any session file modified since just before
         // the CLI was detected.
@@ -7173,6 +7206,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func reloadConfig() {
         config = AppConfig.load()
+        if config.mcpAutoRegister { _ = MCPConfiguration.registerIfNeeded() }
         CodePalette.apply(config)
         configureSessionNotch()
         quickTerminal.applyConfig(config)

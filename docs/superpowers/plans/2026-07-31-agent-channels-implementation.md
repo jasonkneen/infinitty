@@ -18,6 +18,31 @@ In this plan, **headless** refers only to the Infinitty terminal/app host runnin
 without AppKit windows. Amp is an agent provider; its `--execute --stream-json`
 mode is a non-interactive provider transport, not the product's headless host.
 
+## Delivery note — terminal CLI Channel awareness
+
+**Delivered:** 2026-08-01 on `feature/agent-channels`
+
+The terminal-agent integration slice is complete and is the supported path for
+using Claude, Codex, Amp, and other local CLIs in Channels:
+
+- `infinitty-agent run -- <cli>` registers a managed CLI lifetime without
+  changing its PID/TTY semantics; `context` emits bounded plain, Claude-hook,
+  or Codex-hook context;
+- MCP initialization provides the first live Channel snapshot and binds
+  registration/post operations to the owning pane;
+- the visual host provides recognized-CLI fallback registration, unique names,
+  and stale-owner cleanup;
+- Claude hooks and the optional zsh auto-wrapper are installed idempotently and
+  preserve existing user configuration;
+- app, tarball, npm, and release-script packaging includes the MCP server,
+  helper, and hook assets.
+
+Verification completed for this slice: `swift test` (515 passed, 5 skipped),
+release build, signed app bundle smoke checks, and helper/MCP packaging checks.
+The remaining phase items below are intentionally still marked by their own
+status lines; this note does not claim the full enterprise Channel roadmap is
+complete.
+
 ## Phase 0 — safety and measurement gates
 
 ### 0.1 Correlated terminal execution

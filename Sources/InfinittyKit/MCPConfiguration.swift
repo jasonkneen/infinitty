@@ -1,7 +1,8 @@
 import Foundation
 
 /// Writes the bundled `infinitty-mcp` server into Codex's and Claude's MCP
-/// config files so the CLIs gain terminal-control tools automatically.
+/// config files, and (when enabled) installs the provider-neutral Claude
+/// context hooks so the CLIs gain terminal/Channel awareness automatically.
 ///
 /// This is what makes "the latter two have access to a full suite of tools
 /// to control the terminal interface" — when Codex or Claude is picked,
@@ -13,6 +14,46 @@ import Foundation
 /// `[mcp_servers.infinitty]` (TOML) and on `mcpServers.infinitty` (JSON).
 public enum MCPConfiguration {
     static let serverName = "infinitty"
+
+    private static let channelHookEvents = ["SessionStart", "UserPromptSubmit"]
+
+    /// Absolute path to the provider-neutral agent edge that ships next to
+    /// the MCP executable. Hooks use this binary to read the pane-bound
+    /// Channel without loading the GUI or a provider SDK.
+    public static func agentExecutablePath(
+        fileManager: FileManager = .default,
+        bundle: Bundle = .main
+    ) -> String? {
+        let candidates: [String] = [
+            bundle.executableURL?.deletingLastPathComponent()
+                .appendingPathComponent("infinitty-agent").path,
+            "\(bundle.bundlePath)/Contents/MacOS/infinitty-agent",
+            "\(bundle.bundlePath)/MacOS/infinitty-agent",
+        ].compactMap { $0 }
+        return candidates.first {
+            fileManager.isExecutableFile(atPath: $0)
+        }
+    }
+
+    /// Path to the bundled Claude-compatible hook script for a hook phase.
+    public static func claudeChannelHookPath(
+        event: String = "UserPromptSubmit",
+        fileManager: FileManager = .default,
+        bundle: Bundle = .main
+    ) -> String? {
+        let fileName = event == "SessionStart"
+            ? "infinitty-agent-context-session-start.sh"
+            : "infinitty-agent-context-user-prompt-submit.sh"
+        let candidates: [String] = [
+            bundle.resourceURL?.appendingPathComponent(
+                "shell-integration/\(fileName)").path,
+            "\(bundle.bundlePath)/Contents/Resources/shell-integration/"
+                + fileName,
+        ].compactMap { $0 }
+        return candidates.first {
+            fileManager.isExecutableFile(atPath: $0)
+        }
+    }
 
     /// Absolute path to the infinitty-mcp binary that ships inside the
     /// app bundle (sibling of the main executable). Re-checked lazily so
@@ -223,6 +264,130 @@ public enum MCPConfiguration {
         }
     }
 
+    /// Path to Claude Code's user settings, separate from its MCP registry.
+    /// Hook installation merges this file and preserves every existing
+    /// provider hook.
+    public static func claudeSettingsURL(
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        let home = environment["HOME"] ?? fileManager.homeDirectoryForCurrentUser.path
+        return URL(fileURLWithPath: home)
+            .appendingPathComponent(".claude/settings.json")
+    }
+
+    /// Idempotently add the Channel context hook to Claude's SessionStart and
+    /// UserPromptSubmit phases. Existing hooks and matchers remain untouched.
+    static func mergedClaudeChannelHookSettings(
+        existing: Data?, commandPath: String
+    ) -> Data? {
+        mergedClaudeChannelHookSettings(
+            existing: existing,
+            commandPaths: Dictionary(
+                uniqueKeysWithValues: channelHookEvents.map { ($0, commandPath) }))
+    }
+
+    static func mergedClaudeChannelHookSettings(
+        existing: Data?, commandPaths: [String: String]
+    ) -> Data? {
+        var root: [String: Any] = [:]
+        if let existing {
+            guard let parsed = try? JSONSerialization.jsonObject(with: existing)
+                as? [String: Any]
+            else { return nil }
+            root = parsed
+        }
+
+        var hooks: [String: Any]
+        if let existingHooks = root["hooks"] {
+            guard let parsedHooks = existingHooks as? [String: Any] else {
+                return nil
+            }
+            hooks = parsedHooks
+        } else {
+            hooks = [:]
+        }
+
+        for event in channelHookEvents {
+            guard let commandPath = commandPaths[event] else { return nil }
+            let hook: [String: Any] = [
+                "hooks": [[
+                    "type": "command",
+                    "command": commandPath,
+                ] as [String: Any]],
+            ]
+            var entries: [Any]
+            if let existingEntries = hooks[event] {
+                guard let parsedEntries = existingEntries as? [Any] else {
+                    return nil
+                }
+                entries = parsedEntries
+            } else {
+                entries = []
+            }
+            let alreadyInstalled = entries.contains { rawEntry in
+                guard let entry = rawEntry as? [String: Any],
+                      let nested = entry["hooks"] as? [Any]
+                else { return false }
+                return nested.contains { rawHook in
+                    guard let command = (rawHook as? [String: Any])?["command"] as? String
+                    else { return false }
+                    return command == commandPath
+                }
+            }
+            if !alreadyInstalled { entries.append(hook) }
+            hooks[event] = entries
+        }
+        root["hooks"] = hooks
+        let result = try? JSONSerialization.data(
+            withJSONObject: root,
+            options: [.prettyPrinted, .sortedKeys])
+        return result
+    }
+
+    /// Write the provider-neutral Channel hooks into Claude's user settings.
+    @discardableResult
+    public static func registerClaudeChannelHooks(
+        fileManager: FileManager = .default,
+        bundle: Bundle = .main,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        guard let sessionStartPath = claudeChannelHookPath(
+                event: "SessionStart", fileManager: fileManager, bundle: bundle),
+              let promptSubmitPath = claudeChannelHookPath(
+                event: "UserPromptSubmit", fileManager: fileManager, bundle: bundle)
+        else { return false }
+        let url = claudeSettingsURL(
+            fileManager: fileManager, environment: environment)
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+        } catch {
+            return false
+        }
+        let existing: Data?
+        if fileManager.fileExists(atPath: url.path) {
+            guard let contents = try? Data(contentsOf: url) else { return false }
+            existing = contents
+        } else {
+            existing = nil
+        }
+        guard let merged = mergedClaudeChannelHookSettings(
+            existing: existing,
+            commandPaths: [
+                "SessionStart": sessionStartPath,
+                "UserPromptSubmit": promptSubmitPath,
+            ])
+        else { return false }
+        do {
+            try merged.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     static func mergedClaudeMCPJSON(
         existing: Data?, binaryPath: String
     ) -> Data? {
@@ -252,11 +417,16 @@ public enum MCPConfiguration {
             .codex, fileManager: fileManager, environment: environment)
         let claudeURL = CLIExecutableResolver.resolve(
             .claude, fileManager: fileManager, environment: environment)
+        let claudeRegistered = claudeURL != nil && registerWithClaude(
+            fileManager: fileManager, bundle: bundle, environment: environment)
+        if claudeURL != nil {
+            _ = registerClaudeChannelHooks(
+                fileManager: fileManager, bundle: bundle, environment: environment)
+        }
         return (
             codex: codexURL != nil && registerWithCodex(
                 fileManager: fileManager, bundle: bundle, environment: environment),
-            claude: claudeURL != nil && registerWithClaude(
-                fileManager: fileManager, bundle: bundle, environment: environment)
+            claude: claudeRegistered
         )
     }
 

@@ -66,6 +66,8 @@ final class SettingsWindowController: NSWindowController {
     private let blurCheck = NSButton(checkboxWithTitle: "Frosted blur behind window", target: nil, action: nil)
     private let glowCheck = NSButton(checkboxWithTitle: "Glow while an agent is in control", target: nil, action: nil)
     private let hintsCheck = NSButton(checkboxWithTitle: "Inline AI hints (ghost text)", target: nil, action: nil)
+    private let mcpCheck = NSButton(
+        checkboxWithTitle: "Install Channel context hooks", target: nil, action: nil)
     private let hintsWarning = NSTextField(wrappingLabelWithString: "")
     private let lightsPopup = NSPopUpButton()
     private let petPopup = NSPopUpButton()
@@ -215,7 +217,7 @@ final class SettingsWindowController: NSWindowController {
             popup.target = self
             popup.action = #selector(controlChanged(_:))
         }
-        for check in [blurCheck, glowCheck, hintsCheck, notchCheck] {
+        for check in [blurCheck, glowCheck, hintsCheck, mcpCheck, notchCheck] {
             check.controlSize = .regular
             check.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
             check.target = self
@@ -354,6 +356,7 @@ final class SettingsWindowController: NSWindowController {
                 row("Notch", notchGroup),
                 row("", glowCheck),
                 row("", hintsCheck),
+                row("", mcpCheck),
                 row("", hintsWarning),
             ]),
             "About": panel([
@@ -473,6 +476,7 @@ final class SettingsWindowController: NSWindowController {
         blurCheck.state = current.backgroundBlur ? .on : .off
         glowCheck.state = current.agentGlow ? .on : .off
         hintsCheck.state = current.hints ? .on : .off
+        mcpCheck.state = current.mcpAutoRegister ? .on : .off
         notchCheck.state = current.notch ? .on : .off
         lightsPopup.selectItem(withTitle: current.trafficLights)
         notchPopup.selectItem(withTitle: current.notchDisplay)
@@ -567,6 +571,7 @@ final class SettingsWindowController: NSWindowController {
         c.backgroundBlur = blurCheck.state == .on
         c.agentGlow = glowCheck.state == .on
         c.hints = hintsCheck.state == .on
+        c.mcpAutoRegister = mcpCheck.state == .on
         c.notch = notchCheck.state == .on
         c.notchDisplay = notchPopup.titleOfSelectedItem ?? "builtin"
         c.trafficLights = lightsPopup.titleOfSelectedItem ?? "circle"

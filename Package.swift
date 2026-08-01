@@ -32,6 +32,9 @@ let package = Package(
         .executableTarget(
             name: "infinitty-mcp"
         ),
+        .executableTarget(
+            name: "infinitty-agent"
+        ),
         .testTarget(
             name: "InfinittyKitTests",
             dependencies: ["InfinittyKit"]

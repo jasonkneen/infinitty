@@ -226,6 +226,17 @@ struct ShadcnSettingsView: View {
             SettingsSection("Suggestions") {
                 SettingsToggleRow("Inline command hints", isOn: $config.hints)
             }
+            SettingsSection("Terminal agents") {
+                SettingsToggleRow(
+                    "Install Channel context hooks",
+                    isOn: $config.mcpAutoRegister)
+                Text(
+                    "Registers Infinitty MCP and installs idempotent Claude hooks. "
+                        + "The shared launcher also supports other CLIs.")
+                    .font(theme.typography.sans(theme.typography.sm))
+                    .foregroundStyle(ShadcnBaseColor.named(config.uiTheme).light.mutedForeground.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

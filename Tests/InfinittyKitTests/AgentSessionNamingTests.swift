@@ -14,6 +14,28 @@ final class AgentSessionNamingTests: XCTestCase {
         XCTAssertNil(AgentSessionNaming.agentName(forProcessName: "vim vim"))
     }
 
+    func testProviderManifestMatchesDisplayDetection() {
+        XCTAssertEqual(
+            AgentSessionNaming.provider(forProcessName: "cursor-agent"),
+            "cursor")
+        XCTAssertEqual(
+            AgentSessionNaming.provider(forProcessName: "claude"),
+            AgentSessionNaming.agentName(forProcessName: "claude"))
+        XCTAssertNil(AgentSessionNaming.provider(forProcessName: "python worker.py"))
+    }
+
+    func testRegistrationDisplayNameIsStableAndProviderAware() {
+        XCTAssertEqual(
+            AgentSessionNaming.registrationDisplayName(forProvider: "claude", ordinal: 1),
+            "Claude 1")
+        XCTAssertEqual(
+            AgentSessionNaming.registrationDisplayName(forProvider: "opencode", ordinal: 2),
+            "OpenCode 2")
+        XCTAssertEqual(
+            AgentSessionNaming.registrationDisplayName(forProvider: "amp", ordinal: 0),
+            "Amp 1")
+    }
+
     func testFallbackNameUsesAgentAndDirectoryBasename() {
         XCTAssertEqual(
             AgentSessionNaming.fallbackName(agent: "claude", cwd: "/Users/x/GitHub/titerm"),

@@ -206,6 +206,42 @@ final class ProviderDiscoveryTests: XCTestCase {
         XCTAssertEqual(plain.count, 1)
     }
 
+    func testClaudeChannelHooksMergeByEventAndAreIdempotent() throws {
+        let existing = Data(#"{"permissions":{"allow":["Read"]},"hooks":{"UserPromptSubmit":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/user-hook"}]}]}}"#.utf8)
+        let first = try XCTUnwrap(
+            MCPConfiguration.mergedClaudeChannelHookSettings(
+                existing: existing,
+                commandPaths: [
+                    "SessionStart": "/app/session-start.sh",
+                    "UserPromptSubmit": "/app/user-prompt-submit.sh",
+                ]))
+        let second = try XCTUnwrap(
+            MCPConfiguration.mergedClaudeChannelHookSettings(
+                existing: first,
+                commandPaths: [
+                    "SessionStart": "/app/session-start.sh",
+                    "UserPromptSubmit": "/app/user-prompt-submit.sh",
+                ]))
+        XCTAssertEqual(first, second)
+
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: first) as? [String: Any])
+        XCTAssertNotNil(root["permissions"])
+        let hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        let start = try XCTUnwrap(hooks["SessionStart"] as? [[String: Any]])
+        let prompt = try XCTUnwrap(hooks["UserPromptSubmit"] as? [[String: Any]])
+        XCTAssertEqual(start.count, 1)
+        XCTAssertEqual(prompt.count, 2)
+        XCTAssertTrue(
+            (start[0]["hooks"] as? [[String: Any]])?.contains {
+                $0["command"] as? String == "/app/session-start.sh"
+            } == true)
+        XCTAssertTrue(
+            (prompt[1]["hooks"] as? [[String: Any]])?.contains {
+                $0["command"] as? String == "/app/user-prompt-submit.sh"
+            } == true)
+    }
+
     // MARK: new providers (opencode / hermes / amp)
 
     func testNewProviderResolversHonorEnvOverride() {

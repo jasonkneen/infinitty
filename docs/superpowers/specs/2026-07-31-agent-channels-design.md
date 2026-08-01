@@ -2,7 +2,9 @@
 
 **Date:** 2026-07-31
 **Branch:** `feature/agent-channels`
-**Status:** selected architecture; implementation started
+**Status:** selected architecture. The terminal-CLI Channel-awareness slice is
+implemented on this branch; the broader room/proposal/claims roadmap remains
+phased as described below.
 
 ## Product intent
 
@@ -335,19 +337,24 @@ Useful later for offline plan drafts, but rejected as the authority model.
 Consent, revocation, audit sequence, exclusive claims, filesystem effects, and
 cloud execution require coordinator ordering and fencing.
 
-## Initial implementation
+## Delivered terminal-agent slice
 
-`CollaborationChannel.swift` begins the in-process kernel:
+The following slice is implemented and shipped with the branch:
 
-- deterministic Channel identity/color projection;
-- endpoint linking and explicit merge conflict;
-- named participants, roles, provider/model opacity, plans, messages, and
-  exact-scope responsibility claims;
-- optimistic expected revision and idempotency-key protection;
-- bounded values and audit record size;
-- SHA-256 hash-linked audit records;
-- in-memory and private JSONL event-store adapters;
-- replay that fails closed on tampering.
+- `infinitty-agent` provides a provider-neutral `run` wrapper and bounded
+  `context` command for Claude, Codex, Amp, and other terminal CLIs;
+- MCP initialization includes an authoritative bounded Channel snapshot and
+  managed process registration, with explicit self/post tools for refresh and
+  publishing;
+- the visual host registers recognized foreground CLIs as a fallback and uses
+  unique participant names plus stale-owner cleanup;
+- Claude `SessionStart`/`UserPromptSubmit` hooks are merged idempotently, and
+  the optional zsh integration can auto-wrap recognized CLIs;
+- pane-socket registration, context, and post messages remain
+  provider-neutral, bounded, and authenticated to the owning pane;
+- the app bundle, release scripts, tarball, and npm installer package the
+  helper and hooks alongside the MCP server.
 
-This is deliberately not yet wired to AppKit or provider execution. The next
-slice adds typed control transport and connector projection through this seam.
+The in-process Channel kernel and the wider typed control-plane, proposal,
+claims, and enterprise-audit work remain governed by the phased implementation
+plan rather than being implied complete by this terminal integration.

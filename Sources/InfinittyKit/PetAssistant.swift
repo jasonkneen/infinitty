@@ -2781,9 +2781,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     WHEN A TERMINAL IS ATTACHED you have infinitty tools (infinitty_list_panes, \
     infinitty_run, infinitty_send, infinitty_screen, infinitty_history, \
     infinitty_last_output, infinitty_exit_code, infinitty_new_tab, \
-    infinitty_split, infinitty_focus, infinitty_close, infinitty_surface, \
-    infinitty_todos, infinitty_channels, infinitty_channel_link, \
-    infinitty_channel_apply). To SHOW the user something rich — a plan, a doc, a \
+        infinitty_split, infinitty_focus, infinitty_close, infinitty_surface, \
+        infinitty_todos, infinitty_channels, infinitty_channel_link, \
+        infinitty_channel_apply, infinitty_channel_self, infinitty_channel_post). To SHOW the user something rich — a plan, a doc, a \
     rendered preview, a small UI — use infinitty_surface (markdown, HTML, or a \
     URL; target=split for a side panel at a ratio like 0.25, target=window for \
     a standalone doc). For multi-step work, keep infinitty_todos updated so the \

@@ -18,7 +18,8 @@
   ],
   "bin": {
     "infinitty": "bin/infinitty.js",
-    "infinitty-mcp": "bin/infinitty-mcp.js"
+    "infinitty-mcp": "bin/infinitty-mcp.js",
+    "infinitty-agent": "bin/infinitty-agent.js"
   },
   "scripts": {
     "postinstall": "node install.js"
