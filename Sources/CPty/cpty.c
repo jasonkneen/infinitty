@@ -11,7 +11,8 @@
 static const char *overridden(const char *entry) {
     static const char *keys[] = {
         "TERM=", "COLORTERM=", "TERM_PROGRAM=", "TERM_PROGRAM_VERSION=",
-        "INFINITTY_SOCKET=", "TITERM_SOCKET=", NULL,
+        "INFINITTY_SOCKET=", "TITERM_SOCKET=",
+        "INFINITTY_PANE_ID=", "INFINITTY_APP_SOCKET=", NULL,
     };
     for (int i = 0; keys[i]; i++) {
         if (strncmp(entry, keys[i], strlen(keys[i])) == 0) {
@@ -21,8 +22,17 @@ static const char *overridden(const char *entry) {
     return NULL;
 }
 
+/* "KEY=VALUE", or NULL when the value is absent/empty. Caller frees. */
+static char *env_entry(const char *key, const char *value) {
+    char *entry = NULL;
+    if (value == NULL || *value == '\0') {
+        return NULL;
+    }
+    return asprintf(&entry, "%s=%s", key, value) < 0 ? NULL : entry;
+}
+
 pid_t cpty_spawn_shell(int *amaster, const struct winsize *ws,
-                       const char *socket_path, const char *cwd) {
+                       const struct cpty_identity *identity, const char *cwd) {
     /* Prepare argv and envp entirely before fork. The app has live worker
        threads, so the forked child may only call async-signal-safe
        functions (execve, _exit) before exec. */
@@ -44,8 +54,8 @@ pid_t cpty_spawn_shell(int *amaster, const struct winsize *ws,
     while (environ_now[count]) {
         count++;
     }
-    /* room for inherited + 4 overrides + optional socket + NULL */
-    char **envp = calloc(count + 7, sizeof(char *));
+    /* room for inherited + 3 terminal keys + CPTY_IDENTITY_MAX + NULL */
+    char **envp = calloc(count + 4 + CPTY_IDENTITY_MAX, sizeof(char *));
     if (envp == NULL) {
         free(argv0);
         return -1;
@@ -59,15 +69,27 @@ pid_t cpty_spawn_shell(int *amaster, const struct winsize *ws,
     envp[n++] = "TERM=xterm-256color";
     envp[n++] = "COLORTERM=truecolor";
     envp[n++] = "TERM_PROGRAM=infinitty";
-    char *sock_entry = NULL;
-    char *sock_entry_legacy = NULL;
-    if (socket_path && *socket_path) {
-        if (asprintf(&sock_entry, "INFINITTY_SOCKET=%s", socket_path) >= 0) {
-            envp[n++] = sock_entry;
-        }
-        /* legacy name, kept one release for existing integrations */
-        if (asprintf(&sock_entry_legacy, "TITERM_SOCKET=%s", socket_path) >= 0) {
-            envp[n++] = sock_entry_legacy;
+    /* Pane identity: the socket that talks to this pane, the pane's own id,
+       and the app-wide socket. Exporting all three means a child process --
+       including one an SSH hop away -- can address the pane it runs in. */
+    const char *pane_socket = identity ? identity->pane_socket : NULL;
+    const char *keys[CPTY_IDENTITY_MAX] = {
+        "INFINITTY_SOCKET",
+        "TITERM_SOCKET", /* legacy name, kept for existing integrations */
+        "INFINITTY_PANE_ID",
+        "INFINITTY_APP_SOCKET",
+    };
+    const char *values[CPTY_IDENTITY_MAX] = {
+        pane_socket,
+        pane_socket,
+        identity ? identity->pane_id : NULL,
+        identity ? identity->app_socket : NULL,
+    };
+    char *owned[CPTY_IDENTITY_MAX] = {NULL};
+    for (int i = 0; i < CPTY_IDENTITY_MAX; i++) {
+        owned[i] = env_entry(keys[i], values[i]);
+        if (owned[i]) {
+            envp[n++] = owned[i];
         }
     }
     envp[n] = NULL;
@@ -84,8 +106,9 @@ pid_t cpty_spawn_shell(int *amaster, const struct winsize *ws,
     }
 
     free(argv0);
-    free(sock_entry);
-    free(sock_entry_legacy);
+    for (int i = 0; i < CPTY_IDENTITY_MAX; i++) {
+        free(owned[i]);
+    }
     free(envp);
     return pid;
 }
