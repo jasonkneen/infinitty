@@ -33,12 +33,22 @@ cp "$BIN/infinitty-mcp" dist/
 cp "$BIN/infinitty-agent" dist/
 
 echo "Signing…"
-codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-mcp
-codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-agent
-codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
-codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-agent
-codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
+# The hardened runtime is what makes these entitlements load-bearing: without
+# them a command run in a pane cannot drive AppleScript, use the mic/camera, or
+# JIT. Nested helpers get the same set — they spawn user work too.
+ENTITLEMENTS=scripts/Infinitty.entitlements
+SIGN=(codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY")
+"${SIGN[@]}" dist/infinitty-mcp
+"${SIGN[@]}" dist/infinitty-agent
+"${SIGN[@]}" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
+"${SIGN[@]}" dist/Infinitty.app/Contents/MacOS/infinitty-agent
+"${SIGN[@]}" dist/Infinitty.app
 codesign -vvv --strict dist/Infinitty.app
+# Prove the entitlements actually landed — a silent omission here is exactly
+# the bug this replaced, and it only shows up as a user's broken osascript.
+codesign -d --entitlements - --xml dist/Infinitty.app 2>/dev/null \
+  | grep -q "com.apple.security.automation.apple-events" \
+  || { echo "ERROR: entitlements missing from signed app"; exit 1; }
 
 echo "Building DMG…"
 scripts/make-dmg.sh dist/Infinitty.app "$VERSION" "$IDENTITY" >/dev/null

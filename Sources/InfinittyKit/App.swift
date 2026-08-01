@@ -462,6 +462,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // whatever you're doing — infinitty runs and is socket-drivable without
         // ever coming to the foreground.
         let environment = ProcessInfo.processInfo.environment
+        if FullDiskAccessAssistant.launchAction(environment: environment) == .showExplicitly {
+            DispatchQueue.main.async {
+                FullDiskAccessAssistant.shared.show()
+            }
+        }
         switch ScreenRecordingPermissionAssistant.launchAction(environment: environment) {
         case .showExplicitly:
             DispatchQueue.main.async {
@@ -470,7 +475,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         case .showAutomatically:
             NSApp.activate(ignoringOtherApps: true)
             DispatchQueue.main.async {
-                ScreenRecordingPermissionAssistant.shared.showAutomaticallyIfNeeded()
+                // At most one assistant per launch — the panels share a screen
+                // position, so stacking them would hide one behind the other.
+                // Full Disk Access leads: it gates the terminal's whole reason
+                // for existing, screen recording only gates pane capture.
+                if !FullDiskAccessAssistant.shared.showAutomaticallyIfNeeded() {
+                    ScreenRecordingPermissionAssistant.shared.showAutomaticallyIfNeeded()
+                }
             }
         case .none:
             break
@@ -495,6 +506,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func showScreenRecordingPermission(_ sender: Any?) {
         ScreenRecordingPermissionAssistant.shared.show()
+    }
+
+    @objc func showFullDiskAccessPermission(_ sender: Any?) {
+        FullDiskAccessAssistant.shared.show()
     }
 
     @objc func showAbout(_ sender: Any?) {
@@ -7386,6 +7401,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             withTitle: "Settings…",
             action: #selector(AppDelegate.openSettings(_:)),
             keyEquivalent: ","
+        )
+        appMenu.addItem(
+            withTitle: "Full Disk Access…",
+            action: #selector(AppDelegate.showFullDiskAccessPermission(_:)),
+            keyEquivalent: ""
         )
         appMenu.addItem(
             withTitle: "Screen Recording Permission…",

@@ -67,12 +67,16 @@ jobs:
           security import cert.p12 -k build.keychain -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
           rm cert.p12
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" build.keychain > /dev/null
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-mcp
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/infinitty-agent
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-agent
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/Infinitty.app
+          ENT=scripts/Infinitty.entitlements
+          codesign --force --options runtime --timestamp --entitlements "$ENT" --sign "$IDENTITY" dist/infinitty-mcp
+          codesign --force --options runtime --timestamp --entitlements "$ENT" --sign "$IDENTITY" dist/infinitty-agent
+          codesign --force --options runtime --timestamp --entitlements "$ENT" --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-mcp
+          codesign --force --options runtime --timestamp --entitlements "$ENT" --sign "$IDENTITY" dist/Infinitty.app/Contents/MacOS/infinitty-agent
+          codesign --force --options runtime --timestamp --entitlements "$ENT" --sign "$IDENTITY" dist/Infinitty.app
           codesign -vvv --strict dist/Infinitty.app
+          codesign -d --entitlements - --xml dist/Infinitty.app 2>/dev/null \
+            | grep -q "com.apple.security.automation.apple-events" \
+            || { echo "ERROR: entitlements missing from signed app"; exit 1; }
 
       - name: Notarize & staple
         env:

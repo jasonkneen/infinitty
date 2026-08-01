@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Infinitty is signed with the hardened runtime. Under it, a child process
+      inherits Infinitty as its TCC "responsible process" — so a command the
+      user runs in a pane is checked against THESE entitlements, not its own.
+      A terminal that omits them silently breaks its own users: `osascript`
+      returns -1743, anything touching the mic or camera dies, and JIT runtimes
+      fault. This is the set iTerm2 and Ghostty ship, for the same reason.
+
+      Deliberately absent: com.apple.security.get-task-allow, which would let
+      any process attach a debugger to Infinitty and fails notarization.
+    -->
+
+    <!-- Resource access, on behalf of whatever the user runs in a pane. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+    <key>com.apple.security.personal-information.addressbook</key>
+    <true/>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <key>com.apple.security.personal-information.photos-library</key>
+    <true/>
+
+    <!--
+      Runtime exceptions. Language runtimes started from a pane (node, bun,
+      python, the JVM) allocate JIT pages; dev tooling loads dylibs that are
+      unsigned or signed by another team, and honours DYLD_* overrides.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>
