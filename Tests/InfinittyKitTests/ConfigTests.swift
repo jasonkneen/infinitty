@@ -17,6 +17,37 @@ final class ConfigTests: XCTestCase {
         XCTAssertNil(reparsed.pet)
     }
 
+    func testOptionAsAltDefaultsToMetaAndRoundTrips() {
+        XCTAssertEqual(AppConfig().optionAsAlt, "true")
+
+        for (input, expected) in [
+            ("macos-option-as-alt = false", "false"),
+            ("macos-option-as-alt = off", "false"),
+            ("option-as-alt = left", "left"),
+            ("option-as-meta = RIGHT", "right"),
+            ("macos-option-as-alt = true", "true"),
+        ] {
+            var config = AppConfig()
+            config.apply(fileContents: input)
+            XCTAssertEqual(config.optionAsAlt, expected, input)
+
+            var reparsed = AppConfig()
+            reparsed.apply(fileContents: config.serializeApp())
+            XCTAssertEqual(reparsed.optionAsAlt, expected, "round trip: \(input)")
+        }
+    }
+
+    func testOptionAsAltIgnoresUnrecognizedValues() {
+        var config = AppConfig()
+        config.apply(fileContents: "macos-option-as-alt = left")
+        config.apply(fileContents: "macos-option-as-alt = lefft")
+        XCTAssertEqual(config.optionAsAlt, "left", "a typo must not silently drop Meta")
+
+        var fresh = AppConfig()
+        fresh.apply(fileContents: "macos-option-as-alt = maybe")
+        XCTAssertEqual(fresh.optionAsAlt, "true")
+    }
+
     func testParsePaletteEntry() {
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.index, 4)
         XCTAssertEqual(AppConfig.parsePaletteEntry("4=#61AFEF")?.color, 0x61AFEF)

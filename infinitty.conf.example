@@ -39,6 +39,14 @@
 # markdown-command = glow -p       # cmd-click on .md files
 # pet-mode         = window        # window (one, bottom-right pane) | pane
 
+# keyboard
+# macos-option-as-alt = true       # true | false | left | right
+#                                   # Option sends ESC-prefixed keys (Meta) instead of
+#                                   # composing the layout's character. Set false — or
+#                                   # left, to keep Meta on the left key only — on
+#                                   # layouts that need Option to type common
+#                                   # characters (Finnish/Swedish Option+2 = @).
+
 # markdown & focus
 # markdown-render  = auto          # auto-render markdown command output via glow
 #                                   # (guarded: only completed, markdown-looking,

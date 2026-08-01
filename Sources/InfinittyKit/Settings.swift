@@ -70,6 +70,18 @@ final class SettingsWindowController: NSWindowController {
         checkboxWithTitle: "Install Channel context hooks", target: nil, action: nil)
     private let hintsWarning = NSTextField(wrappingLabelWithString: "")
     private let lightsPopup = NSPopUpButton()
+    private let optionKeyPopup = NSPopUpButton()
+    /// Config values behind `optionKeyPopup`, parallel to its item titles.
+    /// The last entry is config-only (ghostty parity) — offered in the popup
+    /// just when a hand-edited config already selects it, so saving Settings
+    /// never silently rewrites it.
+    private static let optionAsAltValues = ["true", "false", "left", "right"]
+    private static let optionAsAltTitles = [
+        "Alt / Meta (ESC prefix)",
+        "Off — types the layout's character",
+        "Left is Alt, right types",
+        "Right is Alt, left types",
+    ]
     private let petPopup = NSPopUpButton()
     private var sidebarButtons: [NSButton] = []
     private let petModePopup = NSPopUpButton()
@@ -208,10 +220,11 @@ final class SettingsWindowController: NSWindowController {
         fontCombo.action = #selector(fontChanged(_:))
 
         lightsPopup.addItems(withTitles: ["circle", "square", "rectangle", "diamond"])
+        optionKeyPopup.addItems(withTitles: Self.optionAsAltTitles.dropLast())
         petModePopup.addItems(withTitles: ["one per window", "every pane"])
         notchPopup.addItems(withTitles: ["builtin", "external", "primary", "all"])
 
-        for popup in [stylePopup, lightsPopup, petPopup, petModePopup, notchPopup] {
+        for popup in [stylePopup, lightsPopup, optionKeyPopup, petPopup, petModePopup, notchPopup] {
             popup.controlSize = .regular
             popup.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
             popup.target = self
@@ -344,6 +357,8 @@ final class SettingsWindowController: NSWindowController {
                 sliderRow("Opacity", opacitySlider, opacityValue),
                 row("", blurCheck),
                 row("Traffic lights", lightsPopup, width: 160),
+                section("Keyboard"),
+                row("Option key", optionKeyPopup, width: 220),
             ]),
             "Pet": panel([
                 section("Pet"),
@@ -479,6 +494,11 @@ final class SettingsWindowController: NSWindowController {
         mcpCheck.state = current.mcpAutoRegister ? .on : .off
         notchCheck.state = current.notch ? .on : .off
         lightsPopup.selectItem(withTitle: current.trafficLights)
+        let optionIndex = Self.optionAsAltValues.firstIndex(of: current.optionAsAlt) ?? 0
+        if optionIndex >= optionKeyPopup.numberOfItems {
+            optionKeyPopup.addItem(withTitle: Self.optionAsAltTitles[optionIndex])
+        }
+        optionKeyPopup.selectItem(at: optionIndex)
         notchPopup.selectItem(withTitle: current.notchDisplay)
         petPopup.selectItem(withTitle: current.pet ?? "none")
         if petPopup.selectedItem == nil { petPopup.selectItem(at: 0) }
@@ -575,6 +595,8 @@ final class SettingsWindowController: NSWindowController {
         c.notch = notchCheck.state == .on
         c.notchDisplay = notchPopup.titleOfSelectedItem ?? "builtin"
         c.trafficLights = lightsPopup.titleOfSelectedItem ?? "circle"
+        c.optionAsAlt = Self.optionAsAltValues[
+            max(0, min(optionKeyPopup.indexOfSelectedItem, Self.optionAsAltValues.count - 1))]
         let pet = petPopup.titleOfSelectedItem ?? "none"
         c.pet = pet == "none" ? nil : pet
         c.petMode = petModePopup.indexOfSelectedItem == 1 ? "pane" : "window"

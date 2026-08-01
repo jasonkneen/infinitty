@@ -92,6 +92,11 @@ struct AppConfig {
     var mcpAutoRegister = false
     var agentGlow = true // pulsing inner glow while an agent drives the pane
     var sideTabs = false // tabs as a left column instead of a top row
+    /// Which Option keys act as Alt/Meta (ESC prefix) instead of composing the
+    /// character macOS's layout assigns them: "true" | "false" | "left" | "right".
+    /// On layouts where Option is needed for common characters (Finnish/Swedish
+    /// Option+2 = @, German Option+L = @) "false" or "right" keeps them typable.
+    var optionAsAlt = "true"
     var sourcePath: String? // config file in use (for live reload)
 
     var atlasKey: String {
@@ -304,6 +309,16 @@ struct AppConfig {
                 agentGlow = AppConfig.parseBool(value)
             case "side-tabs":
                 sideTabs = AppConfig.parseBool(value)
+            case "macos-option-as-alt", "option-as-alt", "option-as-meta":
+                switch value.lowercased() {
+                case "left", "right": optionAsAlt = value.lowercased()
+                case "true", "yes", "on", "1": optionAsAlt = "true"
+                case "false", "no", "off", "0": optionAsAlt = "false"
+                // A typo keeps the current value: routing it through parseBool
+                // would land on "false" and silently drop Meta, which is not
+                // the default and not what the line was trying to say.
+                default: break
+                }
             default:
                 break // unknown keys (themes, cursor styles, ...) ignored
             }
@@ -405,6 +420,7 @@ struct AppConfig {
         }
         if !agentGlow { out += "agent-glow = false\n" }
         if sideTabs { out += "side-tabs = true\n" }
+        if optionAsAlt != "true" { out += "macos-option-as-alt = \(optionAsAlt)\n" }
         if let key = quickTerminalKey, GlobalHotKeySpec.parse(key) != nil {
             out += "quick-terminal-key = \(key)\n"
         }
