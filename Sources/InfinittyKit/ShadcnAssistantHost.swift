@@ -265,6 +265,12 @@ struct AssistantRunTopBarStatusContent: Equatable {
     let queuedLabel: String?
     let accessibilityValue: String
 
+    var compactMetricsLabel: String {
+        [usageLabel, costLabel, queuedLabel]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
     init(snapshot: AssistantRunStatusSnapshot) {
         phase = snapshot.phase
         activityLabel = snapshot.phase == .ready ? nil : snapshot.activityLabel
@@ -395,18 +401,34 @@ struct AssistantRunTopBarStatus: View {
         ViewThatFits(in: .horizontal) {
             statusItems(content, includeCost: true, includeQueue: true)
             statusItems(content, includeCost: true, includeQueue: false)
-            statusItems(content, includeCost: false, includeQueue: false)
-            if let activityLabel = content.activityLabel {
-                activityBadge(activityLabel, phase: content.phase)
-            } else {
-                statusText(content.usageLabel, help: content.usageHelp)
-            }
+            compactStatus(content)
         }
         // Combine only this accessory's telemetry, never the canonical top bar
         // around it: the thread and New Chat controls remain distinct elements.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Agent run status")
         .accessibilityValue(content.accessibilityValue)
+    }
+
+    private func compactStatus(
+        _ content: AssistantRunTopBarStatusContent
+    ) -> some View {
+        HStack(spacing: Space.x1) {
+            if let activityLabel = content.activityLabel {
+                ShadcnIconView(content.phase.systemImage, size: 12)
+                    .foregroundStyle(palette.mutedForeground)
+                    .help(activityLabel)
+            }
+            Text(content.compactMetricsLabel)
+                .font(theme.typography.sans(theme.typography.xs))
+                .foregroundStyle(palette.mutedForeground)
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+                .allowsTightening(true)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
+                .help(content.usageHelp)
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
     }
 
     @ViewBuilder

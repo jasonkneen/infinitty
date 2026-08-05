@@ -95,6 +95,7 @@ final class AssistantRunStatusTests: XCTestCase {
         XCTAssertEqual(content.usageLabel, "~0 visible tokens")
         XCTAssertNil(content.costLabel)
         XCTAssertNil(content.queuedLabel)
+        XCTAssertEqual(content.compactMetricsLabel, "~0 visible tokens")
         XCTAssertTrue(content.accessibilityValue.contains("Codex · Sol"))
         XCTAssertTrue(content.accessibilityValue.contains("High effort"))
         XCTAssertTrue(content.accessibilityValue.contains("CHAT"))
@@ -129,6 +130,9 @@ final class AssistantRunStatusTests: XCTestCase {
         ].compactMap { $0 }, [
             "THINKING", "512 / 16.4K context", "USD 0.01", "2 queued",
         ])
+        XCTAssertEqual(
+            content.compactMetricsLabel,
+            "512 / 16.4K context · USD 0.01 · 2 queued")
     }
 
     func testBrokerApprovalOutranksStreamingAndToolActivity() {
