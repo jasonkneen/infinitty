@@ -266,18 +266,23 @@ automatically mounted remotely:
 
 Codex uses the app-server `initialize` / `thread/start` or `thread/resume` /
 `turn/start` protocol, streams `item/agentMessage/delta`, and targets
-`turn/interrupt` on cancellation. The approved worktree path and opaque model
-identifier are sent unchanged. The upstream WebSocket app-server transport is
-currently experimental, so deployments must explicitly provide an
-authenticated WSS endpoint; Infinitty does not open or expose a listener.
+`turn/interrupt` on cancellation. Tool, file-change, command, and sandbox
+approval requests use `on-request` and appear as scope-bound approval cards in
+the agent's Chat. The approved worktree path and opaque model identifier are
+sent unchanged. The upstream WebSocket app-server transport is currently
+experimental, so deployments must explicitly provide an authenticated WSS
+endpoint; Infinitty does not open or expose a listener.
 
 Claude uses the Managed Agents API with an HTTPS endpoint, `agentID`,
 `environmentID`, optional `vaultIDs`, and either `api_key` or `bearer`
 authentication. It opens the SSE stream before posting `user.message`, treats
 preview deltas as provisional, commits only authoritative `agent.message`
-events, sends `user.interrupt` on cancellation, and stops for explicit human
-handling when the session reports `requires_action`. Managed Agents is an
-upstream beta surface.
+events, and sends `user.interrupt` on cancellation. When a built-in or MCP tool
+pauses with `requires_action`, Infinitty presents the same Chat approval card
+and returns an exact `user.tool_confirmation` event. Custom-tool actions remain
+fail-closed because their protocol requires the client to execute the tool and
+return a result, not merely approve it. Managed Agents is an upstream beta
+surface.
 
 Before either agent can run, Infinitty authenticates and prepares the remote
 session, writes a provider/session/workspace receipt into the tamper-evident
