@@ -52,7 +52,8 @@ enum ChatEnsembleError: Error, Equatable, CustomStringConvertible {
         case .unknownAgent(let value): return "No configured agent or model matches “\(value)”."
         case .duplicateAgent(let value): return "\(value) is already in this Chat roster."
         case .unknownMention(let value): return "Unknown agent mention @\(value)."
-        case .disabledMention(let value): return "Agent @\(value) is disabled. Click its chip to re-enable it."
+        case .disabledMention(let value):
+            return "Agent @\(value) is disabled. Use the agent control to re-enable it."
         case .noEnabledAgents: return "Every agent in this Chat is disabled. Re-enable one or add another agent."
         }
     }

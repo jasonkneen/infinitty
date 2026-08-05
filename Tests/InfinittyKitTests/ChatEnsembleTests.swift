@@ -65,6 +65,9 @@ final class ChatEnsembleTests: XCTestCase {
         XCTAssertEqual(
             ChatEnsemble.route(prompt: "@claude review this", roster: [claude, codex]).failure,
             .disabledMention("claude"))
+        XCTAssertEqual(
+            ChatEnsembleError.disabledMention("claude").description,
+            "Agent @claude is disabled. Use the agent control to re-enable it.")
     }
 
     func testProductionChatStartsWithOneToggleableAutoAgent() throws {
