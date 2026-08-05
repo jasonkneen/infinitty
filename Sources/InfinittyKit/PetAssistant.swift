@@ -485,6 +485,10 @@ final class PetAssistantPanelView: NSView {
     }
 
     private let presentation: Presentation
+    /// True only when the containing AppKit pane header owns New Chat.
+    /// Popovers and the legacy standalone Chat page leave this false so the
+    /// canonical ShadKit top bar emits its one action.
+    let hasExternalNewChatAction: Bool
     private var config: AppConfig
     private let glassBackground = NSVisualEffectView()
     var onSubmit: ((String, String, String) -> Void)?
@@ -536,9 +540,15 @@ final class PetAssistantPanelView: NSView {
     private let showFilesButton = NSButton(title: "Show Files", target: nil, action: nil)
     private var queuedMessages: [String] = []
 
-    init(presentation: Presentation, config: AppConfig,
-         choices: [PetAssistant.AgentChoice] = [.auto]) {
+    init(
+        presentation: Presentation,
+        config: AppConfig,
+        choices: [PetAssistant.AgentChoice] = [.auto],
+        hasExternalNewChatAction: Bool = false
+    ) {
         self.presentation = presentation
+        self.hasExternalNewChatAction = presentation == .sidebar
+            && hasExternalNewChatAction
         self.config = config
         self.choices = choices
         super.init(frame: .zero)
@@ -941,7 +951,9 @@ final class PetAssistantPanelView: NSView {
         NSLayoutConstraint.deactivate(legacyLayoutConstraints)
         for child in subviews { child.isHidden = true }
 
-        let host = ShadcnAssistantHost(config: config)
+        let host = ShadcnAssistantHost(
+            config: config,
+            hasExternalNewChatAction: hasExternalNewChatAction)
         // Forward the panel's chosen model/effort — never ignore them in
         // favour of AppKit-only state. selectChoice/onModelChange keep the two
         // in lockstep; if they diverge, the panel is the surface the user saw.
@@ -1883,6 +1895,10 @@ final class PetAssistantPanelView: NSView {
         return items.dropFirst().allSatisfy { $0.image != nil }
     }
     var presentationForTesting: Presentation { presentation }
+    var embeddedNewChatActionCountForTesting: Int {
+        if let shadcnPanel { return shadcnPanel.newChatActionCountForTesting }
+        return newChatButton.isHidden ? 0 : 1
+    }
     var showsCloseButtonForTesting: Bool { !closeButton.isHidden }
     var usesGlassSurfaceForTesting: Bool { presentation == .popover }
     var transcriptForTesting: String {
@@ -2395,13 +2411,20 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     /// Panel for embedding in a Chat leaf. Never reuses a panel that is already
     /// in another host — doing so would empty the first Chat pane (black).
-    func makeSidebarPanelView() -> PetAssistantPanelView {
+    func makeSidebarPanelView(
+        hasExternalNewChatAction: Bool = false
+    ) -> PetAssistantPanelView {
         pruneExtraSidebarPanels()
-        if let sidebarPanel, sidebarPanel.superview == nil {
+        if let sidebarPanel,
+           sidebarPanel.superview == nil,
+           sidebarPanel.hasExternalNewChatAction
+                == hasExternalNewChatAction {
             return sidebarPanel
         }
-        let panel = makePanelView(presentation: .sidebar)
-        if sidebarPanel == nil {
+        let panel = makePanelView(
+            presentation: .sidebar,
+            hasExternalNewChatAction: hasExternalNewChatAction)
+        if sidebarPanel == nil || sidebarPanel?.superview == nil {
             sidebarPanel = panel
         } else {
             extraSidebarPanels.append(WeakPetAssistantPanel(panel))
@@ -2422,11 +2445,13 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func makePanelView(
-        presentation: PetAssistantPanelView.Presentation
+        presentation: PetAssistantPanelView.Presentation,
+        hasExternalNewChatAction: Bool = false
     ) -> PetAssistantPanelView {
         let panel = PetAssistantPanelView(
             presentation: presentation, config: config,
-            choices: availableChoices)
+            choices: availableChoices,
+            hasExternalNewChatAction: hasExternalNewChatAction)
         panel.setToolEventScopeID(backendConversationID(for: activeThreadId))
         panel.setApprovalEventScopeID(backendConversationID(for: activeThreadId))
         panel.setRunTelemetry(
@@ -3382,7 +3407,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         // Tall enough for empty-state + compact ShadKit composer (chips row)
         // without the footer being clipped by the popover chrome.
         let contentSize = NSSize(width: 400, height: 500)
-        let panel = makePanelView(presentation: .popover)
+        let panel = makePanelView(
+            presentation: .popover,
+            hasExternalNewChatAction: false)
         panel.frame = NSRect(origin: .zero, size: contentSize)
         panel.translatesAutoresizingMaskIntoConstraints = true
         panel.autoresizingMask = [.width, .height]

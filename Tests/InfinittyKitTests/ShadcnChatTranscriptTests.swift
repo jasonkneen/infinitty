@@ -126,6 +126,36 @@ final class ShadcnChatTranscriptTests: XCTestCase {
         host.applyAppearance(config: config)
         XCTAssertEqual(host.model.messageFontSize, 20)
     }
+
+    func testAssistantHostUsesExternalCompactTitermChrome() {
+        let standalone = ShadcnAssistantHost()
+        XCTAssertFalse(standalone.chrome.showsHeader)
+        XCTAssertFalse(standalone.chrome.hasExternalNewChatAction)
+        XCTAssertEqual(standalone.chrome.topBarPlacement, .external)
+        XCTAssertEqual(standalone.chrome.rosterPresentation, .menu)
+        XCTAssertEqual(standalone.chrome.density, .compact)
+        XCTAssertEqual(standalone.newChatActionCountForTesting, 1)
+
+        let utilityPaneHost = ShadcnAssistantHost(
+            hasExternalNewChatAction: true)
+        XCTAssertTrue(utilityPaneHost.chrome.hasExternalNewChatAction)
+        XCTAssertEqual(utilityPaneHost.newChatActionCountForTesting, 0)
+    }
+
+    func testHostAppearanceRefreshPreservesThreadCallback() {
+        let host = ShadcnAssistantHost()
+        host.setThreads(
+            [(id: "A", title: "Thread A"), (id: "B", title: "Thread B")],
+            activeId: "A")
+        var selected: [String] = []
+        host.model.onSelectThread = { selected.append($0) }
+
+        host.applyAppearance(config: AppConfig())
+        host.model.selectThread("B")
+
+        XCTAssertEqual(selected, ["B"])
+        XCTAssertEqual(host.model.activeThreadId, "B")
+    }
 }
 
 // MARK: - Tool events

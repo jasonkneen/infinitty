@@ -1001,7 +1001,8 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
         chatHost.subviews.forEach { $0.removeFromSuperview() }
         // makeSidebarPanelView refuses to reuse a panel already embedded in
         // another Chat leaf, so multi-pane never blanks a sibling.
-        let panel = assistant.makeSidebarPanelView()
+        let panel = assistant.makeSidebarPanelView(
+            hasExternalNewChatAction: panelKind == .chat)
         chatPanel = panel
         panel.removeFromSuperview()
         panel.translatesAutoresizingMaskIntoConstraints = false
@@ -1746,6 +1747,12 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
     }
     var chatPageIsVisibleForTesting: Bool { !chatHost.isHidden }
     var chatPageFrameForTesting: NSRect { chatHost.frame }
+    var chatPanelHasExternalNewChatActionForTesting: Bool {
+        chatPanel?.hasExternalNewChatAction ?? false
+    }
+    var chatPanelNewChatActionCountForTesting: Int {
+        chatPanel?.embeddedNewChatActionCountForTesting ?? 0
+    }
     func chatPageUsesAssistantForTesting(_ assistant: PetAssistant) -> Bool {
         self.assistant === assistant
     }

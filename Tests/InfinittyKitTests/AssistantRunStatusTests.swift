@@ -82,6 +82,55 @@ final class AssistantRunStatusTests: XCTestCase {
         XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .ready)
     }
 
+    func testCompactTopBarHidesReadyActivityButKeepsUsage() {
+        let model = AIAssistantPanelModel()
+        model.model = "Codex · Sol"
+        model.effort = "High"
+
+        let content = AssistantRunTopBarStatusContent(
+            snapshot: AssistantRunStatusSnapshot(model: model))
+
+        XCTAssertEqual(content.phase, .ready)
+        XCTAssertNil(content.activityLabel)
+        XCTAssertEqual(content.usageLabel, "~0 visible tokens")
+        XCTAssertNil(content.costLabel)
+        XCTAssertNil(content.queuedLabel)
+        XCTAssertTrue(content.accessibilityValue.contains("Codex · Sol"))
+        XCTAssertTrue(content.accessibilityValue.contains("High effort"))
+        XCTAssertTrue(content.accessibilityValue.contains("CHAT"))
+    }
+
+    func testCompactTopBarMapsActivityUsageCostAndQueueInPriorityOrder() {
+        let model = AIAssistantPanelModel()
+        model.isThinking = true
+        model.queued = ["second", "third"]
+        let runState = AssistantRunPresentationState()
+        var telemetry = AssistantRunTelemetrySnapshot()
+        telemetry.beginRun()
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .usage(AssistantRunEvent.Usage(
+                contextUsedTokens: 512,
+                contextWindowTokens: 16_384,
+                cost: AssistantRunEvent.Cost(
+                    amount: Decimal(string: "0.01")!, currency: "usd")))))
+        runState.setTelemetry(telemetry)
+
+        let content = AssistantRunTopBarStatusContent(
+            snapshot: AssistantRunStatusSnapshot(
+                model: model, runState: runState))
+
+        XCTAssertEqual(content.phase, .thinking)
+        XCTAssertEqual([
+            content.activityLabel,
+            content.usageLabel,
+            content.costLabel,
+            content.queuedLabel,
+        ].compactMap { $0 }, [
+            "THINKING", "512 / 16.4K context", "USD 0.01", "2 queued",
+        ])
+    }
+
     func testBrokerApprovalOutranksStreamingAndToolActivity() {
         let model = AIAssistantPanelModel()
         let runState = AssistantRunPresentationState()

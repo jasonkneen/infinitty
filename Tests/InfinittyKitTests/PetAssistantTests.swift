@@ -427,6 +427,35 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(shad.shadcnTerminalModeEnabledForTesting, true)
     }
 
+    func testShadKitNewChatOwnershipAcrossPresentationPaths() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let legacyController = CodeViewController(config: AppConfig())
+        legacyController.attachAssistant(PetAssistant(config: AppConfig()))
+        XCTAssertFalse(legacyController.chatPanelHasExternalNewChatActionForTesting)
+        XCTAssertEqual(legacyController.chatPanelNewChatActionCountForTesting, 1)
+
+        let dedicatedController = CodeViewController(
+            config: AppConfig(), panelKind: .chat)
+        dedicatedController.attachAssistant(PetAssistant(config: AppConfig()))
+        let utilityPane = UtilityPaneView(
+            kind: .chat,
+            contentView: dedicatedController.view,
+            background: .black)
+        XCTAssertTrue(dedicatedController.chatPanelHasExternalNewChatActionForTesting)
+        XCTAssertEqual(dedicatedController.chatPanelNewChatActionCountForTesting, 0)
+        XCTAssertEqual(
+            (utilityPane.showsNewChatInHeaderForTesting ? 1 : 0)
+                + dedicatedController.chatPanelNewChatActionCountForTesting,
+            1)
+
+        let popover = PetAssistantPanelView(
+            presentation: .popover, config: AppConfig())
+        XCTAssertFalse(popover.hasExternalNewChatAction)
+        XCTAssertEqual(popover.embeddedNewChatActionCountForTesting, 1)
+    }
+
     func testConnectedChatInjectsIdentityAndPublishesBothSidesOfTurn() throws {
         let endpointOne = CollaborationEndpoint(
             id: "instance/chat-1", kind: .chat, label: "Chat 1",

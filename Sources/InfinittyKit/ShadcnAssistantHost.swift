@@ -253,13 +253,41 @@ struct AssistantRunStatusSnapshot: Equatable {
     }
 }
 
+/// The subset of run status that earns permanent space in Titerm's compact
+/// top bar. Model, execution mode and effort remain in the composer's controls
+/// and in `accessibilityValue`; READY is intentionally quiet.
+struct AssistantRunTopBarStatusContent: Equatable {
+    let phase: AssistantRunPhase
+    let activityLabel: String?
+    let usageLabel: String
+    let usageHelp: String
+    let costLabel: String?
+    let queuedLabel: String?
+    let accessibilityValue: String
+
+    init(snapshot: AssistantRunStatusSnapshot) {
+        phase = snapshot.phase
+        activityLabel = snapshot.phase == .ready ? nil : snapshot.activityLabel
+        usageLabel = snapshot.usageLabel
+        usageHelp = snapshot.usageHelp
+        costLabel = snapshot.costLabel
+        queuedLabel = snapshot.queuedCount > 0
+            ? "\(snapshot.queuedCount) queued" : nil
+        accessibilityValue = snapshot.accessibilityValue
+    }
+
+}
+
 struct AssistantRunDeck: View {
     @ObservedObject var model: AIAssistantPanelModel
     @ObservedObject var runState: AssistantRunPresentationState
+    let chrome: AIAssistantPanelChrome
 
     var body: some View {
         VStack(spacing: 0) {
-            AssistantRunStatusStrip(model: model, runState: runState)
+            AIAssistantPanelTopBar(model: model, chrome: chrome) {
+                AssistantRunTopBarStatus(model: model, runState: runState)
+            }
             ShadcnSeparator()
             if let reasoning = runState.reasoningSummary,
                !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -276,7 +304,7 @@ struct AssistantRunDeck: View {
                 AssistantApprovalDeck(requests: runState.approvalRequests)
                 ShadcnSeparator()
             }
-            AIAssistantPanel(model: model, showsHeader: false)
+            AIAssistantPanel(model: model, chrome: chrome)
         }
     }
 }
@@ -353,7 +381,7 @@ private struct AssistantApprovalCard: View {
     }
 }
 
-private struct AssistantRunStatusStrip: View {
+struct AssistantRunTopBarStatus: View {
     @ObservedObject var model: AIAssistantPanelModel
     @ObservedObject var runState: AssistantRunPresentationState
 
@@ -363,36 +391,51 @@ private struct AssistantRunStatusStrip: View {
     var body: some View {
         let snapshot = AssistantRunStatusSnapshot(
             model: model, runState: runState)
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Space.x2) {
-                Text(snapshot.modeLabel)
-                    .font(theme.typography.mono(theme.typography.xs, weight: .semibold))
-                    .foregroundStyle(palette.mutedForeground)
-                ShadcnBadge(
-                    snapshot.activityLabel,
-                    systemImage: snapshot.phase.systemImage,
-                    variant: snapshot.phase.badgeVariant)
-                statusText(snapshot.modelLabel, help: "Active model")
-                statusText(snapshot.visibleEffortLabel, help: "Reasoning effort")
-                statusText(
-                    snapshot.visibleTokenLabel,
-                    help: snapshot.usageHelp)
-                if let costLabel = snapshot.costLabel {
-                    statusText(costLabel, help: "Provider-reported run cost")
-                }
-                if snapshot.queuedCount > 0 {
-                    statusText("\(snapshot.queuedCount) queued", help: "Queued prompts")
-                }
-                if snapshot.enabledAgentCount > 1 {
-                    statusText("\(snapshot.enabledAgentCount) agents", help: "Enabled agents")
-                }
+        let content = AssistantRunTopBarStatusContent(snapshot: snapshot)
+        ViewThatFits(in: .horizontal) {
+            statusItems(content, includeCost: true, includeQueue: true)
+            statusItems(content, includeCost: true, includeQueue: false)
+            statusItems(content, includeCost: false, includeQueue: false)
+            if let activityLabel = content.activityLabel {
+                activityBadge(activityLabel, phase: content.phase)
+            } else {
+                statusText(content.usageLabel, help: content.usageHelp)
             }
-            .padding(.horizontal, Space.x3)
-            .padding(.vertical, Space.x1_5)
         }
-        .accessibilityElement(children: .combine)
+        // Combine only this accessory's telemetry, never the canonical top bar
+        // around it: the thread and New Chat controls remain distinct elements.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Agent run status")
-        .accessibilityValue(snapshot.accessibilityValue)
+        .accessibilityValue(content.accessibilityValue)
+    }
+
+    @ViewBuilder
+    private func statusItems(
+        _ content: AssistantRunTopBarStatusContent,
+        includeCost: Bool,
+        includeQueue: Bool
+    ) -> some View {
+        HStack(spacing: Space.x1_5) {
+            if let activityLabel = content.activityLabel {
+                activityBadge(activityLabel, phase: content.phase)
+            }
+            statusText(content.usageLabel, help: content.usageHelp)
+            if includeCost, let costLabel = content.costLabel {
+                statusText(costLabel, help: "Provider-reported run cost")
+            }
+            if includeQueue, let queuedLabel = content.queuedLabel {
+                statusText(queuedLabel, help: "Queued prompts")
+            }
+        }
+    }
+
+    private func activityBadge(
+        _ label: String, phase: AssistantRunPhase
+    ) -> some View {
+        ShadcnBadge(
+            label,
+            systemImage: phase.systemImage,
+            variant: phase.badgeVariant)
     }
 
     private func statusText(_ text: String, help: String) -> some View {
@@ -400,6 +443,7 @@ private struct AssistantRunStatusStrip: View {
             .font(theme.typography.sans(theme.typography.xs))
             .foregroundStyle(palette.mutedForeground)
             .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .help(help)
     }
 }
@@ -413,17 +457,28 @@ private struct AssistantRunStatusStrip: View {
 final class ShadcnAssistantHost {
     let model = AIAssistantPanelModel()
     let runState = AssistantRunPresentationState()
+    let chrome: AIAssistantPanelChrome
     private(set) var view: ShadcnHostingView<AssistantRunDeck>!
     private var baseTheme: ShadcnTheme
     /// Host-fed identity, separate from the eagerly updated SwiftUI binding.
     /// Comparing against `model.activeThreadId` would miss user-driven switches.
     private var lastPresentedThreadID: String?
 
-    init(config: AppConfig = AppConfig()) {
+    init(
+        config: AppConfig = AppConfig(),
+        hasExternalNewChatAction: Bool = false
+    ) {
+        chrome = AIAssistantPanelChrome(
+            showsHeader: false,
+            hasExternalNewChatAction: hasExternalNewChatAction,
+            topBarPlacement: .external,
+            rosterPresentation: .menu,
+            density: .compact)
         baseTheme = UISurfaceTheme.theme(for: config)
         model.messageFontSize = config.interfaceFontSize
         let model = self.model
         let runState = self.runState
+        let chrome = self.chrome
         view = ShadcnHostingView(
             theme: Self.assistantTheme(
                 base: baseTheme, interfaceFontSize: config.interfaceFontSize),
@@ -432,7 +487,7 @@ final class ShadcnAssistantHost {
         ) {
             // Panel fills proposed size (see AIAssistantPanel body) so a
             // popover's contentSize isn't overflow-clipped at the footer.
-            AssistantRunDeck(model: model, runState: runState)
+            AssistantRunDeck(model: model, runState: runState, chrome: chrome)
         }
     }
 
@@ -441,14 +496,21 @@ final class ShadcnAssistantHost {
         model.messageFontSize = config.interfaceFontSize
         let model = self.model
         let runState = self.runState
+        let chrome = self.chrome
         view.update(
             theme: Self.assistantTheme(
                 base: baseTheme, interfaceFontSize: config.interfaceFontSize),
             colorScheme: UISurfaceTheme.colorScheme(for: config),
             paintsBackground: true
         ) {
-            AssistantRunDeck(model: model, runState: runState)
+            AssistantRunDeck(model: model, runState: runState, chrome: chrome)
         }
+    }
+
+    /// The ShadKit top bar emits exactly one New Chat action unless an AppKit
+    /// presentation explicitly owns it (the dedicated Utility Chat pane).
+    var newChatActionCountForTesting: Int {
+        chrome.hasExternalNewChatAction ? 0 : 1
     }
 
     private static func assistantTheme(
