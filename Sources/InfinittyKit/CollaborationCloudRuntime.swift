@@ -13,6 +13,7 @@ protocol CollaborationAgentRuntimeAdapter: AnyObject, Sendable {
     func turn(
         system: String,
         user: String,
+        approvalScopeID: String?,
         timeout: TimeInterval,
         onPartial: (@Sendable (String) -> Void)?
     ) async throws -> String
@@ -26,9 +27,9 @@ protocol CollaborationCloudRuntimeFactoryProtocol: Sendable {
     ) throws -> any CollaborationAgentRuntimeAdapter
 }
 
-/// Chat transport closures backed by one prepared remote session. The
-/// conversation id is intentionally ignored: the durable provider receipt,
-/// not an in-process CLI key, owns cloud resume/cancel/close semantics.
+/// Chat transport closures backed by one prepared remote session. The durable
+/// provider receipt owns cloud resume/cancel/close semantics, while the Chat
+/// conversation id scopes interactive approvals to the exact visible run.
 struct CollaborationCloudChatBindings {
     let backendRunner: PetAssistant.BackendRunner
     let cancel: @Sendable (String) -> Void
@@ -36,7 +37,7 @@ struct CollaborationCloudChatBindings {
 
     init(adapter: any CollaborationAgentRuntimeAdapter) {
         backendRunner = {
-            _, system, user, _, _, onPartial, timeout, done in
+            _, system, user, _, conversationID, onPartial, timeout, done in
             let callbacks = CollaborationCloudCallbackBox(
                 partial: onPartial,
                 done: done)
@@ -45,6 +46,7 @@ struct CollaborationCloudChatBindings {
                     let answer = try await adapter.turn(
                         system: system,
                         user: user,
+                        approvalScopeID: conversationID,
                         timeout: timeout ?? 120,
                         onPartial: { text in
                             callbacks.partial?(text)
@@ -336,6 +338,7 @@ actor CodexCloudAgentAdapter:
         (any CollaborationCodexWebSocketConnection)?
     private var threadID: String?
     private var activeTurnID: String?
+    private var activeApprovalScopeID: String?
     private var nextRequestID = 1
     private var bufferedNotifications: [[String: Any]] = []
     private var closed = false
@@ -417,7 +420,7 @@ actor CodexCloudAgentAdapter:
         } else {
             var params: [String: Any] = [
                 "cwd": context.workspace,
-                "approvalPolicy": "never",
+                "approvalPolicy": "on-request",
                 "sandbox": "workspaceWrite",
                 "serviceName": "infinitty",
             ]
@@ -451,6 +454,7 @@ actor CodexCloudAgentAdapter:
     func turn(
         system: String,
         user: String,
+        approvalScopeID: String?,
         timeout: TimeInterval,
         onPartial: (@Sendable (String) -> Void)?
     ) async throws -> String {
@@ -466,48 +470,78 @@ actor CodexCloudAgentAdapter:
                 "Codex adapter was not prepared")
         }
         turnInFlight = true
+        activeApprovalScopeID = approvalScopeID
         defer {
             turnInFlight = false
             activeTurnID = nil
+            activeApprovalScopeID = nil
         }
-        return try await withThrowingTaskGroup(
-            of: String.self
-        ) { group in
-            group.addTask {
-                try await self.performTurn(
-                    threadID: threadID,
-                    prompt: system + "\n\n" + user,
-                    onPartial: onPartial)
+        do {
+            return try await withThrowingTaskGroup(
+                of: String.self
+            ) { group in
+                group.addTask {
+                    try await self.performTurn(
+                        threadID: threadID,
+                        prompt: system + "\n\n" + user,
+                        onPartial: onPartial)
+                }
+                group.addTask {
+                    let boundedTimeout = min(max(timeout, 1), 86_400)
+                    let nanoseconds = UInt64(
+                        boundedTimeout * 1_000_000_000)
+                    while true {
+                        try await Task.sleep(nanoseconds: nanoseconds)
+                        if await self.hasPendingApproval() {
+                            repeat {
+                                try await Task.sleep(nanoseconds: 100_000_000)
+                            } while await self.hasPendingApproval()
+                            continue
+                        }
+                        await self.interrupt()
+                        throw CollaborationCloudRuntimeError.timeout
+                    }
+                }
+                guard let result = try await group.next() else {
+                    throw CollaborationCloudRuntimeError.transport(
+                        "Codex turn produced no result")
+                }
+                group.cancelAll()
+                return result
             }
-            group.addTask {
-                let boundedTimeout = min(max(timeout, 1), 86_400)
-                let nanoseconds = UInt64(
-                    boundedTimeout * 1_000_000_000)
-                try await Task.sleep(nanoseconds: nanoseconds)
-                await self.interrupt()
-                throw CollaborationCloudRuntimeError.timeout
+        } catch {
+            if let approvalScopeID {
+                AssistantApprovalBroker.shared.cancel(
+                    scopeID: approvalScopeID)
             }
-            guard let result = try await group.next() else {
-                throw CollaborationCloudRuntimeError.transport(
-                    "Codex turn produced no result")
-            }
-            group.cancelAll()
-            return result
+            throw error
         }
     }
 
     func interrupt() async {
+        if let activeApprovalScopeID {
+            AssistantApprovalBroker.shared.cancel(
+                scopeID: activeApprovalScopeID)
+        }
         guard let threadID, let activeTurnID else { return }
-        _ = try? await requestRPC(
-            "turn/interrupt",
-            params: [
+        let requestID = nextRequestID
+        nextRequestID += 1
+        try? await sendJSON([
+            "id": requestID,
+            "method": "turn/interrupt",
+            "params": [
                 "threadId": threadID,
                 "turnId": activeTurnID,
-            ])
+            ],
+        ])
     }
 
     func close() async {
         closed = true
+        if let activeApprovalScopeID {
+            AssistantApprovalBroker.shared.cancel(
+                scopeID: activeApprovalScopeID)
+        }
         socket?.close()
         socket = nil
     }
@@ -526,7 +560,7 @@ actor CodexCloudAgentAdapter:
                     "text": prompt,
                 ]],
                 "cwd": context.workspace,
-                "approvalPolicy": "never",
+                "approvalPolicy": "on-request",
                 "sandboxPolicy": [
                     "type": "workspaceWrite",
                     "writableRoots": [] as [String],
@@ -640,6 +674,10 @@ actor CodexCloudAgentAdapter:
         ])
         while true {
             let message = try await receiveJSON()
+            if Self.isServerRequest(message) {
+                try await handleServerRequest(message)
+                continue
+            }
             if let id = message["id"] as? Int, id == requestID {
                 if let error =
                     message["error"] as? [String: Any]
@@ -669,13 +707,111 @@ actor CodexCloudAgentAdapter:
     private func nextNotification() async throws
         -> [String: Any]
     {
-        if !bufferedNotifications.isEmpty {
-            return bufferedNotifications.removeFirst()
-        }
         while true {
-            let message = try await receiveJSON()
+            let message: [String: Any]
+            if bufferedNotifications.isEmpty {
+                message = try await receiveJSON()
+            } else {
+                message = bufferedNotifications.removeFirst()
+            }
+            if Self.isServerRequest(message) {
+                try await handleServerRequest(message)
+                continue
+            }
             if message["method"] != nil { return message }
         }
+    }
+
+    private func handleServerRequest(
+        _ message: [String: Any]
+    ) async throws {
+        guard let method = message["method"] as? String,
+              message.keys.contains("id")
+        else { return }
+        let responseID = message["id"] ?? NSNull()
+        guard responseID is NSNull
+                || responseID is String
+                || responseID as? Int != nil
+        else {
+            throw CollaborationCloudRuntimeError.protocolViolation(
+                "Codex sent a server request with an invalid id")
+        }
+        guard CodexApprovalAdapter.supportedMethods.contains(method) else {
+            try await sendJSON([
+                "id": responseID,
+                "error": [
+                    "code": -32601,
+                    "message": "Method not found",
+                ],
+            ])
+            return
+        }
+        let params = message["params"] as? [String: Any] ?? [:]
+        guard let request = CodexApprovalAdapter.request(
+            method: method,
+            params: params,
+            scopeID: activeApprovalScopeID ?? "cloud-codex-unscoped")
+        else {
+            try await sendJSON([
+                "id": responseID,
+                "error": [
+                    "code": -32602,
+                    "message": "Invalid approval request",
+                ],
+            ])
+            return
+        }
+
+        let decision: AssistantApprovalDecision
+        if activeApprovalScopeID != nil,
+           serverRequestBelongsToActiveTurn(params)
+        {
+            decision = await withCheckedContinuation { continuation in
+                AssistantApprovalBroker.shared.request(request) { value in
+                    continuation.resume(returning: value)
+                }
+            }
+        } else {
+            decision = .deny
+        }
+        try await sendJSON([
+            "id": responseID,
+            "result": CodexApprovalAdapter.response(
+                method: method,
+                params: params,
+                decision: decision),
+        ])
+    }
+
+    private func serverRequestBelongsToActiveTurn(
+        _ params: [String: Any]
+    ) -> Bool {
+        let requestThreadID =
+            (params["threadId"] as? String)
+            ?? (params["thread_id"] as? String)
+        if let requestThreadID, requestThreadID != threadID {
+            return false
+        }
+        let requestTurnID =
+            (params["turnId"] as? String)
+            ?? (params["turn_id"] as? String)
+        if let requestTurnID, let activeTurnID,
+           requestTurnID != activeTurnID
+        {
+            return false
+        }
+        return turnInFlight
+    }
+
+    private func hasPendingApproval() -> Bool {
+        AssistantApprovalBroker.shared.hasPending(
+            scopeID: activeApprovalScopeID)
+    }
+
+    private static func isServerRequest(
+        _ message: [String: Any]
+    ) -> Bool {
+        message["method"] is String && message.keys.contains("id")
     }
 
     private func sendJSON(_ object: [String: Any]) async throws {
@@ -872,6 +1008,7 @@ actor ClaudeManagedAgentAdapter:
     func turn(
         system: String,
         user: String,
+        approvalScopeID: String?,
         timeout: TimeInterval,
         onPartial: (@Sendable (String) -> Void)?
     ) async throws -> String {

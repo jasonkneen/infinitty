@@ -88,6 +88,7 @@ final class CollaborationCloudRuntimeTests: XCTestCase {
         let answer = try await adapter.turn(
             system: "Channel channel-release; self Architect.",
             user: "Implement the approved scope.",
+            approvalScopeID: nil,
             timeout: 2,
             onPartial: { partials.append($0) })
 
@@ -103,10 +104,117 @@ final class CollaborationCloudRuntimeTests: XCTestCase {
         let start = try XCTUnwrap(sent.last)
         let params = try XCTUnwrap(start["params"] as? [String: Any])
         XCTAssertEqual(params["cwd"] as? String, "/approved/worktree")
+        XCTAssertEqual(params["approvalPolicy"] as? String, "on-request")
         let input = try XCTUnwrap(params["input"] as? [[String: Any]])
         XCTAssertTrue(
             (input.first?["text"] as? String)?
                 .contains("Channel channel-release") == true)
+        let threadStart = try XCTUnwrap(sent.first {
+            $0["method"] as? String == "thread/start"
+        })
+        XCTAssertEqual(
+            (threadStart["params"] as? [String: Any])?["approvalPolicy"]
+                as? String,
+            "on-request")
+    }
+
+    func testCodexApprovalRequestUsesChatScopeAndExactRPCResponse()
+        async throws
+    {
+        let scopeID = "cloud-chat-scope"
+        AssistantApprovalBroker.shared.cancel(scopeID: scopeID)
+        defer {
+            AssistantApprovalBroker.shared.cancel(scopeID: scopeID)
+        }
+        let socket = ScriptedCodexSocket(responses: [
+            rpcResult(1, [:]),
+            rpcResult(2, [
+                "thread": ["id": "thread-approval"],
+            ]),
+            json([
+                // Deliberately collides with the outstanding turn/start id.
+                // A server request must be handled before client responses.
+                "id": 3,
+                "method": "item/commandExecution/requestApproval",
+                "params": [
+                    "threadId": "thread-approval",
+                    "command": "swift test",
+                    "cwd": "/approved/worktree",
+                    "reason": "Run the focused verification suite.",
+                    "availableDecisions": [
+                        "accept", "acceptForSession", "decline",
+                    ],
+                ],
+            ]),
+            rpcResult(3, [
+                "turn": ["id": "turn-approval"],
+            ]),
+            notification(
+                "item/agentMessage/delta",
+                [
+                    "turnId": "turn-approval",
+                    "itemId": "message-approval",
+                    "delta": "Approved result",
+                ]),
+            notification(
+                "turn/completed",
+                [
+                    "turn": [
+                        "id": "turn-approval",
+                        "status": "completed",
+                    ],
+                ]),
+        ])
+        let factory = CollaborationCloudRuntimeFactory(
+            environment: ["CODEX_CHANNEL_TOKEN": "token"],
+            http: ScriptedCloudHTTPTransport(),
+            webSockets: ScriptedCodexSocketFactory(socket: socket))
+        let adapter = try factory.makeAdapter(
+            context: context(agent: codexAgent()))
+        _ = try await adapter.prepare()
+        let bindings = CollaborationCloudChatBindings(adapter: adapter)
+        let outcomes = LockedValues<PetAssistant.AIOutcome>()
+        let completed = expectation(description: "cloud turn completed")
+
+        bindings.backendRunner(
+            .codex(model: "opaque-codex-model"),
+            "system",
+            "user",
+            "/approved/worktree",
+            scopeID,
+            nil,
+            1,
+            { outcome in
+                outcomes.append(outcome)
+                completed.fulfill()
+            })
+
+        let approval = try await waitForApproval(scopeID: scopeID)
+        XCTAssertEqual(approval.provider, "Codex")
+        XCTAssertEqual(approval.kind, .commandExecution)
+        XCTAssertEqual(approval.scopeID, scopeID)
+        XCTAssertTrue(approval.input?.contains("swift test") == true)
+        XCTAssertTrue(AssistantApprovalBroker.shared.resolve(
+            id: approval.id,
+            scopeID: scopeID,
+            decision: .allowOnce))
+
+        await fulfillment(of: [completed], timeout: 2)
+        guard case let .text(answer) = try XCTUnwrap(outcomes.values.first)
+        else {
+            return XCTFail("cloud turn did not return text")
+        }
+        XCTAssertEqual(answer, "Approved result")
+        let response = try XCTUnwrap(socket.sentObjects.first {
+            $0["method"] == nil && $0["id"] as? Int == 3
+        })
+        XCTAssertEqual(
+            (response["result"] as? [String: Any])?["decision"]
+                as? String,
+            "accept")
+        XCTAssertTrue(
+            AssistantApprovalBroker.shared.pendingRequests(
+                scopeID: scopeID).isEmpty)
     }
 
     func testCodexAdapterResumesThePersistedRemoteThread()
@@ -248,6 +356,7 @@ final class CollaborationCloudRuntimeTests: XCTestCase {
         let answer = try await adapter.turn(
             system: "Channel shared context.",
             user: "Do the assigned task.",
+            approvalScopeID: nil,
             timeout: 2,
             onPartial: { partials.append($0) })
         await adapter.interrupt()
@@ -354,6 +463,7 @@ final class CollaborationCloudRuntimeTests: XCTestCase {
             _ = try await adapter.turn(
                 system: "system",
                 user: "user",
+                approvalScopeID: nil,
                 timeout: 2,
                 onPartial: nil)
             XCTFail("turn unexpectedly succeeded")
@@ -429,6 +539,23 @@ final class CollaborationCloudRuntimeTests: XCTestCase {
             accountFingerprint: nil,
             capabilities: ["resume"],
             preparedAt: Date(timeIntervalSince1970: 100))
+    }
+
+    private func waitForApproval(
+        scopeID: String
+    ) async throws -> AssistantApprovalRequest {
+        for _ in 0..<100 {
+            if let request = AssistantApprovalBroker.shared
+                .pendingRequests(scopeID: scopeID).first
+            {
+                return request
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return try XCTUnwrap(
+            AssistantApprovalBroker.shared
+                .pendingRequests(scopeID: scopeID).first,
+            "approval request did not reach the shared broker")
     }
 }
 

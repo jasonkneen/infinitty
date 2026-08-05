@@ -1333,6 +1333,7 @@ final class HeadlessCloudRuntimeAdapter:
     func turn(
         system: String,
         user: String,
+        approvalScopeID: String?,
         timeout: TimeInterval,
         onPartial: (@Sendable (String) -> Void)?
     ) async throws -> String {
