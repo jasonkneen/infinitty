@@ -21,6 +21,12 @@ enum ProviderPermissionPolicy {
             : "workspace-write"
     }
 
+    static func codexApprovalPolicy(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        allowsDangerBypass(environment: environment) ? "never" : "on-request"
+    }
+
     static func claudePermissionArguments(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String] {

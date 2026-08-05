@@ -43,6 +43,7 @@ final class CodexAppServer: @unchecked Sendable {
     private var stderrHandle: FileHandle?
     private var stdoutBuffer = Data()
     private var nextRequestID = 1
+    private var processGeneration: UInt64 = 0
     private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
     /// Active turn reducers. Keyed by turn id; one per in-flight `turn/start`.
     private var activeTurns: [String: TurnReducer] = [:]
@@ -80,6 +81,28 @@ final class CodexAppServer: @unchecked Sendable {
     private var tombstonedConversationIDs = Set<String>()
     /// Whether the JSON-RPC initialize handshake has completed.
     private var hasInitialized = false
+
+    private enum ServerRequestID: Sendable {
+        case integer(Int)
+        case string(String)
+
+        init?(_ value: Any) {
+            if let value = value as? Int {
+                self = .integer(value)
+            } else if let value = value as? String {
+                self = .string(value)
+            } else {
+                return nil
+            }
+        }
+
+        var jsonValue: Any {
+            switch self {
+            case .integer(let value): value
+            case .string(let value): value
+            }
+        }
+    }
 
     var isRunning: Bool { queue.sync { process?.isRunning == true } }
 
@@ -187,7 +210,9 @@ final class CodexAppServer: @unchecked Sendable {
     /// Tear the bridge down. Called from `deinit`; safe to invoke multiple
     /// times. Any in-flight turn awaits fail with `CancellationError`.
     func stop() {
-        queue.sync {
+        let approvalScopes: [String] = queue.sync {
+            processGeneration &+= 1
+            let approvalScopes = conversations.values.compactMap(\.scopeID)
             stdoutHandle?.readabilityHandler = nil
             stderrHandle?.readabilityHandler = nil
             try? stdinHandle?.close()
@@ -210,6 +235,10 @@ final class CodexAppServer: @unchecked Sendable {
             discardedTurnIDs.removeAll()
             earlyTurnMessages.removeAll()
             pendingIdleThreadIDs.removeAll()
+            return approvalScopes
+        }
+        for scopeID in approvalScopes {
+            AssistantApprovalBroker.shared.cancel(scopeID: scopeID)
         }
     }
 
@@ -242,10 +271,10 @@ final class CodexAppServer: @unchecked Sendable {
             p.executableURL = executable
             var arguments = [
                 "app-server", "--listen", "stdio://",
-                "-c", "approval_policy=never",
-                // `never` fails requests that need escalation. The sandbox
-                // stays workspace-scoped unless danger bypass is explicitly
-                // opted into for this process.
+                "-c", "approval_policy=\(ProviderPermissionPolicy.codexApprovalPolicy())",
+                // The sandbox stays workspace-scoped unless danger bypass is
+                // explicitly opted into for this process. In normal mode,
+                // escalation is routed through the native Chat approval deck.
                 "-c", "sandbox_mode=\(ProviderPermissionPolicy.codexSandboxMode())",
             ]
             let mcpURL = mcpExecutableURLOverride
@@ -276,6 +305,7 @@ final class CodexAppServer: @unchecked Sendable {
             p.terminationHandler = { [weak self] proc in
                 self?.queue.async {
                     guard let self, self.process === proc else { return }
+                    self.processGeneration &+= 1
                     self.stdoutHandle?.readabilityHandler = nil
                     self.stderrHandle?.readabilityHandler = nil
                     self.process = nil
@@ -298,9 +328,13 @@ final class CodexAppServer: @unchecked Sendable {
                     self.discardedTurnIDs.removeAll()
                     self.earlyTurnMessages.removeAll()
                     self.pendingIdleThreadIDs.removeAll()
+                    for scopeID in self.conversations.values.compactMap(\.scopeID) {
+                        AssistantApprovalBroker.shared.cancel(scopeID: scopeID)
+                    }
                 }
             }
             try p.run()
+            processGeneration &+= 1
             self.process = p
             self.stdinHandle = stdin.fileHandleForWriting
             self.stdoutHandle = stdout.fileHandleForReading
@@ -380,7 +414,7 @@ final class CodexAppServer: @unchecked Sendable {
             "threadId": threadID,
             "input": input,
             "cwd": cwd,
-            "approvalPolicy": "never",
+            "approvalPolicy": ProviderPermissionPolicy.codexApprovalPolicy(),
             "sandboxPolicy": sandboxPolicy,
             "effort": effort,
         ])
@@ -475,6 +509,13 @@ final class CodexAppServer: @unchecked Sendable {
         let elapsed = activity.now - activity.startedAt
         let reachedSafetyLimit = elapsed
             >= AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+        if !reachedSafetyLimit,
+           AssistantApprovalBroker.shared.hasPending(scopeID: reducer.scopeID) {
+            queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.enforceInactivityTimeout(reducer: reducer, timeout: timeout)
+            }
+            return
+        }
         if !reachedSafetyLimit, idleFor < timeout {
             let delay = min(
                 max(timeout - idleFor, 0.001),
@@ -610,6 +651,18 @@ final class CodexAppServer: @unchecked Sendable {
     }
 
     private func handleMessage(_ msg: [String: Any]) {
+        // Bidirectional JSON-RPC server requests also carry an id. Handle the
+        // method first so a provider-chosen id cannot collide with one of our
+        // pending client requests and steal its continuation.
+        if let method = msg["method"] as? String,
+           let rawID = msg["id"],
+           let serverRequestID = ServerRequestID(rawID) {
+            handleServerRequest(
+                id: serverRequestID,
+                method: method,
+                params: (msg["params"] as? [String: Any]) ?? [:])
+            return
+        }
         if let id = msg["id"] as? Int, let continuation = pending.removeValue(forKey: id) {
             if let err = msg["error"] as? [String: Any] {
                 let text = (err["message"] as? String)
@@ -816,6 +869,86 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
+    private func handleServerRequest(
+        id: ServerRequestID,
+        method: String,
+        params: [String: Any]
+    ) {
+        guard CodexApprovalAdapter.supportedMethods.contains(method) else {
+            writeRPCError(
+                id: id, code: -32601,
+                message: "Infinitty does not support Codex server request \(method).")
+            return
+        }
+        guard let scopeID = scopeIDForServerRequest(params),
+              let request = CodexApprovalAdapter.request(
+                method: method, params: params, scopeID: scopeID) else {
+            writeRPCResult(
+                id: id,
+                result: CodexApprovalAdapter.response(
+                    method: method, params: params, decision: .cancel))
+            return
+        }
+
+        let generation = processGeneration
+        let turnID = (params["turnId"] as? String)
+            ?? (params["turn_id"] as? String)
+        if let turnID { activeTurns[turnID]?.recordActivity() }
+        AssistantApprovalBroker.shared.request(request) { [weak self] decision in
+            self?.queue.async { [weak self] in
+                guard let self, self.processGeneration == generation else { return }
+                if let turnID { self.activeTurns[turnID]?.recordActivity() }
+                self.writeRPCResult(
+                    id: id,
+                    result: CodexApprovalAdapter.response(
+                        method: method, params: params, decision: decision))
+            }
+        }
+    }
+
+    private func scopeIDForServerRequest(
+        _ params: [String: Any]
+    ) -> String? {
+        if let turnID = (params["turnId"] as? String)
+                ?? (params["turn_id"] as? String),
+           let scopeID = activeTurns[turnID]?.scopeID {
+            return scopeID
+        }
+        let threadID = (params["threadId"] as? String)
+            ?? (params["thread_id"] as? String)
+            ?? (params["conversationId"] as? String)
+        guard let threadID else { return nil }
+        return conversations.values.first {
+            !$0.isReleased && $0.threadID == threadID
+        }?.scopeID
+    }
+
+    private func writeRPCResult(
+        id: ServerRequestID,
+        result: [String: Any]
+    ) {
+        let object: [String: Any] = ["id": id.jsonValue, "result": result]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        else { return }
+        writeLine(String(decoding: data, as: UTF8.self) + "\n")
+    }
+
+    private func writeRPCError(
+        id: ServerRequestID,
+        code: Int,
+        message: String
+    ) {
+        let object: [String: Any] = [
+            "id": id.jsonValue,
+            "error": ["code": code, "message": message],
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        else { return }
+        writeLine(String(decoding: data, as: UTF8.self) + "\n")
+    }
+
     private static func notificationTurnID(
         method: String, params: [String: Any]
     ) -> String? {
@@ -945,6 +1078,9 @@ final class CodexAppServer: @unchecked Sendable {
         key: ConversationKey,
         release: Bool
     ) {
+        if case .identified(let conversationID) = key {
+            AssistantApprovalBroker.shared.cancel(scopeID: conversationID)
+        }
         let turns: [(threadID: String, turnID: String)] = queue.sync {
             if release, case .identified(let conversationID) = key {
                 tombstonedConversationIDs.insert(conversationID)

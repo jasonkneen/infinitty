@@ -9,6 +9,9 @@ final class ProviderPermissionPolicyTests: XCTestCase {
             ProviderPermissionPolicy.codexSandboxMode(environment: [:]),
             "workspace-write")
         XCTAssertEqual(
+            ProviderPermissionPolicy.codexApprovalPolicy(environment: [:]),
+            "on-request")
+        XCTAssertEqual(
             ProviderPermissionPolicy.claudePermissionArguments(environment: [:]),
             [])
         XCTAssertEqual(
@@ -27,6 +30,9 @@ final class ProviderPermissionPolicyTests: XCTestCase {
         XCTAssertEqual(
             ProviderPermissionPolicy.codexSandboxMode(environment: environment),
             "danger-full-access")
+        XCTAssertEqual(
+            ProviderPermissionPolicy.codexApprovalPolicy(environment: environment),
+            "never")
         XCTAssertEqual(
             ProviderPermissionPolicy.claudePermissionArguments(environment: environment),
             ["--dangerously-skip-permissions"])

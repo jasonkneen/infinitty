@@ -228,6 +228,106 @@ for line in sys.stdin:
             .visibleTerminal)
     }
 
+    func testCodexApprovalRequestIDCollisionRoutesThroughScopedBroker() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+pending = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    rid = req.get("id")
+    if method == "initialize":
+        result = {"userAgent": "fake-codex"}
+    elif method == "thread/start":
+        result = {"thread": {"id": "thread-approval"}}
+    elif method == "turn/start":
+        pending = {
+            "id": rid,
+            "policy": req["params"].get("approvalPolicy"),
+            "launchPolicy": "approval_policy=on-request" in sys.argv,
+        }
+        # Deliberately collide with the still-pending turn/start request id.
+        sys.stdout.write(json.dumps({
+            "id": rid,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": "thread-approval",
+                "turnId": "turn-approval",
+                "itemId": "command-approval",
+                "startedAtMs": 1,
+                "command": "swift test",
+                "cwd": "/tmp/project",
+                "reason": "Run focused tests",
+                "availableDecisions": [
+                    "accept", "acceptForSession", "decline", "cancel"
+                ],
+            },
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+    elif method is None and pending is not None and rid == pending["id"]:
+        decision = req["result"]["decision"]
+        sys.stdout.write(json.dumps({
+            "id": rid, "result": {"turn": {"id": "turn-approval"}}
+        }) + "\n")
+        text = decision + "|" + pending["policy"] + "|" + str(pending["launchPolicy"])
+        sys.stdout.write(json.dumps({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-approval", "turnId": "turn-approval",
+                "item": {"id": "answer", "type": "agentMessage", "text": text},
+            },
+        }) + "\n")
+        sys.stdout.write(json.dumps({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-approval",
+                "turn": {"id": "turn-approval", "status": "completed"},
+            },
+        }) + "\n")
+        sys.stdout.flush()
+        pending = None
+        continue
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let scope = "codex-approval-\(UUID().uuidString)"
+        let promptShown = expectation(description: "Codex approval shown")
+        let subscription = AssistantApprovalEventBus.subscribe(scopeID: scope) {
+            event in
+            guard event.state == .requested else { return }
+            XCTAssertEqual(event.request.kind, .commandExecution)
+            XCTAssertTrue(event.request.input?.contains("swift test") == true)
+            XCTAssertTrue(AssistantApprovalBroker.shared.resolve(
+                id: event.request.id,
+                scopeID: scope,
+                decision: .allowSession))
+            promptShown.fulfill()
+        }
+        defer {
+            subscription.cancel()
+            AssistantApprovalBroker.shared.cancel(scopeID: scope)
+        }
+        let bridge = CodexAppServer(executableURL: executable)
+        defer { bridge.stop() }
+
+        let text = try await bridge.turn(
+            prompt: "run tests",
+            cwd: "/tmp/project",
+            model: "test-model",
+            timeout: 2,
+            conversationID: scope)
+
+        await fulfillment(of: [promptShown], timeout: 2)
+        XCTAssertEqual(text, "acceptForSession|on-request|True")
+    }
+
     func testClaudeBridgeSerializesOverlappingTurns() async throws {
         let executable = try makePythonExecutable(#"""
 import json
