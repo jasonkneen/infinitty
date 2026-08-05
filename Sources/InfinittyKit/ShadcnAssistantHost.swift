@@ -83,6 +83,7 @@ struct AssistantRunStatusSnapshot: Equatable {
     let effortLabel: String
     let estimatedVisibleTokens: Int
     let usageLabel: String
+    let compactUsageLabel: String
     let usageHelp: String
     let costLabel: String?
     let queuedCount: Int
@@ -169,9 +170,11 @@ struct AssistantRunStatusSnapshot: Equatable {
            let usage = runState?.usage,
            let reported = Self.providerUsageLabel(usage) {
             usageLabel = reported.label
+            compactUsageLabel = reported.compactLabel
             usageHelp = reported.help
         } else {
             usageLabel = "~\(Self.compactCount(estimatedVisibleTokens)) visible tokens"
+            compactUsageLabel = "~\(Self.compactCount(estimatedVisibleTokens)) tokens"
             usageHelp = "Estimated from visible messages and tool data; the provider did not report current usage"
         }
         if runState?.usageProvenance == .providerReported,
@@ -213,16 +216,18 @@ struct AssistantRunStatusSnapshot: Equatable {
 
     private static func providerUsageLabel(
         _ usage: AssistantRunEvent.Usage
-    ) -> (label: String, help: String)? {
+    ) -> (label: String, compactLabel: String, help: String)? {
         if let used = usage.contextUsedTokens,
            let window = usage.contextWindowTokens {
             return (
                 "\(compactCount(used)) / \(compactCount(window)) context",
+                "\(compactCount(used))/\(compactCount(window)) ctx",
                 "Provider-reported context occupancy: \(used) of \(window) tokens")
         }
         if let used = usage.contextUsedTokens {
             return (
                 "\(compactCount(used)) context tokens",
+                "\(compactCount(used)) ctx",
                 "Provider-reported context occupancy: \(used) tokens")
         }
         if let total = usage.lastTokens?.total {
@@ -230,17 +235,22 @@ struct AssistantRunStatusSnapshot: Equatable {
             if let window = usage.contextWindowTokens {
                 help += "; model context capacity: \(window) tokens"
             }
-            return ("\(compactCount(total)) turn tokens", help)
+            return (
+                "\(compactCount(total)) turn tokens",
+                "\(compactCount(total)) turn",
+                help)
         }
         if let input = usage.lastTokens?.input,
            let output = usage.lastTokens?.output {
             return (
                 "\(compactCount(input)) in · \(compactCount(output)) out",
+                "\(compactCount(input)) in·\(compactCount(output)) out",
                 "Provider-reported latest-turn tokens: \(input) input and \(output) output")
         }
         if let total = usage.cumulativeTokens?.total {
             return (
                 "\(compactCount(total)) session tokens",
+                "\(compactCount(total)) session",
                 "Provider-reported cumulative session usage: \(total) tokens")
         }
         return nil
@@ -260,13 +270,14 @@ struct AssistantRunTopBarStatusContent: Equatable {
     let phase: AssistantRunPhase
     let activityLabel: String?
     let usageLabel: String
+    let compactUsageLabel: String
     let usageHelp: String
     let costLabel: String?
     let queuedLabel: String?
     let accessibilityValue: String
 
     var compactMetricsLabel: String {
-        [usageLabel, costLabel, queuedLabel]
+        [compactUsageLabel, costLabel, queuedLabel]
             .compactMap { $0 }
             .joined(separator: " · ")
     }
@@ -275,6 +286,7 @@ struct AssistantRunTopBarStatusContent: Equatable {
         phase = snapshot.phase
         activityLabel = snapshot.phase == .ready ? nil : snapshot.activityLabel
         usageLabel = snapshot.usageLabel
+        compactUsageLabel = snapshot.compactUsageLabel
         usageHelp = snapshot.usageHelp
         costLabel = snapshot.costLabel
         queuedLabel = snapshot.queuedCount > 0
@@ -400,7 +412,6 @@ struct AssistantRunTopBarStatus: View {
         let content = AssistantRunTopBarStatusContent(snapshot: snapshot)
         ViewThatFits(in: .horizontal) {
             statusItems(content, includeCost: true, includeQueue: true)
-            statusItems(content, includeCost: true, includeQueue: false)
             compactStatus(content)
         }
         // Combine only this accessory's telemetry, never the canonical top bar
@@ -426,7 +437,7 @@ struct AssistantRunTopBarStatus: View {
                 .minimumScaleFactor(0.65)
                 .allowsTightening(true)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
-                .help(content.usageHelp)
+                .help(content.accessibilityValue)
         }
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
     }

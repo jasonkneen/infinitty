@@ -1,6 +1,36 @@
 import AIElementsUI
+import AppKit
+import SwiftUI
 import XCTest
 @testable import InfinittyKit
+
+private struct AssistantStatusWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct AssistantStatusWidthProbe: View {
+    @ObservedObject var model: AIAssistantPanelModel
+    @ObservedObject var runState: AssistantRunPresentationState
+    let onWidth: (CGFloat) -> Void
+
+    var body: some View {
+        AssistantRunTopBarStatus(model: model, runState: runState)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: AssistantStatusWidthPreferenceKey.self,
+                        value: proxy.size.width)
+                }
+            }
+            .onPreferenceChange(AssistantStatusWidthPreferenceKey.self) {
+                onWidth($0)
+            }
+    }
+}
 
 @MainActor
 final class AssistantRunStatusTests: XCTestCase {
@@ -93,9 +123,10 @@ final class AssistantRunStatusTests: XCTestCase {
         XCTAssertEqual(content.phase, .ready)
         XCTAssertNil(content.activityLabel)
         XCTAssertEqual(content.usageLabel, "~0 visible tokens")
+        XCTAssertEqual(content.compactUsageLabel, "~0 tokens")
         XCTAssertNil(content.costLabel)
         XCTAssertNil(content.queuedLabel)
-        XCTAssertEqual(content.compactMetricsLabel, "~0 visible tokens")
+        XCTAssertEqual(content.compactMetricsLabel, "~0 tokens")
         XCTAssertTrue(content.accessibilityValue.contains("Codex · Sol"))
         XCTAssertTrue(content.accessibilityValue.contains("High effort"))
         XCTAssertTrue(content.accessibilityValue.contains("CHAT"))
@@ -132,7 +163,69 @@ final class AssistantRunStatusTests: XCTestCase {
         ])
         XCTAssertEqual(
             content.compactMetricsLabel,
-            "512 / 16.4K context · USD 0.01 · 2 queued")
+            "512/16.4K ctx · USD 0.01 · 2 queued")
+    }
+
+    func testComplete320PointTopBarProtectsActualStatusBeforeThreadTitle() {
+        let model = AIAssistantPanelModel()
+        model.threads = [
+            .init(
+                value: "one",
+                label: "A deliberately long thread title that must truncate"),
+            .init(value: "two", label: "Second thread"),
+        ]
+        model.activeThreadId = "one"
+        model.roster = [
+            .init(id: "claude", name: "Claude", detail: "Sonnet", isEnabled: true),
+            .init(id: "codex", name: "Codex", detail: "GPT", isEnabled: true),
+        ]
+        model.isThinking = true
+        model.queued = ["second", "third"]
+        let runState = AssistantRunPresentationState()
+        var telemetry = AssistantRunTelemetrySnapshot()
+        telemetry.beginRun()
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .usage(AssistantRunEvent.Usage(
+                contextUsedTokens: 512,
+                contextWindowTokens: 16_384,
+                cost: AssistantRunEvent.Cost(
+                    amount: Decimal(string: "0.01")!, currency: "usd")))))
+        runState.setTelemetry(telemetry)
+        let chrome = AIAssistantPanelChrome(
+            showsHeader: false,
+            rosterPresentation: .menu,
+            density: .compact)
+        var statusWidth: CGFloat = 0
+        let host = NSHostingView(
+            rootView: AIAssistantPanelTopBar(model: model, chrome: chrome) {
+                AssistantStatusWidthProbe(
+                    model: model,
+                    runState: runState,
+                    onWidth: { statusWidth = $0 })
+            })
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: 44)
+        let window = NSWindow(
+            contentRect: host.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.close() }
+
+        let measured = pollRunLoop(timeout: 1.0) {
+            host.layoutSubtreeIfNeeded()
+            window.layoutIfNeeded()
+            return statusWidth > 0
+        }
+
+        XCTAssertTrue(measured)
+        XCTAssertEqual(host.frame.width, 320, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(
+            statusWidth, 125,
+            "the actual usage/cost/queue status must win width before the title")
     }
 
     func testBrokerApprovalOutranksStreamingAndToolActivity() {
@@ -285,5 +378,17 @@ final class AssistantRunStatusTests: XCTestCase {
         XCTAssertLessThanOrEqual(
             telemetry.reasoningSummary?.utf8.count ?? .max, 12_000)
         XCTAssertTrue(telemetry.reasoningSummary?.contains("summary truncated") == true)
+    }
+
+    private func pollRunLoop(
+        timeout: TimeInterval,
+        condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if condition() { return true }
+            RunLoop.main.run(until: min(deadline, Date().addingTimeInterval(0.01)))
+        } while Date() < deadline
+        return condition()
     }
 }
