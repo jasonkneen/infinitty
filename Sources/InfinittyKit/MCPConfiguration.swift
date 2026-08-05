@@ -14,6 +14,8 @@ import Foundation
 /// `[mcp_servers.infinitty]` (TOML) and on `mcpServers.infinitty` (JSON).
 public enum MCPConfiguration {
     static let serverName = "infinitty"
+    static let claudePermissionPromptToolName =
+        "mcp__infinitty__infinitty_permission_prompt"
 
     private static let channelHookEvents = ["SessionStart", "UserPromptSubmit"]
 
@@ -225,7 +227,8 @@ public enum MCPConfiguration {
     static func claudeMCPJSON(
         binaryPath: String,
         appSocketPath: String? = nil,
-        profile: AgentExecutionProfile? = nil
+        profile: AgentExecutionProfile? = nil,
+        assistantScopeID: String? = nil
     ) -> Data? {
         var server: [String: Any] = ["command": binaryPath]
         var environment: [String: String] = [:]
@@ -236,6 +239,9 @@ public enum MCPConfiguration {
         }
         if let profile {
             environment["INFINITTY_MCP_PROFILE"] = profile.rawValue
+        }
+        if let assistantScopeID, !assistantScopeID.isEmpty {
+            environment["INFINITTY_ASSISTANT_SCOPE"] = assistantScopeID
         }
         if !environment.isEmpty {
             server["env"] = environment

@@ -47,6 +47,7 @@ for line in sys.stdin:
         "result": json.dumps({
             "cwd": os.getcwd(),
             "profile": os.environ.get("INFINITTY_MCP_PROFILE"),
+            "scope": os.environ.get("INFINITTY_ASSISTANT_SCOPE"),
             "args": sys.argv[1:],
             "session": event["session_id"],
         }),
@@ -61,7 +62,8 @@ for line in sys.stdin:
             at: workspace, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: workspace) }
 
-        let bridge = ClaudeBridge(executableURL: executable)
+        let bridge = ClaudeBridge(
+            executableURL: executable, mcpExecutableURL: executable)
         defer { bridge.stop() }
         let chatText = try await bridge.turn(
             prompt: "chat", system: "test", model: "test-model", timeout: 2,
@@ -76,13 +78,30 @@ for line in sys.stdin:
             },
             workspace.resolvingSymlinksInPath().path)
         XCTAssertEqual(chat["profile"] as? String, "workspace-chat")
+        XCTAssertEqual(chat["scope"] as? String, "profile-conversation")
         XCTAssertTrue(chatArgs.contains(
             #"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}}"#))
-        XCTAssertTrue(chatArgs.contains(
-            "Read Write Edit Glob Grep Bash BashOutput KillShell"))
+        XCTAssertTrue(chatArgs.contains {
+            $0.contains("Read Write Edit Glob Grep Bash BashOutput KillShell")
+                && $0.contains(MCPConfiguration.claudePermissionPromptToolName)
+        })
         XCTAssertTrue(chatArgs.contains("WebFetch WebSearch Task TodoWrite"))
         XCTAssertFalse(chatArgs.contains(
             "Bash BashOutput KillShell WebFetch WebSearch Task TodoWrite"))
+        XCTAssertEqual(
+            value(after: "--permission-prompt-tool", in: chatArgs),
+            MCPConfiguration.claudePermissionPromptToolName)
+        let mcpJSON = try XCTUnwrap(value(after: "--mcp-config", in: chatArgs))
+        let mcpRoot = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(mcpJSON.utf8))
+                as? [String: Any])
+        let mcpServer = try XCTUnwrap(
+            (mcpRoot["mcpServers"] as? [String: Any])?["infinitty"]
+                as? [String: Any])
+        let mcpEnvironment = try XCTUnwrap(mcpServer["env"] as? [String: String])
+        XCTAssertEqual(
+            mcpEnvironment["INFINITTY_ASSISTANT_SCOPE"],
+            "profile-conversation")
 
         let terminalText = try await bridge.turn(
             prompt: "terminal", system: "test", model: "test-model", timeout: 2,
@@ -92,7 +111,10 @@ for line in sys.stdin:
             JSONSerialization.jsonObject(with: Data(terminalText.utf8)) as? [String: Any])
         let terminalArgs = try XCTUnwrap(terminal["args"] as? [String])
         XCTAssertEqual(terminal["profile"] as? String, "visible-terminal")
-        XCTAssertTrue(terminalArgs.contains("Read Write Edit Glob Grep"))
+        XCTAssertTrue(terminalArgs.contains {
+            $0.contains("Read Write Edit Glob Grep")
+                && $0.contains(MCPConfiguration.claudePermissionPromptToolName)
+        })
         XCTAssertTrue(terminalArgs.contains {
             $0.contains("Bash BashOutput KillShell")
         })

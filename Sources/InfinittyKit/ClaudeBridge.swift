@@ -531,6 +531,12 @@ final class ClaudeBridge: @unchecked Sendable {
             if let resolvedEffort {
                 args += ["--effort", resolvedEffort]
             }
+            let mcpURL = mcpExecutableURLOverride
+                ?? MCPConfiguration.mcpExecutablePath().map(URL.init(fileURLWithPath:))
+            let permissionPromptTool = MCPConfiguration.claudePermissionPromptToolName
+            let usesApprovalBroker = mcpURL != nil
+                && eventScopeID?.isEmpty == false
+                && !ProviderPermissionPolicy.allowsDangerBypass()
             if ProcessInfo.processInfo.environment["INFINITTY_AI_ALLOW_SHELL"] != "1" {
                 switch profile {
                 case .workspaceChat:
@@ -540,7 +546,9 @@ final class ClaudeBridge: @unchecked Sendable {
                     args += [
                         "--settings",
                         #"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}}"#,
-                        "--allowedTools", "Read Write Edit Glob Grep Bash BashOutput KillShell",
+                        "--allowedTools",
+                        "Read Write Edit Glob Grep Bash BashOutput KillShell"
+                            + (usesApprovalBroker ? " \(permissionPromptTool)" : ""),
                         "--disallowedTools", "WebFetch WebSearch Task TodoWrite",
                     ]
                 case .visibleTerminal:
@@ -548,20 +556,27 @@ final class ClaudeBridge: @unchecked Sendable {
                     // the attached visible pane. Native file editing remains
                     // available, but hidden subprocess shell tools do not.
                     args += [
-                        "--allowedTools", "Read Write Edit Glob Grep",
+                        "--allowedTools", "Read Write Edit Glob Grep"
+                            + (usesApprovalBroker ? " \(permissionPromptTool)" : ""),
                         "--disallowedTools",
                         "Bash BashOutput KillShell WebFetch WebSearch Task TodoWrite",
                     ]
                 }
+            } else if usesApprovalBroker {
+                // `--allowedTools` grants this callback tool without limiting
+                // the legacy shell escape hatch's wider tool surface.
+                args += ["--allowedTools", permissionPromptTool]
             }
             args += ProviderPermissionPolicy.claudePermissionArguments()
-            let mcpURL = mcpExecutableURLOverride
-                ?? MCPConfiguration.mcpExecutablePath().map(URL.init(fileURLWithPath:))
+            if usesApprovalBroker {
+                args += ["--permission-prompt-tool", permissionPromptTool]
+            }
             if let mcpURL,
                let data = MCPConfiguration.claudeMCPJSON(
                    binaryPath: mcpURL.path,
                    appSocketPath: AppControlServer.ownSocketPath,
-                   profile: profile),
+                   profile: profile,
+                   assistantScopeID: eventScopeID),
                let json = String(data: data, encoding: .utf8) {
                 // Give the embedded assistant its terminal tools without
                 // depending on or mutating the user's global Claude config.
@@ -580,6 +595,9 @@ final class ClaudeBridge: @unchecked Sendable {
             // infinitty-mcp inherits this and targets THIS instance's socket.
             env["INFINITTY_APP_SOCKET"] = AppControlServer.ownSocketPath
             env["INFINITTY_MCP_PROFILE"] = profile.rawValue
+            if let eventScopeID, !eventScopeID.isEmpty {
+                env["INFINITTY_ASSISTANT_SCOPE"] = eventScopeID
+            }
             p.environment = env
             PetLog.log("ClaudeBridge.spawn model=\(resolvedModel) (cold start begins)")
             p.terminationHandler = { [weak self] proc in

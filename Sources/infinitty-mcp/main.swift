@@ -590,6 +590,116 @@ func chatCall(
     return infinittyRequest("chat \(encoded)")
 }
 
+let assistantScopeID = ProcessInfo.processInfo.environment[
+    "INFINITTY_ASSISTANT_SCOPE"]?.trimmingCharacters(
+        in: .whitespacesAndNewlines)
+
+private let maximumPermissionPreviewBytes = 12_000
+
+func permissionPromptCall(_ args: [String: Any]) -> String {
+    guard let scopeID = assistantScopeID, !scopeID.isEmpty else {
+        return permissionPromptResponse(
+            behavior: "deny",
+            message: "Infinitty has no scoped Chat approval surface for this request.")
+    }
+    let toolName = (args["tool_name"] as? String)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !toolName.isEmpty,
+          toolName != "mcp__infinitty__infinitty_permission_prompt" else {
+        return permissionPromptResponse(
+            behavior: "deny",
+            message: "Invalid or recursive permission request.")
+    }
+    let input = args["input"] as? [String: Any] ?? [:]
+    let preview = permissionInputPreview(input)
+    let payload: [String: Any] = [
+        "v": 1,
+        "id": UUID().uuidString.lowercased(),
+        "scopeID": scopeID,
+        "provider": "Claude",
+        "kind": "tool-use",
+        "toolName": toolName,
+        "input": preview,
+        "reason": "Claude wants permission to use \(toolName).",
+        "availableDecisions": ["allow-once", "allow-session", "deny"],
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+        return permissionPromptResponse(
+            behavior: "deny", message: "Infinitty could not encode the approval request.")
+    }
+    let encoded = data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    let responseText = infinittyRequest(
+        "assistant-approval \(encoded)", timeout: 611)
+    guard let responseData = responseText.data(using: .utf8),
+          let response = try? JSONSerialization.jsonObject(with: responseData)
+            as? [String: Any],
+          response["ok"] as? Bool == true,
+          let result = response["result"] as? [String: Any],
+          let decision = result["decision"] as? String else {
+        return permissionPromptResponse(
+            behavior: "deny",
+            message: permissionResponseError(responseText)
+                ?? "Infinitty approval was unavailable.")
+    }
+    switch decision {
+    case "allow-once", "allow-session":
+        return permissionPromptResponse(
+            behavior: "allow", updatedInput: input)
+    case "deny":
+        return permissionPromptResponse(
+            behavior: "deny", message: "The user denied this tool request.")
+    default:
+        return permissionPromptResponse(
+            behavior: "deny", message: "The approval request was cancelled or expired.")
+    }
+}
+
+func permissionPromptResponse(
+    behavior: String,
+    updatedInput: [String: Any]? = nil,
+    message: String? = nil
+) -> String {
+    var response: [String: Any] = ["behavior": behavior]
+    if let updatedInput { response["updatedInput"] = updatedInput }
+    if let message { response["message"] = message }
+    let data = (try? JSONSerialization.data(
+        withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes]))
+        ?? Data(#"{"behavior":"deny","message":"Invalid approval response."}"#.utf8)
+    return String(decoding: data, as: UTF8.self)
+}
+
+func permissionInputPreview(_ input: [String: Any]) -> String {
+    let data = (try? JSONSerialization.data(
+        withJSONObject: input, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]))
+        ?? Data("{}".utf8)
+    guard data.count > maximumPermissionPreviewBytes else {
+        return String(decoding: data, as: UTF8.self)
+    }
+    let marker = "\n…[parameters truncated]"
+    let budget = max(maximumPermissionPreviewBytes - marker.utf8.count, 0)
+    var preview = ""
+    var used = 0
+    for character in String(decoding: data, as: UTF8.self) {
+        let next = String(character)
+        guard used + next.utf8.count <= budget else { break }
+        preview.append(character)
+        used += next.utf8.count
+    }
+    return preview + marker
+}
+
+func permissionResponseError(_ responseText: String) -> String? {
+    guard let data = responseText.data(using: .utf8),
+          let response = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any],
+          let error = response["error"] as? [String: Any],
+          let message = error["message"] as? String else { return nil }
+    return message
+}
+
 // MARK: - tool definitions
 
 struct Tool {
@@ -658,6 +768,20 @@ let channelEndpointSchema: [String: Any] = [
 ]
 
 let tools: [Tool] = [
+    Tool(
+        name: "infinitty_permission_prompt",
+        description: "Internal Claude permission callback. It presents a scoped native "
+            + "Infinitty approval card and returns the user's decision.",
+        schema: [
+            "type": "object",
+            "properties": [
+                "tool_name": ["type": "string"],
+                "input": ["type": "object"],
+            ],
+            "required": ["tool_name", "input"],
+        ],
+        invoke: permissionPromptCall
+    ),
     Tool(
         name: "infinitty_instances",
         description: "List every live infinitty app instance with its stable process-lifetime "
@@ -1722,7 +1846,10 @@ let workspaceBlockedToolNames: Set<String> = [
     "infinitty_close",
 ]
 func toolIsAvailableForProfile(_ tool: Tool) -> Bool {
-    mcpToolProfile != "workspace-chat"
+    if tool.name == "infinitty_permission_prompt" {
+        return assistantScopeID?.isEmpty == false
+    }
+    return mcpToolProfile != "workspace-chat"
         || !workspaceBlockedToolNames.contains(tool.name)
 }
 let availableTools = tools.filter(toolIsAvailableForProfile)

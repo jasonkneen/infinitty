@@ -406,6 +406,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         signal(SIGPIPE, SIG_IGN)
         paneLifecycleLedger.start()
+        appControl.contextualHandler = { [weak self] context, request in
+            self?.handleContextualAppRequest(context, request)
+                ?? "error: shutting down"
+        }
         appControl.handler = { [weak self] request in
             self?.handleAppRequest(request) ?? "error: shutting down"
         }
@@ -6002,6 +6006,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     // MARK: - app control API (external apps / MCP)
+
+    private func handleContextualAppRequest(
+        _ context: AppControlRequestContext,
+        _ request: String
+    ) -> String {
+        let prefix = "assistant-approval "
+        guard request.hasPrefix(prefix) else { return handleAppRequest(request) }
+        guard let expectedPath = MCPConfiguration.mcpExecutablePath(),
+              let peerPath = AppControlServer.executablePath(
+                for: context.peerProcessID),
+              Self.sameExecutable(peerPath, expectedPath) else {
+            return AssistantApprovalControlCodec.response(
+                error: "Approval requests are accepted only from Infinitty's bundled MCP bridge.")
+        }
+        let encoded = String(request.dropFirst(prefix.count))
+        let approvalRequest: AssistantApprovalRequest
+        switch AssistantApprovalControlCodec.decodeRequest(encoded) {
+        case .success(let decoded): approvalRequest = decoded
+        case .failure(let error):
+            return AssistantApprovalControlCodec.response(
+                error: error.localizedDescription)
+        }
+        let decision = AssistantApprovalBroker.shared.requestBlocking(
+            approvalRequest)
+        return AssistantApprovalControlCodec.response(decision: decision)
+    }
+
+    private static func sameExecutable(_ lhs: String, _ rhs: String) -> Bool {
+        let canonical: (String) -> String = {
+            URL(fileURLWithPath: $0)
+                .resolvingSymlinksInPath()
+                .standardizedFileURL.path
+        }
+        return canonical(lhs) == canonical(rhs)
+    }
 
     /// Run work on the main thread from a socket thread, with a deadline.
     private func onMain<T>(_ work: @escaping () -> T) -> T? {

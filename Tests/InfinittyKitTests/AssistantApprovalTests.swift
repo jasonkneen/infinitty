@@ -135,6 +135,73 @@ final class AssistantApprovalTests: XCTestCase {
         XCTAssertEqual(decision.value, .cancel)
         XCTAssertTrue(broker.pendingRequests(scopeID: scope).isEmpty)
     }
+
+    func testBlockingTransportAdapterStillResolvesThroughMainActorUI() {
+        let broker = AssistantApprovalBroker()
+        let scope = "scope-\(UUID().uuidString)"
+        let request = AssistantApprovalRequest(
+            scopeID: scope, provider: "claude", kind: .toolUse,
+            toolName: "Edit")
+        let requested = expectation(description: "approval reached UI")
+        let finished = expectation(description: "blocking adapter returned")
+        let decision = LockedApprovalValue<AssistantApprovalDecision?>(nil)
+        let subscription = AssistantApprovalEventBus.subscribe(scopeID: scope) {
+            guard $0.state == .requested else { return }
+            requested.fulfill()
+            XCTAssertTrue(broker.resolve(
+                id: request.id, scopeID: scope, decision: .allowOnce))
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            decision.set(broker.requestBlocking(request, timeout: 1))
+            finished.fulfill()
+        }
+
+        wait(for: [requested, finished], timeout: 2)
+        XCTAssertEqual(decision.value, .allowOnce)
+        withExtendedLifetime(subscription) {}
+    }
+
+    func testControlCodecRoundTripsBoundedProviderRequest() throws {
+        let id = UUID().uuidString.lowercased()
+        let encoded = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "id": id,
+            "scopeID": "conversation#epoch=3",
+            "provider": "Claude",
+            "kind": "tool-use",
+            "toolName": "mcp__infinitty__infinitty_browser_open",
+            "input": #"{"url":"https://example.com"}"#,
+            "reason": "Claude wants to open a page.",
+            "availableDecisions": ["allow-once", "allow-session", "deny"],
+        ]))
+
+        let request = try XCTUnwrap(
+            try? AssistantApprovalControlCodec.decodeRequest(encoded).get())
+
+        XCTAssertEqual(request.id, id)
+        XCTAssertEqual(request.scopeID, "conversation#epoch=3")
+        XCTAssertEqual(request.kind, .toolUse)
+        XCTAssertEqual(request.toolName, "mcp__infinitty__infinitty_browser_open")
+        XCTAssertTrue(request.supportsSessionApproval)
+        XCTAssertTrue(AssistantApprovalControlCodec.response(decision: .allowOnce)
+            .contains("allow-once"))
+    }
+
+    func testControlCodecRejectsUnscopedOrNonUUIDRequests() throws {
+        let encoded = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "id": "not-an-id",
+            "scopeID": "",
+            "provider": "Claude",
+            "kind": "tool-use",
+            "toolName": "Write",
+        ]))
+
+        guard case .failure = AssistantApprovalControlCodec.decodeRequest(encoded) else {
+            return XCTFail("unscoped request should be rejected")
+        }
+    }
 }
 
 private final class LockedApprovalValue<Value>: @unchecked Sendable {

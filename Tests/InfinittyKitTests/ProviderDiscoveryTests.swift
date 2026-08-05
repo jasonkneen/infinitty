@@ -35,6 +35,117 @@ final class ProviderDiscoveryTests: XCTestCase {
         XCTAssertFalse(names.contains("infinitty_events"))
         XCTAssertFalse(names.contains("infinitty_run"))
         XCTAssertTrue(names.contains("infinitty_browser_list"))
+        XCTAssertFalse(names.contains("infinitty_permission_prompt"),
+                       "the internal callback must not appear without a Chat scope")
+    }
+
+    func testScopedWorkspaceMCPExposesInternalPermissionCallback() throws {
+        let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/debug/infinitty-mcp").path
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            throw XCTSkip("infinitty-mcp executable is not built")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        var environment = ProcessInfo.processInfo.environment
+        environment["INFINITTY_MCP_PROFILE"] = "workspace-chat"
+        environment["INFINITTY_ASSISTANT_SCOPE"] = "chat#epoch=4"
+        process.environment = environment
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        input.fileHandleForWriting.write(Data(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n".utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        let tools = try XCTUnwrap(result["tools"] as? [[String: Any]])
+        let names = Set(tools.compactMap { $0["name"] as? String })
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(names.contains("infinitty_permission_prompt"))
+    }
+
+    func testScopedMCPPermissionCallbackRoundTripsNativeDecision() throws {
+        let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/debug/infinitty-mcp").path
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            throw XCTSkip("infinitty-mcp executable is not built")
+        }
+        let socketPath = "/tmp/ia-\(getpid())-\(UUID().uuidString.prefix(8)).sock"
+        let server = AppControlServer(
+            path: socketPath, publishesCurrentLink: false)
+        server.handler = { request in
+            let prefix = "assistant-approval "
+            guard request.hasPrefix(prefix) else {
+                return AssistantApprovalControlCodec.response(
+                    error: "unexpected control request")
+            }
+            let encoded = String(request.dropFirst(prefix.count))
+            guard case .success(let approval) =
+                    AssistantApprovalControlCodec.decodeRequest(encoded),
+                  approval.scopeID == "chat#epoch=9",
+                  approval.provider == "Claude",
+                  approval.toolName == "Write",
+                  approval.input?.contains("README.md") == true else {
+                return AssistantApprovalControlCodec.response(
+                    error: "invalid approval payload")
+            }
+            return AssistantApprovalControlCodec.response(decision: .allowOnce)
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        var environment = ProcessInfo.processInfo.environment
+        environment["INFINITTY_MCP_PROFILE"] = "workspace-chat"
+        environment["INFINITTY_ASSISTANT_SCOPE"] = "chat#epoch=9"
+        environment["INFINITTY_APP_SOCKET"] = socketPath
+        process.environment = environment
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        let call: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": [
+                "name": "infinitty_permission_prompt",
+                "arguments": [
+                    "tool_name": "Write",
+                    "input": ["file_path": "README.md"],
+                ],
+            ],
+        ]
+        let requestData = try JSONSerialization.data(withJSONObject: call)
+        input.fileHandleForWriting.write(requestData + Data([0x0A]))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let response = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+        let permission = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(permission["behavior"] as? String, "allow")
+        XCTAssertEqual(
+            (permission["updatedInput"] as? [String: String])?["file_path"],
+            "README.md")
     }
 
 
@@ -214,7 +325,8 @@ final class ProviderDiscoveryTests: XCTestCase {
         let data = MCPConfiguration.claudeMCPJSON(
             binaryPath: "/b/infinitty-mcp",
             appSocketPath: "/tmp/infinitty-app-42.sock",
-            profile: .workspaceChat)
+            profile: .workspaceChat,
+            assistantScopeID: "chat#epoch=2")
         XCTAssertNotNil(data)
         let root = try? JSONSerialization.jsonObject(with: data!) as? [String: Any]
         let server = ((root?["mcpServers"] as? [String: Any])?["infinitty"]) as? [String: Any]
@@ -222,6 +334,7 @@ final class ProviderDiscoveryTests: XCTestCase {
         let env = server?["env"] as? [String: String]
         XCTAssertEqual(env?["INFINITTY_APP_SOCKET"], "/tmp/infinitty-app-42.sock")
         XCTAssertEqual(env?["INFINITTY_MCP_PROFILE"], "workspace-chat")
+        XCTAssertEqual(env?["INFINITTY_ASSISTANT_SCOPE"], "chat#epoch=2")
 
         // Without a socket path (persistent global config) there is no env.
         let plain = MCPConfiguration.claudeMCPJSON(binaryPath: "/b/infinitty-mcp")

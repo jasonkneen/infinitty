@@ -54,6 +54,8 @@ struct AppControlRequestContext {
 ///   channel-panel <base64url-json> -> list/snapshot room state, post a room/
 ///                               delegation-thread message, or assign a role;
 ///                               the former visual Channel pane is removed
+///   assistant-approval <base64url-json> -> trusted bundled-MCP request for a
+///                               scoped native provider approval decision
 ///   subscribe                -> connection stays open; JSON events stream in:
 ///                               pane-opened, pane-closed, title, marker,
 ///                               process (foreground process changed)

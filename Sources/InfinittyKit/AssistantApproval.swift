@@ -222,6 +222,26 @@ final class AssistantApprovalBroker: @unchecked Sendable {
 
     init() {}
 
+    /// Synchronous adapter for line-oriented local transports such as the MCP
+    /// app-control socket. Only the socket client thread waits; AppKit and the
+    /// provider bridge queues remain free to render and resolve the request.
+    func requestBlocking(
+        _ request: AssistantApprovalRequest,
+        timeout: TimeInterval = AssistantApprovalBroker.defaultTimeout
+    ) -> AssistantApprovalDecision {
+        let result = BlockingDecision()
+        let completed = DispatchSemaphore(value: 0)
+        self.request(request, timeout: timeout) { decision in
+            result.set(decision)
+            completed.signal()
+        }
+        if completed.wait(timeout: .now() + max(timeout, 0.001) + 1) != .success {
+            _ = cancel(id: request.id, scopeID: request.scopeID)
+            return .cancel
+        }
+        return result.value ?? .cancel
+    }
+
     func request(
         _ request: AssistantApprovalRequest,
         timeout: TimeInterval = AssistantApprovalBroker.defaultTimeout,
@@ -310,6 +330,24 @@ final class AssistantApprovalBroker: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func cancel(id: String, scopeID: String) -> Bool {
+        let removed: Pending?
+        lock.lock()
+        if let pending = pendingByID[id], pending.request.scopeID == scopeID {
+            removed = pendingByID.removeValue(forKey: id)
+        } else {
+            removed = nil
+        }
+        lock.unlock()
+        guard let removed else { return false }
+        removed.timeoutWorkItem?.cancel()
+        AssistantApprovalEventBus.publish(AssistantApprovalEvent(
+            request: removed.request, state: .cancelled, decision: .cancel))
+        removed.completion(.cancel)
+        return true
+    }
+
     func pendingRequests(scopeID: String) -> [AssistantApprovalRequest] {
         lock.lock()
         let requests = pendingByID.values
@@ -349,5 +387,100 @@ final class AssistantApprovalBroker: @unchecked Sendable {
             provider: request.provider.lowercased(),
             kind: request.kind,
             toolName: request.toolName)
+    }
+
+    private final class BlockingDecision: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: AssistantApprovalDecision?
+
+        var value: AssistantApprovalDecision? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+
+        func set(_ decision: AssistantApprovalDecision) {
+            lock.lock()
+            storage = decision
+            lock.unlock()
+        }
+    }
+}
+
+/// Bounded JSON framing used between the bundled MCP process and the app.
+enum AssistantApprovalControlCodec {
+    private static let maximumStringBytes = 16_000
+
+    enum DecodeError: LocalizedError {
+        case invalid(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalid(let message): message
+            }
+        }
+    }
+
+    static func decodeRequest(
+        _ encoded: String
+    ) -> Result<AssistantApprovalRequest, DecodeError> {
+        let payload: [String: Any]
+        switch BrowserControlCodec.decode(encoded) {
+        case .success(let decoded): payload = decoded
+        case .failure(let error):
+            return .failure(.invalid(error.localizedDescription))
+        }
+        guard (payload["v"] as? Int) == 1 else {
+            return .failure(.invalid("Approval request version is unsupported."))
+        }
+        guard let id = bounded(payload["id"] as? String),
+              UUID(uuidString: id) != nil else {
+            return .failure(.invalid("Approval request id must be a UUID."))
+        }
+        guard let scopeID = bounded(payload["scopeID"] as? String),
+              !scopeID.isEmpty else {
+            return .failure(.invalid("Approval request has no conversation scope."))
+        }
+        guard let provider = bounded(payload["provider"] as? String),
+              !provider.isEmpty else {
+            return .failure(.invalid("Approval request has no provider."))
+        }
+        guard let toolName = bounded(payload["toolName"] as? String),
+              !toolName.isEmpty else {
+            return .failure(.invalid("Approval request has no tool name."))
+        }
+        guard let rawKind = payload["kind"] as? String,
+              let kind = AssistantApprovalRequest.Kind(rawValue: rawKind) else {
+            return .failure(.invalid("Approval request kind is unsupported."))
+        }
+        let input = bounded(payload["input"] as? String)
+        let reason = bounded(payload["reason"] as? String)
+        let decisions = (payload["availableDecisions"] as? [String])?
+            .compactMap(AssistantApprovalDecision.init(rawValue:))
+            ?? [.allowOnce, .allowSession, .deny]
+        return .success(AssistantApprovalRequest(
+            id: id,
+            scopeID: scopeID,
+            provider: provider,
+            kind: kind,
+            toolName: toolName,
+            input: input,
+            reason: reason,
+            availableDecisions: decisions))
+    }
+
+    static func response(decision: AssistantApprovalDecision) -> String {
+        BrowserControlCodec.response(result: ["decision": decision.rawValue])
+    }
+
+    static func response(error: String) -> String {
+        BrowserControlCodec.response(
+            error: "approval_unavailable", message: error)
+    }
+
+    private static func bounded(_ value: String?) -> String? {
+        guard let value, !value.isEmpty,
+              value.utf8.count <= maximumStringBytes else { return nil }
+        return value
     }
 }
