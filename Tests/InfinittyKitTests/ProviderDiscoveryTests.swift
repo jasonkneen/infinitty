@@ -148,6 +148,59 @@ final class ProviderDiscoveryTests: XCTestCase {
             "README.md")
     }
 
+    func testAmpPermissionDelegateRoundTripsNativeSessionDecision() throws {
+        let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/debug/infinitty-mcp").path
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            throw XCTSkip("infinitty-mcp executable is not built")
+        }
+        let socketPath = "/tmp/ia-\(getpid())-\(UUID().uuidString.prefix(8)).sock"
+        let server = AppControlServer(
+            path: socketPath, publishesCurrentLink: false)
+        server.handler = { request in
+            let prefix = "assistant-approval "
+            guard request.hasPrefix(prefix),
+                  case .success(let approval) =
+                    AssistantApprovalControlCodec.decodeRequest(
+                        String(request.dropFirst(prefix.count))),
+                  approval.scopeID == "amp-chat#epoch=2",
+                  approval.provider == "Amp",
+                  approval.kind == .commandExecution,
+                  approval.toolName == "Bash",
+                  approval.input?.contains("swift test") == true,
+                  approval.availableDecisions == [
+                    .allowOnce, .allowSession, .deny,
+                  ] else {
+                return AssistantApprovalControlCodec.response(
+                    error: "invalid Amp approval payload")
+            }
+            return AssistantApprovalControlCodec.response(decision: .allowSession)
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        var environment = ProcessInfo.processInfo.environment
+        environment["INFINITTY_AMP_PERMISSION_HELPER"] = "1"
+        environment["INFINITTY_ASSISTANT_SCOPE"] = "amp-chat#epoch=2"
+        environment["INFINITTY_APP_SOCKET"] = socketPath
+        environment["AGENT_TOOL_NAME"] = "Bash"
+        process.environment = environment
+        let input = Pipe()
+        let error = Pipe()
+        process.standardInput = input
+        process.standardOutput = Pipe()
+        process.standardError = error
+        try process.run()
+        input.fileHandleForWriting.write(Data(#"{"cmd":"swift test"}"#.utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(error.fileHandleForReading.readDataToEndOfFile().isEmpty)
+    }
+
 
     // MARK: CLIExecutableResolver
 

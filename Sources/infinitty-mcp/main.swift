@@ -623,9 +623,30 @@ func permissionPromptCall(_ args: [String: Any]) -> String {
         "reason": "Claude wants permission to use \(toolName).",
         "availableDecisions": ["allow-once", "allow-session", "deny"],
     ]
-    guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+    let result = requestAssistantApproval(payload)
+    guard let decision = result.decision else {
         return permissionPromptResponse(
-            behavior: "deny", message: "Infinitty could not encode the approval request.")
+            behavior: "deny",
+            message: result.error ?? "Infinitty approval was unavailable.")
+    }
+    switch decision {
+    case "allow-once", "allow-session":
+        return permissionPromptResponse(
+            behavior: "allow", updatedInput: input)
+    case "deny":
+        return permissionPromptResponse(
+            behavior: "deny", message: "The user denied this tool request.")
+    default:
+        return permissionPromptResponse(
+            behavior: "deny", message: "The approval request was cancelled or expired.")
+    }
+}
+
+func requestAssistantApproval(
+    _ payload: [String: Any]
+) -> (decision: String?, error: String?) {
+    guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+        return (nil, "Infinitty could not encode the approval request.")
     }
     let encoded = data.base64EncodedString()
         .replacingOccurrences(of: "+", with: "-")
@@ -639,22 +660,80 @@ func permissionPromptCall(_ args: [String: Any]) -> String {
           response["ok"] as? Bool == true,
           let result = response["result"] as? [String: Any],
           let decision = result["decision"] as? String else {
-        return permissionPromptResponse(
-            behavior: "deny",
-            message: permissionResponseError(responseText)
+        return (
+            nil,
+            permissionResponseError(responseText)
                 ?? "Infinitty approval was unavailable.")
     }
-    switch decision {
-    case "allow-once", "allow-session":
-        return permissionPromptResponse(
-            behavior: "allow", updatedInput: input)
-    case "deny":
-        return permissionPromptResponse(
-            behavior: "deny", message: "The user denied this tool request.")
-    default:
-        return permissionPromptResponse(
-            behavior: "deny", message: "The approval request was cancelled or expired.")
+    return (decision, nil)
+}
+
+/// Amp's permission delegate contract runs this bundled executable once for
+/// each proposed tool call. It receives the tool input on stdin, the tool name
+/// in `AGENT_TOOL_NAME`, and communicates allow/reject through exit status.
+/// The actual user decision still comes from the scope-bound Chat broker.
+func runAmpPermissionHelper() -> Never {
+    let fail: (String) -> Never = { message in
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+        exit(2)
     }
+    guard let scopeID = assistantScopeID, !scopeID.isEmpty else {
+        fail("Infinitty has no scoped Chat approval surface for this Amp request.")
+    }
+    let environment = ProcessInfo.processInfo.environment
+    let toolName = environment["AGENT_TOOL_NAME"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !toolName.isEmpty else {
+        fail("Amp did not identify the tool requesting permission.")
+    }
+    let maximumInputBytes = 48_000
+    let data = FileHandle.standardInput.readData(ofLength: maximumInputBytes + 1)
+    guard data.count <= maximumInputBytes,
+          let input = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any] else {
+        fail("Amp supplied an invalid or oversized tool input.")
+    }
+    let kind = ampApprovalKind(toolName: toolName)
+    let payload: [String: Any] = [
+        "v": 1,
+        "id": UUID().uuidString.lowercased(),
+        "scopeID": scopeID,
+        "provider": "Amp",
+        "kind": kind,
+        "toolName": toolName,
+        "input": permissionInputPreview(input),
+        "reason": "Amp wants permission to use \(toolName).",
+        "availableDecisions": ["allow-once", "allow-session", "deny"],
+    ]
+    let result = requestAssistantApproval(payload)
+    switch result.decision {
+    case "allow-once", "allow-session":
+        exit(0)
+    case "deny":
+        fail("The user denied this Amp tool request.")
+    default:
+        fail(result.error ?? "The Amp approval request was cancelled or expired.")
+    }
+}
+
+func ampApprovalKind(toolName: String) -> String {
+    let normalized = toolName.lowercased()
+    if normalized == "bash"
+        || normalized.contains("terminal")
+        || normalized.contains("execute")
+        || normalized.contains("command")
+    {
+        return "command-execution"
+    }
+    if normalized.contains("edit")
+        || normalized.contains("write")
+        || normalized.contains("delete")
+        || normalized.contains("move")
+        || normalized.contains("patch")
+    {
+        return "file-change"
+    }
+    return "tool-use"
 }
 
 func permissionPromptResponse(
@@ -1881,6 +1960,10 @@ func isToolError(_ text: String) -> Bool {
         return false
     }
     return !ok
+}
+
+if ProcessInfo.processInfo.environment["INFINITTY_AMP_PERMISSION_HELPER"] == "1" {
+    runAmpPermissionHelper()
 }
 
 let terminalBootstrapResponse = mcpToolProfile == "workspace-chat"
