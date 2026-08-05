@@ -1543,13 +1543,164 @@ sys.exit(0)
             "got: \(reply)")
     }
 
+    func testAmpBridgeInjectsScopedPermissionSettingsAndEnvironment() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import os
+import sys
+
+settings_index = sys.argv.index("--settings-file")
+settings_path = sys.argv[settings_index + 1]
+with open(settings_path, "r", encoding="utf-8") as handle:
+    settings = json.load(handle)
+delegate = settings["amp.permissions"][0]
+result = {
+    "scope": os.environ.get("INFINITTY_ASSISTANT_SCOPE"),
+    "helperMode": os.environ.get("INFINITTY_AMP_PERMISSION_HELPER"),
+    "socket": os.environ.get("INFINITTY_APP_SOCKET"),
+    "settingsEnvironment": os.environ.get("AMP_SETTINGS_FILE"),
+    "settingsArgument": settings_path,
+    "dangerouslyAllowAll": settings.get("amp.dangerouslyAllowAll"),
+    "delegate": delegate,
+}
+sys.stdout.write(json.dumps({"type": "result", "result": json.dumps(result)}) + "\n")
+sys.stdout.flush()
+"""#)
+        let directory = executable.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = directory.path
+        environment.removeValue(forKey: "AMP_SETTINGS_FILE")
+        let helper = URL(fileURLWithPath: "/usr/bin/true")
+        let bridge = AmpBridge(
+            executableURL: executable,
+            permissionHelperURL: helper,
+            environment: environment)
+        let scope = "amp-approval-\(UUID().uuidString)"
+        defer { bridge.cancelConversation(scope) }
+
+        let reply = try await bridge.turn(
+            prompt: "hello",
+            conversationID: scope,
+            timeout: 2)
+        let result = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(reply.utf8))
+                as? [String: Any])
+        XCTAssertEqual(result["scope"] as? String, scope)
+        XCTAssertEqual(result["helperMode"] as? String, "1")
+        XCTAssertEqual(
+            result["socket"] as? String,
+            AppControlServer.ownSocketPath)
+        XCTAssertEqual(result["dangerouslyAllowAll"] as? Bool, false)
+        let delegate = try XCTUnwrap(result["delegate"] as? [String: Any])
+        XCTAssertEqual(delegate["tool"] as? String, "*")
+        XCTAssertEqual(delegate["action"] as? String, "delegate")
+        XCTAssertEqual(delegate["to"] as? String, helper.path)
+        let settingsPath = try XCTUnwrap(result["settingsArgument"] as? String)
+        XCTAssertEqual(result["settingsEnvironment"] as? String, settingsPath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: settingsPath))
+    }
+
+    func testAmpBridgePermissionDelegateUsesSharedApprovalAndPausesTimeout() async throws {
+        let helper = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/debug/infinitty-mcp")
+        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
+            throw XCTSkip("infinitty-mcp executable is not built")
+        }
+        let executable = try makePythonExecutable(#"""
+import json
+import os
+import subprocess
+import sys
+
+settings_path = sys.argv[sys.argv.index("--settings-file") + 1]
+with open(settings_path, "r", encoding="utf-8") as handle:
+    helper = json.load(handle)["amp.permissions"][0]["to"]
+environment = os.environ.copy()
+environment["AGENT_TOOL_NAME"] = "Bash"
+decision = subprocess.run(
+    [helper],
+    input=json.dumps({"cmd": "swift test --filter Amp"}).encode("utf-8"),
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    env=environment,
+)
+text = str(decision.returncode) + "|" + decision.stderr.decode("utf-8").strip()
+sys.stdout.write(json.dumps({"type": "result", "result": text}) + "\n")
+sys.stdout.flush()
+"""#)
+        let directory = executable.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let socketPath = "/tmp/ia-\(getpid())-\(UUID().uuidString.prefix(8)).sock"
+        let server = AppControlServer(
+            path: socketPath, publishesCurrentLink: false)
+        server.handler = { requestLine in
+            let prefix = "assistant-approval "
+            guard requestLine.hasPrefix(prefix),
+                  case .success(let request) =
+                    AssistantApprovalControlCodec.decodeRequest(
+                        String(requestLine.dropFirst(prefix.count))),
+                  request.provider == "Amp" else {
+                return AssistantApprovalControlCodec.response(
+                    error: "invalid Amp request")
+            }
+            let decision = AssistantApprovalBroker.shared.requestBlocking(
+                request, timeout: 3)
+            return AssistantApprovalControlCodec.response(decision: decision)
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = directory.path
+        environment["INFINITTY_CONTROL_SOCKET_OVERRIDE"] = socketPath
+        environment.removeValue(forKey: "AMP_SETTINGS_FILE")
+        let scope = "amp-live-approval-\(UUID().uuidString)"
+        let promptShown = expectation(description: "Amp approval shown")
+        let subscription = AssistantApprovalEventBus.subscribe(scopeID: scope) {
+            event in
+            guard event.state == .requested else { return }
+            XCTAssertEqual(event.request.provider, "Amp")
+            XCTAssertEqual(event.request.kind, .commandExecution)
+            XCTAssertEqual(event.request.toolName, "Bash")
+            XCTAssertTrue(event.request.input?.contains("swift test") == true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                XCTAssertTrue(AssistantApprovalBroker.shared.resolve(
+                    id: event.request.id,
+                    scopeID: scope,
+                    decision: .allowOnce))
+            }
+            promptShown.fulfill()
+        }
+        defer {
+            subscription.cancel()
+            AssistantApprovalBroker.shared.cancel(scopeID: scope)
+        }
+        let bridge = AmpBridge(
+            executableURL: executable,
+            permissionHelperURL: helper,
+            environment: environment)
+        defer { bridge.cancelConversation(scope) }
+
+        let reply = try await bridge.turn(
+            prompt: "run tests",
+            conversationID: scope,
+            timeout: 0.5)
+
+        await fulfillment(of: [promptShown], timeout: 2)
+        XCTAssertEqual(reply, "0|")
+    }
+
     func testAmpBridgeFailsFastWhenProviderExecutionFails() async throws {
         let executable = try makePythonExecutable(#"""
 import sys
 sys.exit(1)
 """#)
         defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
-        let bridge = AmpBridge(executableURL: executable)
+        let bridge = AmpBridge(
+            executableURL: executable,
+            permissionHelperURL: URL(fileURLWithPath: "/usr/bin/true"))
         let start = Date()
         do {
             _ = try await bridge.turn(prompt: "hi", timeout: 5)
@@ -1586,7 +1737,9 @@ sys.stdout.write(json.dumps({"type": "result", "result": "AB"}) + "\n")
 sys.stdout.flush()
 """#)
         defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
-        let bridge = AmpBridge(executableURL: executable)
+        let bridge = AmpBridge(
+            executableURL: executable,
+            permissionHelperURL: URL(fileURLWithPath: "/usr/bin/true"))
         let partial = expectation(description: "Amp streamed a visible partial")
         partial.assertForOverFulfill = false
 
@@ -1640,7 +1793,9 @@ sys.stdout.flush()
         let directory = executable.deletingLastPathComponent()
         defer { try? FileManager.default.removeItem(at: directory) }
         let marker = directory.appendingPathComponent("started")
-        let bridge = AmpBridge(executableURL: executable)
+        let bridge = AmpBridge(
+            executableURL: executable,
+            permissionHelperURL: URL(fileURLWithPath: "/usr/bin/true"))
         let turn = Task {
             try await bridge.turn(
                 prompt: "wait",

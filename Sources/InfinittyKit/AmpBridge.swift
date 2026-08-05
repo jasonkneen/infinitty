@@ -11,11 +11,19 @@ final class AmpBridge: @unchecked Sendable {
     static let shared = AmpBridge()
 
     private let executableURLOverride: URL?
+    private let permissionHelperURLOverride: URL?
+    private let environmentOverride: [String: String]?
     private let processLock = NSLock()
     private var processes: [String: Process] = [:]
     private var conversationGenerations: [String: UInt64] = [:]
-    init(executableURL: URL? = nil) {
+    init(
+        executableURL: URL? = nil,
+        permissionHelperURL: URL? = nil,
+        environment: [String: String]? = nil
+    ) {
         self.executableURLOverride = executableURL
+        self.permissionHelperURLOverride = permissionHelperURL
+        self.environmentOverride = environment
     }
 
     func turn(
@@ -38,13 +46,18 @@ final class AmpBridge: @unchecked Sendable {
                     generation,
                     processes.removeValue(forKey: conversationID))
             }
-            if previous?.isRunning == true { previous?.terminate() }
+            if previous?.isRunning == true {
+                AssistantApprovalBroker.shared.cancel(scopeID: conversationID)
+                previous?.terminate()
+            }
             conversationGeneration = generation
         } else {
             conversationGeneration = nil
         }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
+                let baseEnvironment = self.environmentOverride
+                    ?? ProcessInfo.processInfo.environment
                 guard let executable = self.executableURLOverride
                         ?? CLIExecutableResolver.resolve(.amp) else {
                     cont.resume(throwing: AmpBridgeError.processUnavailable(
@@ -62,6 +75,43 @@ final class AmpBridge: @unchecked Sendable {
                     full,
                     "--stream-json",
                 ]
+                var permissionSettingsURL: URL?
+                if conversationID != nil,
+                   !ProviderPermissionPolicy.allowsDangerBypass(
+                    environment: baseEnvironment) {
+                    let helper = self.permissionHelperURLOverride
+                        ?? MCPConfiguration.mcpExecutablePath().map {
+                            URL(fileURLWithPath: $0)
+                        }
+                    guard let helper,
+                          FileManager.default.isExecutableFile(
+                            atPath: helper.path) else {
+                        cont.resume(throwing: AmpBridgeError.approvalUnavailable(
+                            "Infinitty's bundled Amp permission helper is unavailable."))
+                        return
+                    }
+                    do {
+                        permissionSettingsURL = try AmpPermissionConfiguration
+                            .writeTemporarySettings(
+                                helperPath: helper.path,
+                                environment: baseEnvironment)
+                    } catch {
+                        cont.resume(throwing: AmpBridgeError.approvalUnavailable(
+                            error.localizedDescription))
+                        return
+                    }
+                    if let permissionSettingsURL {
+                        arguments.insert(
+                            contentsOf: ["--settings-file", permissionSettingsURL.path],
+                            at: 0)
+                    }
+                }
+                defer {
+                    if let permissionSettingsURL {
+                        try? FileManager.default.removeItem(
+                            at: permissionSettingsURL)
+                    }
+                }
                 if let model, !model.isEmpty {
                     // Amp's -m value is an agent mode discovered by the
                     // adapter, not a hard-coded model release identifier.
@@ -80,10 +130,19 @@ final class AmpBridge: @unchecked Sendable {
                         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
                     }
                 }
-                var env = ProcessInfo.processInfo.environment
+                var env = baseEnvironment
                 env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "")
                 env["NO_COLOR"] = "1"
                 env["TERM"] = "dumb"
+                if let conversationID,
+                   let permissionSettingsURL {
+                    env["AMP_SETTINGS_FILE"] = permissionSettingsURL.path
+                    env["INFINITTY_AMP_PERMISSION_HELPER"] = "1"
+                    env["INFINITTY_ASSISTANT_SCOPE"] = conversationID
+                    env["INFINITTY_APP_SOCKET"] = baseEnvironment[
+                        "INFINITTY_CONTROL_SOCKET_OVERRIDE"]
+                        ?? AppControlServer.ownSocketPath
+                }
                 process.environment = env
 
                 // Drain stderr on the side so a chatty child can't fill the
@@ -137,6 +196,7 @@ final class AmpBridge: @unchecked Sendable {
                 let inactivityBudget = max(timeout, 0.001)
                 let startedAt = ProcessInfo.processInfo.systemUptime
                 var timeoutError: AmpBridgeError?
+                var approvalWasPending = false
                 while process.isRunning {
                     let now = ProcessInfo.processInfo.systemUptime
                     let idleFor = now - collector.lastActivityUptime
@@ -145,6 +205,18 @@ final class AmpBridge: @unchecked Sendable {
                         >= AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds {
                         timeoutError = .maximumDurationExceeded
                         break
+                    }
+                    let approvalIsPending = AssistantApprovalBroker.shared
+                        .hasPending(scopeID: conversationID)
+                    if approvalIsPending {
+                        approvalWasPending = true
+                        collector.waitForActivity(timeout: 0.1)
+                        continue
+                    }
+                    if approvalWasPending {
+                        collector.recordActivity()
+                        approvalWasPending = false
+                        continue
                     }
                     if idleFor >= inactivityBudget {
                         timeoutError = .turnTimeout
@@ -205,6 +277,7 @@ final class AmpBridge: @unchecked Sendable {
     }
 
     func cancelConversation(_ conversationID: String) {
+        AssistantApprovalBroker.shared.cancel(scopeID: conversationID)
         processLock.lock()
         conversationGenerations[conversationID] =
             (conversationGenerations[conversationID] ?? 0) &+ 1
@@ -320,6 +393,13 @@ private final class AmpTurnOutputCollector: @unchecked Sendable {
         _ = activity.wait(timeout: .now() + timeout)
     }
 
+    func recordActivity() {
+        lock.lock()
+        activityUptime = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+        activity.signal()
+    }
+
     func waitForEOF(timeout: TimeInterval) {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         while true {
@@ -356,6 +436,7 @@ private final class AmpTurnOutputCollector: @unchecked Sendable {
 
 enum AmpBridgeError: LocalizedError {
     case processUnavailable(String)
+    case approvalUnavailable(String)
     case executionFailed(status: Int32)
     case turnTimeout
     case maximumDurationExceeded
@@ -372,6 +453,8 @@ enum AmpBridgeError: LocalizedError {
         switch self {
         case .processUnavailable(let m):
             return m
+        case .approvalUnavailable(let message):
+            return message
         case .executionFailed(let status):
             return "Amp provider execution failed with status \(status)."
         case .turnTimeout:
