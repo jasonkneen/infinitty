@@ -267,6 +267,7 @@ actor ModelDiscovery {
             return [
                 model("claude-fable-5", "Claude Fable 5", isDefault: true,
                       efforts: efforts),
+                model("claude-opus-5", "Claude Opus 5", efforts: efforts),
                 model("claude-opus-4-8", "Claude Opus 4.8", efforts: efforts),
                 model("claude-sonnet-5", "Claude Sonnet 5", efforts: efforts),
                 model("claude-haiku-4-5", "Claude Haiku 4.5", efforts: efforts),

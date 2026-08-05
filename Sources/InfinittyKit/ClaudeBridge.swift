@@ -712,8 +712,11 @@ final class ClaudeBridge: @unchecked Sendable {
                             sawFirstTextThisTurn = true
                             PetLog.log(String(format: "ClaudeBridge.first-text at +%.1fs", dt))
                         }
+                        // Each text block is a complete narration segment
+                        // (tool calls sit between them); a blank line makes
+                        // it a Markdown paragraph instead of gluing segments.
                         assistantAccumulator += text
-                        assistantAccumulator += "\n"
+                        assistantAccumulator += "\n\n"
                         emitPartialThrottled()
                     } else if kind == "tool_use" {
                         let name = block["name"] as? String ?? "?"

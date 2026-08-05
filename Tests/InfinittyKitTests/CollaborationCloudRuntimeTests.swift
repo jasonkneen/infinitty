@@ -118,6 +118,78 @@ final class CollaborationCloudRuntimeTests: XCTestCase {
             "on-request")
     }
 
+    /// Distinct `agentMessage` items are separate narration segments and
+    /// must join as Markdown paragraphs, for streamed deltas and folded
+    /// completed items alike — not glue into "…risks.The live diff…".
+    func testCodexAdapterSeparatesDistinctAgentMessageItemsIntoParagraphs()
+        async throws
+    {
+        let socket = ScriptedCodexSocket(responses: [
+            rpcResult(1, [
+                "account": ["id": "account-7"],
+            ]),
+            rpcResult(2, [
+                "thread": ["id": "thread-42"],
+            ]),
+            rpcResult(3, [
+                "turn": ["id": "turn-9"],
+            ]),
+            notification(
+                "item/agentMessage/delta",
+                [
+                    "turnId": "turn-9",
+                    "itemId": "message-1",
+                    "delta": "Checking the diff now.",
+                ]),
+            notification(
+                "item/agentMessage/delta",
+                [
+                    "turnId": "turn-9",
+                    "itemId": "message-2",
+                    "delta": "The entry is present.",
+                ]),
+            notification(
+                "item/completed",
+                [
+                    "turnId": "turn-9",
+                    "item": [
+                        "type": "agentMessage",
+                        "id": "message-3",
+                        "text": "Done.",
+                    ],
+                ]),
+            notification(
+                "turn/completed",
+                [
+                    "turn": [
+                        "id": "turn-9",
+                        "status": "completed",
+                    ],
+                ]),
+        ])
+        let sockets = ScriptedCodexSocketFactory(socket: socket)
+        let factory = CollaborationCloudRuntimeFactory(
+            environment: ["CODEX_CHANNEL_TOKEN": "secret-token"],
+            http: ScriptedCloudHTTPTransport(),
+            webSockets: sockets,
+            now: { Date(timeIntervalSince1970: 12_345) },
+            idFactory: { "fixed" })
+        let adapter = try factory.makeAdapter(
+            context: context(agent: codexAgent()))
+        _ = try await adapter.prepare()
+
+        let answer = try await adapter.turn(
+            system: "Channel channel-release; self Architect.",
+            user: "Implement the approved scope.",
+            approvalScopeID: nil,
+            timeout: 2,
+            onPartial: nil)
+
+        XCTAssertEqual(
+            answer,
+            "Checking the diff now.\n\nThe entry is present.\n\nDone.")
+    }
+
     func testCodexApprovalRequestUsesChatScopeAndExactRPCResponse()
         async throws
     {

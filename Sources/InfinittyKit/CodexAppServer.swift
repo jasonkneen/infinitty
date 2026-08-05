@@ -1129,6 +1129,12 @@ private final class TurnReducer: @unchecked Sendable {
     /// avoid double-counting when the same item later completes with
     /// its full text.
     private var streamedItemIDs = Set<String>()
+    /// Id of the item whose text currently ends the buffer. A turn emits
+    /// one `agentMessage` item per narration segment (between tool calls);
+    /// a delta for a NEW item is a distinct segment and must start a
+    /// Markdown paragraph, or consecutive segments render glued together
+    /// ("…remaining risks.The live diff confirms…").
+    private var lastItemID: String?
     private var onComplete: ((Result<String, Error>) -> Void)?
     private var onPartial: ((String) -> Void)?
     private var lastPartialAt: Double = 0
@@ -1171,8 +1177,12 @@ private final class TurnReducer: @unchecked Sendable {
     func append(_ chunk: String, itemID: String? = nil) {
         lock.withLock {
             guard completionResult == nil else { return }
+            if let itemID {
+                if itemID != lastItemID, !buffer.isEmpty { buffer += "\n\n" }
+                lastItemID = itemID
+                streamedItemIDs.insert(itemID)
+            }
             buffer += chunk
-            if let itemID { streamedItemIDs.insert(itemID) }
         }
     }
 
@@ -1181,8 +1191,9 @@ private final class TurnReducer: @unchecked Sendable {
     func recordCompletedItem(id: String, text: String) {
         lock.withLock {
             guard completionResult == nil, !streamedItemIDs.contains(id) else { return }
-            if !buffer.isEmpty { buffer += "\n" }
+            if !buffer.isEmpty { buffer += "\n\n" }
             buffer += text
+            lastItemID = id
         }
     }
 

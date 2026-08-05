@@ -578,6 +578,7 @@ actor CodexCloudAgentAdapter:
         activeTurnID = turnID
         var text = ""
         var streamedItems = Set<String>()
+        var lastItemID: String?
         while true {
             let message = try await nextNotification()
             let method = message["method"] as? String
@@ -601,10 +602,17 @@ actor CodexCloudAgentAdapter:
                 guard let delta = params["delta"] as? String else {
                     continue
                 }
-                text += delta
                 if let itemID = params["itemId"] as? String {
+                    // A new item id is a distinct agentMessage
+                    // (narration between tool calls); start a Markdown
+                    // paragraph or the segments render glued together.
+                    if itemID != lastItemID, !text.isEmpty {
+                        text += "\n\n"
+                    }
+                    lastItemID = itemID
                     streamedItems.insert(itemID)
                 }
+                text += delta
                 onPartial?(text)
             case "item/completed":
                 guard let item =
@@ -616,8 +624,9 @@ actor CodexCloudAgentAdapter:
                 if itemID.map({
                     !streamedItems.contains($0)
                 }) ?? true {
-                    if !text.isEmpty { text += "\n" }
+                    if !text.isEmpty { text += "\n\n" }
                     text += itemText
+                    if let itemID { lastItemID = itemID }
                     onPartial?(text)
                 }
             case "turn/completed":

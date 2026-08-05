@@ -713,6 +713,77 @@ for line in sys.stdin:
         XCTAssertFalse(reply.contains("PRIVATE"))
     }
 
+    /// Every `agentMessage` item is a distinct narration segment (tool
+    /// calls sit between them). Streamed item boundaries and folded
+    /// completed items must both become Markdown paragraphs — without
+    /// this, segments render glued together ("…risks.The live diff…").
+    func testCodexBridgeSeparatesDistinctAgentMessageItemsIntoParagraphs() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        result = {"userAgent": "fake-codex"}
+    elif method == "thread/start":
+        result = {"thread": {"id": "thread-1"}}
+    elif method == "turn/start":
+        turn_id = "turn-1"
+        result = {"turn": {"id": turn_id}}
+        sys.stdout.write(json.dumps({"id": request["id"], "result": result}) + "\n")
+        for item_id, delta in [
+            ("message-1", "Checking the diff "),
+            ("message-1", "now."),
+            ("message-2", "The entry "),
+            ("message-2", "is present."),
+        ]:
+            sys.stdout.write(json.dumps({
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "thread-1", "turnId": turn_id,
+                           "itemId": item_id, "delta": delta},
+            }) + "\n")
+        # Completed event for an item that already streamed must stay a
+        # no-op instead of duplicating its text.
+        sys.stdout.write(json.dumps({
+            "method": "item/completed",
+            "params": {"threadId": "thread-1", "turnId": turn_id,
+                       "item": {"type": "agentMessage", "id": "message-1",
+                                "text": "Checking the diff now."}},
+        }) + "\n")
+        sys.stdout.write(json.dumps({
+            "method": "item/completed",
+            "params": {"threadId": "thread-1", "turnId": turn_id,
+                       "item": {"type": "agentMessage", "id": "message-3",
+                                "text": "Done."}},
+        }) + "\n")
+        sys.stdout.write(json.dumps({
+            "method": "turn/completed",
+            "params": {"threadId": "thread-1",
+                       "turn": {"id": turn_id, "status": "completed"}},
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"id": request["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = CodexAppServer(executableURL: executable)
+        defer { bridge.stop() }
+
+        let reply = try await bridge.turn(
+            prompt: "hello", cwd: FileManager.default.currentDirectoryPath,
+            model: "test-model", timeout: 2)
+
+        XCTAssertEqual(
+            reply,
+            "Checking the diff now.\n\nThe entry is present.\n\nDone.")
+    }
+
     func testCodexBridgeIsolatesReusesAndReleasesConversationThreads() async throws {
         let executable = try makePythonExecutable(#"""
 import json
