@@ -427,6 +427,147 @@ final class CollaborationCloudRuntimeTests: XCTestCase {
         }
     }
 
+    func testClaudeToolConfirmationUsesChatScopeAndManagedEventShape()
+        async throws
+    {
+        let scopeID = "cloud-claude-scope"
+        AssistantApprovalBroker.shared.cancel(scopeID: scopeID)
+        defer {
+            AssistantApprovalBroker.shared.cancel(scopeID: scopeID)
+        }
+        let http = ScriptedCloudHTTPTransport(
+            responses: [
+                .init(
+                    statusCode: 201,
+                    data: json(["id": "session-confirmation"])),
+                .init(statusCode: 202, data: json([:])),
+                .init(statusCode: 202, data: json([:])),
+            ],
+            streams: [
+                .init(
+                    statusCode: 200,
+                    lines: lines([
+                        sse([
+                            "type": "agent.mcp_tool_use",
+                            "id": "tool-request-mcp",
+                            "name": "create_issue",
+                            "mcp_server_name": "github",
+                            "input": [
+                                "repository": "owner/project",
+                                "title": "Focused failure",
+                            ],
+                            "session_thread_id": "sthr_reviewer",
+                        ]),
+                        sse([
+                            "type": "session.status_idle",
+                            "stop_reason": [
+                                "type": "requires_action",
+                                "event_ids": ["tool-request-mcp"],
+                            ],
+                        ]),
+                        sse([
+                            "type": "agent.message",
+                            "id": "message-after-confirmation",
+                            "content": [[
+                                "type": "text",
+                                "text": "Tool request handled",
+                            ]],
+                        ]),
+                        sse([
+                            "type": "session.status_idle",
+                            "stop_reason": ["type": "end_turn"],
+                        ]),
+                    ])),
+            ])
+        let factory = CollaborationCloudRuntimeFactory(
+            environment: ["CLAUDE_CHANNEL_KEY": "key"],
+            http: http,
+            webSockets: ScriptedCodexSocketFactory(
+                socket: ScriptedCodexSocket(responses: [])))
+        let adapter = try factory.makeAdapter(
+            context: context(agent: claudeAgent()))
+        _ = try await adapter.prepare()
+        let bindings = CollaborationCloudChatBindings(adapter: adapter)
+        let outcomes = LockedValues<PetAssistant.AIOutcome>()
+        let completed = expectation(description: "managed turn completed")
+
+        bindings.backendRunner(
+            .claude(model: "opaque-claude-model"),
+            "system",
+            "user",
+            "/approved/worktree",
+            scopeID,
+            nil,
+            2,
+            { outcome in
+                outcomes.append(outcome)
+                completed.fulfill()
+            })
+
+        let approval = try await waitForApproval(scopeID: scopeID)
+        XCTAssertEqual(approval.provider, "Claude")
+        XCTAssertEqual(approval.kind, .toolUse)
+        XCTAssertEqual(approval.toolName, "github / create_issue")
+        XCTAssertEqual(
+            approval.availableDecisions,
+            [.allowOnce, .deny])
+        XCTAssertTrue(approval.input?.contains("owner/project") == true)
+        XCTAssertTrue(AssistantApprovalBroker.shared.resolve(
+            id: approval.id,
+            scopeID: scopeID,
+            decision: .allowOnce))
+
+        await fulfillment(of: [completed], timeout: 2)
+        guard case let .text(answer) = try XCTUnwrap(outcomes.values.first)
+        else {
+            return XCTFail("managed turn did not return text")
+        }
+        XCTAssertEqual(answer, "Tool request handled")
+        let requests = http.dataRequests
+        XCTAssertEqual(requests.count, 3)
+        let confirmationBody = try jsonObject(requests[2].httpBody)
+        let confirmation = try XCTUnwrap(
+            (confirmationBody["events"] as? [[String: Any]])?.first)
+        XCTAssertEqual(
+            confirmation["type"] as? String,
+            "user.tool_confirmation")
+        XCTAssertEqual(
+            confirmation["tool_use_id"] as? String,
+            "tool-request-mcp")
+        XCTAssertEqual(confirmation["result"] as? String, "allow")
+        XCTAssertEqual(
+            confirmation["session_thread_id"] as? String,
+            "sthr_reviewer")
+        XCTAssertNil(confirmation["deny_message"])
+    }
+
+    func testClaudeManagedApprovalDenialIsExplicitAndOneShot()
+        throws
+    {
+        let approval = try XCTUnwrap(
+            ClaudeManagedApprovalAdapter.approval(
+                event: [
+                    "type": "agent.tool_use",
+                    "id": "tool-request-bash",
+                    "name": "bash",
+                    "input": ["command": "swift test"],
+                ],
+                scopeID: "scope-denial"))
+
+        XCTAssertEqual(approval.request.kind, .commandExecution)
+        XCTAssertEqual(
+            approval.request.availableDecisions,
+            [.allowOnce, .deny])
+        let response = ClaudeManagedApprovalAdapter.confirmation(
+            for: approval,
+            decision: .deny)
+        XCTAssertEqual(response["result"] as? String, "deny")
+        XCTAssertEqual(
+            response["deny_message"] as? String,
+            "The user denied this tool request.")
+        XCTAssertNil(response["session_thread_id"])
+    }
+
     func testClaudeRequiresActionFailsClosed()
         async throws
     {

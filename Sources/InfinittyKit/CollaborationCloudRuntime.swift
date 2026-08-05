@@ -907,6 +907,7 @@ actor ClaudeManagedAgentAdapter:
     private let now: @Sendable () -> Date
     private let idFactory: @Sendable () -> String
     private var sessionID: String?
+    private var activeApprovalScopeID: String?
     private var closed = false
     private var turnInFlight = false
 
@@ -1001,6 +1002,7 @@ actor ClaudeManagedAgentAdapter:
                 "interrupt",
                 "resume",
                 "stream_preview",
+                "tool_confirmation",
             ],
             preparedAt: now())
     }
@@ -1024,34 +1026,58 @@ actor ClaudeManagedAgentAdapter:
                 "Claude adapter was not prepared")
         }
         turnInFlight = true
-        defer { turnInFlight = false }
-        return try await withThrowingTaskGroup(
-            of: String.self
-        ) { group in
-            group.addTask {
-                try await self.performTurn(
-                    sessionID: sessionID,
-                    prompt: system + "\n\n" + user,
-                    onPartial: onPartial)
+        activeApprovalScopeID = approvalScopeID
+        defer {
+            turnInFlight = false
+            activeApprovalScopeID = nil
+        }
+        do {
+            return try await withThrowingTaskGroup(
+                of: String.self
+            ) { group in
+                group.addTask {
+                    try await self.performTurn(
+                        sessionID: sessionID,
+                        prompt: system + "\n\n" + user,
+                        onPartial: onPartial)
+                }
+                group.addTask {
+                    let boundedTimeout = min(max(timeout, 1), 86_400)
+                    let nanoseconds = UInt64(
+                        boundedTimeout * 1_000_000_000)
+                    while true {
+                        try await Task.sleep(nanoseconds: nanoseconds)
+                        if await self.hasPendingApproval() {
+                            repeat {
+                                try await Task.sleep(nanoseconds: 100_000_000)
+                            } while await self.hasPendingApproval()
+                            continue
+                        }
+                        await self.interrupt()
+                        throw CollaborationCloudRuntimeError.timeout
+                    }
+                }
+                guard let result = try await group.next() else {
+                    throw CollaborationCloudRuntimeError.transport(
+                        "Claude turn produced no result")
+                }
+                group.cancelAll()
+                return result
             }
-            group.addTask {
-                let boundedTimeout = min(max(timeout, 1), 86_400)
-                let nanoseconds = UInt64(
-                    boundedTimeout * 1_000_000_000)
-                try await Task.sleep(nanoseconds: nanoseconds)
-                await self.interrupt()
-                throw CollaborationCloudRuntimeError.timeout
+        } catch {
+            if let approvalScopeID {
+                AssistantApprovalBroker.shared.cancel(
+                    scopeID: approvalScopeID)
             }
-            guard let result = try await group.next() else {
-                throw CollaborationCloudRuntimeError.transport(
-                    "Claude turn produced no result")
-            }
-            group.cancelAll()
-            return result
+            throw error
         }
     }
 
     func interrupt() async {
+        if let activeApprovalScopeID {
+            AssistantApprovalBroker.shared.cancel(
+                scopeID: activeApprovalScopeID)
+        }
         guard let sessionID else { return }
         _ = try? await sendEvents(
             sessionID: sessionID,
@@ -1062,6 +1088,10 @@ actor ClaudeManagedAgentAdapter:
 
     func close() async {
         closed = true
+        if let activeApprovalScopeID {
+            AssistantApprovalBroker.shared.cancel(
+                scopeID: activeApprovalScopeID)
+        }
     }
 
     private func performTurn(
@@ -1090,6 +1120,7 @@ actor ClaudeManagedAgentAdapter:
 
         var authoritative: [String] = []
         var previews: [String: String] = [:]
+        var toolApprovals: [String: ClaudeManagedToolApproval] = [:]
         for try await line in stream.lines {
             guard line.hasPrefix("data:") else { continue }
             let json = line.dropFirst(5)
@@ -1132,6 +1163,13 @@ actor ClaudeManagedAgentAdapter:
                 if let id = event["id"] as? String {
                     previews.removeValue(forKey: id)
                 }
+            case "agent.tool_use", "agent.mcp_tool_use":
+                guard let activeApprovalScopeID,
+                      let approval = ClaudeManagedApprovalAdapter.approval(
+                        event: event,
+                        scopeID: activeApprovalScopeID)
+                else { continue }
+                toolApprovals[approval.eventID] = approval
             case "session.status_idle",
                  "session.thread_status_idle":
                 if let stopReason =
@@ -1139,10 +1177,37 @@ actor ClaudeManagedAgentAdapter:
                    stopReason["type"] as? String
                         == "requires_action"
                 {
-                    throw CollaborationCloudRuntimeError
-                        .requiresAction(
-                            stopReason["event_ids"] as? [String]
-                                ?? [])
+                    let eventIDs =
+                        stopReason["event_ids"] as? [String] ?? []
+                    let approvals = eventIDs.compactMap {
+                        toolApprovals[$0]
+                    }
+                    guard !eventIDs.isEmpty,
+                          approvals.count == eventIDs.count,
+                          activeApprovalScopeID != nil
+                    else {
+                        throw CollaborationCloudRuntimeError
+                            .requiresAction(eventIDs)
+                    }
+                    var confirmations: [[String: Any]] = []
+                    for approval in approvals {
+                        let decision = await requestApproval(
+                            approval.request)
+                        confirmations.append(
+                            ClaudeManagedApprovalAdapter.confirmation(
+                                for: approval,
+                                decision: decision))
+                    }
+                    try await sendEvents(
+                        sessionID: sessionID,
+                        events: confirmations)
+                    for eventID in eventIDs {
+                        toolApprovals.removeValue(forKey: eventID)
+                    }
+                    continue
+                }
+                if type == "session.thread_status_idle" {
+                    continue
                 }
                 let result = authoritative.joined(
                     separator: "\n")
@@ -1164,6 +1229,21 @@ actor ClaudeManagedAgentAdapter:
         }
         throw CollaborationCloudRuntimeError.transport(
             "Claude event stream ended before idle")
+    }
+
+    private func requestApproval(
+        _ request: AssistantApprovalRequest
+    ) async -> AssistantApprovalDecision {
+        await withCheckedContinuation { continuation in
+            AssistantApprovalBroker.shared.request(request) { decision in
+                continuation.resume(returning: decision)
+            }
+        }
+    }
+
+    private func hasPendingApproval() -> Bool {
+        AssistantApprovalBroker.shared.hasPending(
+            scopeID: activeApprovalScopeID)
     }
 
     private func sendEvents(
