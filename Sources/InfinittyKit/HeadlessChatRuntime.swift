@@ -147,7 +147,12 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             requestInFlight: inFlight != nil,
             streamingThreadID:
                 inFlight?.threadID.uuidString.lowercased(),
-            workspaceDirectory: workspaceDirectory)
+            workspaceDirectory: workspaceDirectory,
+            terminalAvailable: false,
+            terminalAccessRequested: false,
+            terminalAccessEffective: false,
+            executionMode: AgentExecutionProfile.workspaceChat.rawValue,
+            ensembleAgents: [])
     }
 
     func metadata() -> (

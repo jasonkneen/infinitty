@@ -5,9 +5,18 @@ enum CodePalette {
     static let selectionFill = NSColor(calibratedWhite: 0.23, alpha: 1)
     /// Accent used for emphasized content and focused pane state. Config-driven
     /// (accent-color); defaults to indigo. Utility chrome itself stays neutral.
-    static let defaultAccent = NSColor(
-        calibratedRed: 0.39, green: 0.44, blue: 0.92, alpha: 1)
+    /// Packed form so the SwiftUI surfaces can derive their tint from the same
+    /// value the AppKit chrome uses (see `UISurfaceTheme`).
+    static let defaultAccentRGB: UInt32 = 0x6370_EB
+    static let defaultAccent = color(fromRGB: defaultAccentRGB)
     static var selectionAccent = defaultAccent
+
+    static func color(fromRGB rgb: UInt32) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255,
+            blue: CGFloat(rgb & 0xFF) / 255, alpha: 1)
+    }
     /// Saturated blue used only for the active pane card. The configurable
     /// accent can be intentionally muted for text controls, but pane focus must
     /// retain the crisp blue contrast shown in the window layout.
@@ -16,14 +25,7 @@ enum CodePalette {
 
     /// Apply the app config's accent-color (call before building chrome).
     static func apply(_ config: AppConfig) {
-        if let rgb = config.accentColor {
-            selectionAccent = NSColor(
-                srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255,
-                green: CGFloat((rgb >> 8) & 0xFF) / 255,
-                blue: CGFloat(rgb & 0xFF) / 255, alpha: 1)
-        } else {
-            selectionAccent = defaultAccent
-        }
+        selectionAccent = color(fromRGB: config.accentColor ?? defaultAccentRGB)
     }
     static let outline = NSColor(white: 1, alpha: 0.22)
     static let hairline = NSColor(white: 1, alpha: 0.08)

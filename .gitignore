@@ -16,3 +16,4 @@ npm/*.tgz
 notarize-*.zip
 pkg/
 /.fusion
+/.pi-subagents

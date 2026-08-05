@@ -134,12 +134,10 @@ events as JSON lines. Socket-driven input lights the agent glow.
 Every Chat pane has a stable process-local identity (`Chat 1`, `Chat 2`, …).
 Drag the circular connector in one pane header onto another pane's connector to
 create or join a Channel. Linked headers show a visible badge such as
-`Channel 1 · 2`, not color alone. Click that badge to open the Channel as a
-first-class movable pane. Its room identity remains visible in the pane header;
-the workspace exposes named participants, connected status, editable roles,
-room and delegation-thread conversations, plan/dependency status,
-responsibility claims, and the durable audit revision. Narrow panes switch to
-People / Room / Plan sections so the workspace remains usable beside Chats.
+`Channel 1 · 2`, not color alone. Clicking the badge opens a compact membership
+summary; Channel is durable coordination state, not a separate pane. Chats,
+terminals, Files, Browser, and agent surfaces can all join the same room while
+remaining focused interfaces for their own work.
 
 For linked Chat panes, Channel membership is part of every real provider turn:
 the agent receives its own participant name, the Channel name, exact peer
@@ -224,10 +222,9 @@ Visual and headless processes use one local Channel coordinator and one
 tamper-evident journal. Linking endpoints from different Infinitty instances
 therefore updates the same authoritative room; live instances receive the new
 projection, and another process replays the journal and takes over if the
-coordinator owner exits. `infinitty_channel_panel` exposes the same
-list/open/focus/close/snapshot/thread-selection/message/role controls through
-MCP; a headless process keeps a virtual Channel pane with the same stable
-`channel-panel-<channel-id>` identity.
+coordinator owner exits. `infinitty_channel_panel` is retained as a compatible
+room-data adapter for list/snapshot/message/role operations; it no longer opens,
+focuses, or closes a visual Channel pane.
 
 The local audit surface is independently queryable through
 `infinitty_audit_query`. Pages contain bounded summaries, are pinned to the
@@ -331,7 +328,7 @@ The signed app, release tarball, and npm package include both
 `infinitty_run` is the headline: it types the command, waits for the OSC 133
 done-marker, and returns `{"exitCode": …, "output": …}` in one tool call.
 `infinitty_list_panes` returns stable numeric terminal ids and string handles
-for Chat, Channel, Files, and Browser panes. The same handle works with
+for Chat, Files, Browser, and agent-surface panes. The same handle works with
 `infinitty_focus`, `infinitty_split`, `infinitty_close`, and event filtering in
 both visual and headless instances.
 
@@ -396,7 +393,8 @@ Config file at `~/.config/infinitty/infinitty.conf` (or `~/.infinitty.conf`), se
 font         = Berkeley Mono   # any installed font (default: SF Mono)
 font-style   = Thin            # face style: Thin, Light, Medium, SemiBold, ...
 font-thicken = false           # ghostty-style stroke thickening
-font-size    = 13              # points
+font-size    = 13              # terminal glyphs, points
+# interface-font-size = 15     # Chat + ShadKit UI; also available in Settings
 margin       = 8               # window content margin, points
 line-spacing = 1.0             # line height multiplier
 kerning      = 1.0             # cell width multiplier (letter spacing)
@@ -432,9 +430,9 @@ Font to use one everywhere.
   ⌘1–8 select by position, ⌘9 selects the last tab, and the tab bar "+" works;
   hold ⌘ to reveal the numbers in tab titles; ⇧⌘T renames the active tab
 - **Splits**: ⌘D split right, ⇧⌘D split down; right-click either split button
-  to choose Terminal, Files, Chat, Channel, or Browser. Splits nest arbitrarily;
+  to choose Terminal, Files, Chat, or Browser. Splits nest arbitrarily;
   Files contains its own Files/Changes switch, and each main tab can keep one
-  Files pane plus multiple independently named Chat and Channel panes alongside
+  Files pane plus multiple independently named Chat panes alongside
   any number of terminals. ⌘W closes the focused pane (the tab closes when its last
   terminal exits); ⇧⌥←/→/↑/↓ focuses
   and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
@@ -513,27 +511,37 @@ Font to use one everywhere.
   Infinitty's running command, exit status (OSC 133), and `infinitty_activity`
   socket/MCP messages continue to appear in the same indicator.
 
-### Mixed Files, Chat, and Channel panes
+### Mixed Files, Chat, Browser, and terminal panes
 
-Files, Chat, and Channel are first-class leaves in the same split tree as
-terminals. The
-legacy `toggle-sidebar` socket command toggles the Files pane for compatibility.
+Files, Chat, and Browser are first-class leaves in the same split tree as
+terminals. Durable Channels connect those leaves without adding another panel.
+The legacy `toggle-sidebar` socket command toggles the Files pane for compatibility.
 
 - **Files / Changes**: One pane with a compact internal switch. Files provides
   directory search, syntax-highlighted previews, and breadcrumb navigation;
   Changes provides Git status, diffs, staging, and unstaging.
-- **Chat**: AI agent for conversation and terminal control. Ask questions about
-  your code, execute shell commands, read the screen, or switch between panes.
-  Choose your AI model (Claude, Codex, or Apple Intelligence) via the dropdown,
-  and enable reasoning/thinking via the effort selector for deeper analysis.
-- **Channel**: shared room coordination for linked panes. Click a linked
-  Channel badge to open it, then steer the room or an individual delegation
-  thread, assign participant roles, and inspect plan, responsibility, and audit
-  state without merging Chat transcripts.
+- **Chat**: Workspace-aware coding agent by default. It can inspect and edit the
+  selected checkout with provider-native coding tools, but cannot inspect or
+  control a terminal unless the explicit Chat/Terminal control is enabled; the
+  control stays in Chat mode when no terminal is attached. Terminal mode fails
+  closed for providers whose visible-terminal integration cannot be enforced.
+  Add multiple configured agents to one thread with `/add-agent claude`,
+  `/add-agent codex`, an exact provider/model alias, or the compact `+` beside
+  the model picker. Agents receive short automatic names from their models
+  (`@sonnet`, `@opus`, `@sol`) and subtle stable transcript colours. Ordinary
+  prompts fan out to the ordered roster sequentially; `@alias` targets selected
+  members. Agents can also `@mention` one another: a mention triggers a
+  sequential peer response, bounded to one follow-up per agent per user turn so
+  collaboration cannot recurse indefinitely. Replies share one transcript,
+  show their author, and receive bounded explicitly-untrusted peer context.
+- **Channel connections**: drag one pane connector onto another to share room
+  context, agent handoffs, Browser identity/control, and Files path-sync
+  behavior. Click the badge for a compact membership summary. Room, plan,
+  responsibility, role, and audit data remain available through MCP/headless
+  control without a dedicated visual pane.
 
-Each main tab owns its Files/Chat/Channel panes and nested layout independently.
-Files and Chat follow the terminal focused in that tab; Channel remains bound
-to its durable room ID when moved, closed, or reopened.
+Each main tab owns its Files/Chat/Browser panes and nested layout independently.
+Channel membership stays bound to the connected pane endpoints.
 
 ### Pane lifecycle ledger
 

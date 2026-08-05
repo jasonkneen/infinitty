@@ -52,6 +52,10 @@ final class TerminalView: NSView {
         return header
     }()
     private let paneOutline = PaneOutlineView()
+    /// Confines the pane's tinted fill (and its glyphs) to the card. Everything
+    /// outside is left untouched so the gutter is literally the window chrome —
+    /// same color, same translucency as the title bar.
+    private let cardMask = CAShapeLayer()
 
     var paneTitle: String {
         get { paneHeader.title }
@@ -62,15 +66,18 @@ final class TerminalView: NSView {
         paneOutline.isSelected = selected
     }
 
-    func setPaneAccent(_ color: NSColor) {
-        paneOutline.accentColor = color
+    /// One tint drives the whole card: the renderer fills the pane with it
+    /// behind the glyphs, the outline edges it with the same color.
+    func setPaneAccent(_ color: NSColor?) {
+        paneOutline.accentColor = color ?? Renderer.defaultPaneTint
+        renderer?.setPaneTint(color)
     }
 
     func setChannel(name: String?, color: NSColor?, memberCount: Int) {
         paneHeader.setChannel(name: name, color: color, memberCount: memberCount)
     }
 
-    var paneAccentColorForTesting: NSColor { paneOutline.accentColor }
+    var paneAccentColorForTesting: NSColor { paneOutline.accentColorForTesting }
 
     private var scrollAccumulator: CGFloat = 0
     private var mouseScrollAccumulator: CGFloat = 0
@@ -238,6 +245,8 @@ final class TerminalView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .never
         registerForDraggedTypes([.fileURL, .string])
+        cardMask.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
+        layer?.mask = cardMask
         addSubview(paneOutline)
         addSubview(paneHeader)
         paneHeader.onToggleTodos = { [weak self] in self?.toggleTodoPopover() }
@@ -324,6 +333,11 @@ final class TerminalView: NSView {
             x: leading, y: bottom,
             width: max(bounds.width - leading - trailing, 0),
             height: max(bounds.height - top - bottom, 0))
+        cardMask.frame = bounds
+        cardMask.path = CGPath(
+            roundedRect: paneOutline.frame,
+            cornerWidth: PaneMetrics.cornerRadius,
+            cornerHeight: PaneMetrics.cornerRadius, transform: nil)
         paneHeader.frame = NSRect(
             x: leading,
             y: max(bounds.height - obstruction - PaneHeaderView.height - top, bottom),
@@ -380,9 +394,9 @@ final class TerminalView: NSView {
         // The renderer adds its side inset (15pt+) below this too; pull the
         // grid up so the first row sits ~7pt under the header hairline.
         if window.styleMask.contains(.fullSizeContentView) {
-            renderer.topInsetPoints = paneTopObstructionPoints() + PaneHeaderView.height - 5
+            renderer.topInsetPoints = paneTopObstructionPoints() + PaneMetrics.terminalTopOffset
         } else {
-            renderer.topInsetPoints = PaneHeaderView.height - 5
+            renderer.topInsetPoints = PaneMetrics.terminalTopOffset
         }
 
         terminal.setCellPixelSize(

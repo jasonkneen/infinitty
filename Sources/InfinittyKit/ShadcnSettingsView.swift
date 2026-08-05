@@ -19,10 +19,18 @@ struct ShadcnSettingsView: View {
         self.onSave = onSave
     }
 
-    /// The theme the *whole settings window* renders in, so picking a base
-    /// colour previews itself immediately.
+    /// The theme the *whole settings window* renders in — derived from the
+    /// terminal colours, so editing them previews itself immediately.
     private var theme: ShadcnTheme {
-        ShadcnBaseColor.named(config.uiTheme).theme
+        var theme = UISurfaceTheme.theme(for: config)
+        theme.typography = theme.typography.scaled(by: config.interfaceFontSize / 15)
+        return theme
+    }
+
+    /// Secondary label colour, taken from the same derived palette as the rest
+    /// of the window.
+    private var mutedForeground: Color {
+        theme.palette(for: UISurfaceTheme.colorScheme(for: config)).mutedForeground
     }
 
     var body: some View {
@@ -50,7 +58,6 @@ struct ShadcnSettingsView: View {
                 VStack(alignment: .leading, spacing: Space.x6) {
                     switch panel {
                     case .appearance: appearancePanel
-                    case .theme: themePanel
                     case .terminal: terminalPanel
                     case .pet: petPanel
                     case .agents: agentsPanel
@@ -75,7 +82,20 @@ struct ShadcnSettingsView: View {
 
     private var appearancePanel: some View {
         Group {
-            SettingsSection("Font") {
+            SettingsSection("Interface") {
+                ShadcnSliderRow(
+                    "Text size",
+                    value: doubleBinding(\.interfaceFontSize),
+                    in: 11...22,
+                    step: 1
+                ) { "\(Int($0))pt" }
+                Text("Applies to Chat messages, controls, menus, and ShadKit settings.")
+                    .font(theme.typography.sans(theme.typography.sm))
+                    .foregroundStyle(
+                        mutedForeground)
+            }
+
+            SettingsSection("Terminal font") {
                 SettingsRow("Family") {
                     ShadcnTextField(
                         "System",
@@ -110,37 +130,6 @@ struct ShadcnSettingsView: View {
                 SettingsColorRow("Cursor", value: colorBinding(\.cursorColor))
                 SettingsColorRow("Selection", value: colorBinding(\.selectionBackground))
                 SettingsColorRow("Accent", value: colorBinding(\.accentColor))
-            }
-        }
-    }
-
-    private var themePanel: some View {
-        Group {
-            SettingsSection("Base colour") {
-                Text("Drives every SwiftUI surface — chat, settings, panels.")
-                    .font(theme.typography.sans(theme.typography.sm))
-                    .foregroundStyle(ShadcnBaseColor.named(config.uiTheme).light.mutedForeground.color)
-
-                ShadcnWrapLayout(spacing: Space.x3, lineSpacing: Space.x3) {
-                    ForEach(ShadcnBaseColor.all) { base in
-                        ThemeSwatch(
-                            base: base,
-                            isSelected: base.id == ShadcnBaseColor.named(config.uiTheme).id
-                        ) {
-                            config.uiTheme = base.id
-                        }
-                    }
-                }
-            }
-
-            SettingsSection("Bring your own") {
-                Text(
-                    "Any shadcn or tweakcn theme works — paste its `:root` block into "
-                        + "ui-theme in infinitty.conf. OKLCH, HSL and hex are all accepted."
-                )
-                .font(theme.typography.sans(theme.typography.sm))
-                .foregroundStyle(ShadcnBaseColor.named(config.uiTheme).light.mutedForeground.color)
-                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -234,7 +223,7 @@ struct ShadcnSettingsView: View {
                     "Registers Infinitty MCP and installs idempotent Claude hooks. "
                         + "The shared launcher also supports other CLIs.")
                     .font(theme.typography.sans(theme.typography.sm))
-                    .foregroundStyle(ShadcnBaseColor.named(config.uiTheme).light.mutedForeground.color)
+                    .foregroundStyle(mutedForeground)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -294,14 +283,13 @@ struct ShadcnSettingsView: View {
 // MARK: - Panels
 
 enum SettingsPanel: String, CaseIterable, Identifiable {
-    case appearance, theme, terminal, pet, agents, about
+    case appearance, terminal, pet, agents, about
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .appearance: "Appearance"
-        case .theme: "Theme"
         case .terminal: "Terminal"
         case .pet: "Pet"
         case .agents: "Agents"
@@ -312,7 +300,6 @@ enum SettingsPanel: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .appearance: "paintpalette"
-        case .theme: "swatchpalette"
         case .terminal: "terminal"
         case .pet: "pawprint"
         case .agents: "sparkles"
@@ -484,45 +471,6 @@ private struct SettingsColorRow: View {
 
             Spacer(minLength: 0)
         }
-    }
-}
-
-private struct ThemeSwatch: View {
-    let base: ShadcnBaseColor
-    let isSelected: Bool
-    let action: () -> Void
-
-    @Environment(\.shadcnPalette) private var palette
-    @Environment(\.shadcnTheme) private var theme
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: Space.x2) {
-                // Light and dark halves, so the choice reads at a glance.
-                HStack(spacing: 0) {
-                    base.light.background.color
-                    base.light.primary.color
-                    base.dark.background.color
-                    base.dark.primary.color
-                }
-                .frame(width: 96, height: 40)
-                .clipShape(
-                    RoundedRectangle(cornerRadius: theme.radius.md, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: theme.radius.md, style: .continuous)
-                        .strokeBorder(
-                            isSelected ? palette.ring : palette.border,
-                            lineWidth: isSelected ? 2 : 1)
-                )
-
-                Text(base.name)
-                    .font(theme.typography.sans(theme.typography.xs))
-                    .foregroundStyle(
-                        isSelected ? palette.foreground : palette.mutedForeground)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.shadcnBare)
     }
 }
 

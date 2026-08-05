@@ -24,10 +24,6 @@ public enum HeadlessAppHostError: LocalizedError {
     }
 }
 
-private struct HeadlessChannelPanelState {
-    var selectedThreadID: String?
-}
-
 /// Renderer-free Infinitty runtime.
 ///
 /// This host deliberately owns only terminal engines, PTYs, control sockets,
@@ -59,12 +55,10 @@ public final class HeadlessAppHost: @unchecked Sendable {
 
     private var sessions: [Int: HeadlessTerminalSession] = [:]
     private var chats: [String: HeadlessChatRuntime] = [:]
-    private var channelPanels: [String: HeadlessChannelPanelState] = [:]
     private var nextSessionID = 1
     private var nextChatID = 1
     private var focusedSessionID: Int?
     private var focusedChatID: String?
-    private var focusedChannelID: String?
     private var provisioningProposalIDs = Set<String>()
     private var activeProposalIDs = Set<String>()
     private var started = false
@@ -193,10 +187,8 @@ public final class HeadlessAppHost: @unchecked Sendable {
         let liveChats = Array(chats.values)
         sessions.removeAll()
         chats.removeAll()
-        channelPanels.removeAll()
         focusedSessionID = nil
         focusedChatID = nil
-        focusedChannelID = nil
         provisioningProposalIDs.removeAll()
         activeProposalIDs.removeAll()
         stateLock.unlock()
@@ -397,15 +389,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
             focusedSessionID)
     }
 
-    private func allChannelPanels() -> (
-        panels: [String: HeadlessChannelPanelState],
-        focusedID: String?
-    ) {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return (channelPanels, focusedChannelID)
-    }
-
     private func allChats() -> (
         chats: [HeadlessChatRuntime],
         focusedID: String?
@@ -449,7 +432,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
     private enum ControlPane {
         case terminal(HeadlessTerminalSession)
         case chat(HeadlessChatRuntime)
-        case channel(String)
     }
 
     private func controlPane(withHandle handle: String) -> ControlPane? {
@@ -462,13 +444,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
         }
         if let chat = chats[handle] {
             return .chat(chat)
-        }
-        let prefix = "channel-panel-"
-        if handle.hasPrefix(prefix) {
-            let channelID = String(handle.dropFirst(prefix.count))
-            if channelPanels[channelID] != nil {
-                return .channel(channelID)
-            }
         }
         return nil
     }
@@ -539,7 +514,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
         case "list":
             let values = allSessions()
             let chatValues = allChats()
-            let panelValues = allChannelPanels()
             let terminalPanes: [[String: Any]] = values.sessions.map { session in
                 let endpoint = channelEndpoint(for: session)
                 return [
@@ -559,27 +533,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
                         "instanceID": endpoint.instanceID ?? "",
                     ],
                 ]
-            }
-            let channelPanes: [[String: Any]]
-            if panelValues.panels.isEmpty {
-                channelPanes = []
-            } else {
-                let snapshot = collaborationCoordinator.snapshot()
-                channelPanes =
-                    panelValues.panels.keys.sorted().compactMap { channelID in
-                        guard let channel = snapshot?.channels.first(where: {
-                            $0.id == channelID
-                        }) else { return nil }
-                        return [
-                            "id": "channel-panel-\(channelID)",
-                            "title": channel.name,
-                            "windowTitle": "",
-                            "focused": panelValues.focusedID == channelID,
-                            "kind": "channel",
-                            "channelId": channelID,
-                            "headless": true,
-                        ]
-                    }
             }
             let chatPanes: [[String: Any]] = chatValues.chats.map { chat in
                 let metadata = chat.metadata()
@@ -603,7 +556,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
                     ],
                 ]
             }
-            return jsonString(terminalPanes + chatPanes + channelPanes)
+            return jsonString(terminalPanes + chatPanes)
         case "chat":
             return handleChat(argument)
         case "channel":
@@ -645,8 +598,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 workspace = terminal.workingDirectory
             case .chat(let chat):
                 workspace = chat.metadata().workspace
-            case .channel:
-                workspace = nil
             }
             return createSession(cwd: workspace).map(String.init)
                 ?? "error: split failed"
@@ -661,15 +612,9 @@ public final class HeadlessAppHost: @unchecked Sendable {
             case .terminal(let terminal):
                 focusedSessionID = terminal.id
                 focusedChatID = nil
-                focusedChannelID = nil
             case .chat(let chat):
                 focusedSessionID = nil
                 focusedChatID = chat.id
-                focusedChannelID = nil
-            case .channel(let channelID):
-                focusedSessionID = nil
-                focusedChatID = nil
-                focusedChannelID = channelID
             }
             stateLock.unlock()
             appControl.broadcast([
@@ -692,20 +637,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 return closeChat(chat)
                     ? "ok"
                     : "error: close failed"
-            case .channel(let channelID):
-                stateLock.lock()
-                channelPanels[channelID] = nil
-                if focusedChannelID == channelID {
-                    focusedChannelID = nil
-                }
-                stateLock.unlock()
-                appControl.broadcast([
-                    "event": "channel-panel-closed",
-                    "channelId": channelID,
-                    "panelId": handle,
-                    "headless": true,
-                ])
-                return "ok"
             }
         case "send", "send-line":
             guard let (target, text) = paneAndText(argument) else {
@@ -939,7 +870,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
             chats[chatID] = runtime
             focusedChatID = chatID
             focusedSessionID = nil
-            focusedChannelID = nil
             stateLock.unlock()
             appControl.broadcast([
                 "event": "chat-opened",
@@ -971,7 +901,6 @@ public final class HeadlessAppHost: @unchecked Sendable {
             stateLock.lock()
             focusedChatID = chatID
             focusedSessionID = nil
-            focusedChannelID = nil
             stateLock.unlock()
         case "close":
             guard closeChat(chat) else {
@@ -1064,15 +993,12 @@ public final class HeadlessAppHost: @unchecked Sendable {
                 error: "coordinator_unavailable",
                 message: "The shared Channel coordinator is unavailable.")
         }
-        let panelValues = allChannelPanels()
         if operation == "list" {
             let values = snapshot.channels.map { channel in
                 ChannelPanelProjection(
                     channel: channel,
-                    selectedThreadID:
-                        panelValues.panels[channel.id]?.selectedThreadID)
-                    .controlState(
-                        isOpen: panelValues.panels[channel.id] != nil)
+                    selectedThreadID: nil)
+                    .controlState(isOpen: false)
             }
             return BrowserControlCodec.response(result: ["channels": values])
         }
@@ -1172,92 +1098,27 @@ public final class HeadlessAppHost: @unchecked Sendable {
             return executeChannelPanelMutation(
                 mutation,
                 channelID: channelID,
-                selectedThreadID:
-                    panelValues.panels[channelID]?.selectedThreadID)
+                selectedThreadID: nil)
         }
 
-        stateLock.lock()
-        let result: String
         switch operation {
         case "snapshot":
-            result = BrowserControlCodec.response(result:
-                ChannelPanelProjection(
-                    channel: channel,
-                    selectedThreadID:
-                        channelPanels[channelID]?.selectedThreadID)
-                    .controlState(
-                        isOpen: channelPanels[channelID] != nil))
-        case "open":
-            if channelPanels[channelID] == nil {
-                channelPanels[channelID] = HeadlessChannelPanelState()
-            }
-            focusedChannelID = channelID
-            focusedSessionID = nil
-            focusedChatID = nil
-            result = BrowserControlCodec.response(result:
-                ChannelPanelProjection(
-                    channel: channel,
-                    selectedThreadID:
-                        channelPanels[channelID]?.selectedThreadID)
-                    .controlState(isOpen: true))
-        case "focus":
-            guard channelPanels[channelID] != nil else {
-                stateLock.unlock()
-                return BrowserControlCodec.response(
-                    error: "panel_closed",
-                    message: "Open the Channel panel before focusing it.")
-            }
-            focusedChannelID = channelID
-            focusedSessionID = nil
-            focusedChatID = nil
-            result = BrowserControlCodec.response(result:
-                ChannelPanelProjection(
-                    channel: channel,
-                    selectedThreadID:
-                        channelPanels[channelID]?.selectedThreadID)
-                    .controlState(isOpen: true))
-        case "close":
-            channelPanels[channelID] = nil
-            if focusedChannelID == channelID { focusedChannelID = nil }
-            result = BrowserControlCodec.response(result:
+            return BrowserControlCodec.response(result:
                 ChannelPanelProjection(
                     channel: channel,
                     selectedThreadID: nil)
                     .controlState(isOpen: false))
-        case "select_thread":
-            guard var panel = channelPanels[channelID] else {
-                stateLock.unlock()
-                return BrowserControlCodec.response(
-                    error: "panel_closed",
-                    message:
-                        "Open the Channel panel before selecting a thread.")
-            }
-            let threadID = request["threadId"] as? String
-            if let threadID,
-               !channel.messages.contains(where: {
-                   $0.threadID == threadID
-               })
-            {
-                stateLock.unlock()
-                return BrowserControlCodec.response(
-                    error: "unknown_thread",
-                    message: "No Channel thread has id \(threadID).")
-            }
-            panel.selectedThreadID = threadID
-            channelPanels[channelID] = panel
-            result = BrowserControlCodec.response(result:
-                ChannelPanelProjection(
-                    channel: channel,
-                    selectedThreadID: threadID)
-                    .controlState(isOpen: true))
+        case "open", "focus", "close", "select_thread":
+            return BrowserControlCodec.response(
+                error: "channel_panel_removed",
+                message:
+                    "The Channel pane has been removed. Use connector badges "
+                    + "for room membership and Chat for conversation.")
         default:
-            stateLock.unlock()
             return BrowserControlCodec.response(
                 error: "unknown_operation",
-                message: "Unknown Channel panel operation '\(operation)'.")
+                message: "Unknown Channel room operation '\(operation)'.")
         }
-        stateLock.unlock()
-        return result
     }
 
     private func executeChannelPanelMutation(
@@ -1278,9 +1139,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
             ChannelPanelProjection(
                 channel: updated,
                 selectedThreadID: selectedThreadID)
-                .controlState(
-                    isOpen:
-                        allChannelPanels().panels[channelID] != nil))
+                .controlState(isOpen: false))
     }
 
     private func channelEndpoint(
@@ -1566,10 +1425,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
             }
 
             let existingByParticipant = stateLock.withLock {
-                channelPanels[proposal.spec.channelID] =
-                    channelPanels[proposal.spec.channelID]
-                    ?? HeadlessChannelPanelState()
-                return Dictionary(
+                Dictionary(
                     uniqueKeysWithValues: chats.values
                         .filter {
                             $0.proposalID == proposal.spec.id
@@ -1659,7 +1515,7 @@ public final class HeadlessAppHost: @unchecked Sendable {
 
             let roomEndpoint = CollaborationEndpoint(
                 id:
-                    "\(instanceID)/channel-panel-"
+                    "\(instanceID)/room-anchor/"
                     + proposal.spec.channelID,
                 kind: .channel,
                 label: proposal.spec.roomName,

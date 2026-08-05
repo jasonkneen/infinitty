@@ -240,6 +240,22 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
     var onTearOut: ((Int) -> Void)?
 
     static let height: CGFloat = 40
+    static let maximumTabHeight: CGFloat = 30
+
+    static func tabHeight(inStripOfHeight strip: CGFloat) -> CGFloat {
+        min(maximumTabHeight, max(strip - 8, 1))
+    }
+
+    static func tabY(inStripOfHeight strip: CGFloat) -> CGFloat {
+        max((strip - tabHeight(inStripOfHeight: strip)) / 2 - 2, 0)
+    }
+
+    /// Vertical center of a horizontal tab, measured down from the strip's top
+    /// edge. Chrome that lives outside the strip — the custom traffic lights —
+    /// aligns to this so it stays on the tabs' axis if the strip changes.
+    static var tabCenterFromTop: CGFloat {
+        height - (tabY(inStripOfHeight: height) + tabHeight(inStripOfHeight: height) / 2)
+    }
     /// Vertical column layout (side tabs) instead of a horizontal row.
     var vertical = false { didSet { needsLayout = true } }
     private static var accent: NSColor { CodePalette.selectionAccent }
@@ -302,8 +318,10 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         addSubview(hairline)
 
         selectionPill.wantsLayer = true
-        selectionPill.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
-        selectionPill.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        selectionPill.layer?.backgroundColor =
+            PaneTint.fallback.withAlphaComponent(PaneTint.glassFillAlpha).cgColor
+        selectionPill.layer?.borderColor = PaneTint.border(PaneTint.fallback)
+            .withAlphaComponent(PaneTint.glassBorderAlpha).cgColor
         selectionPill.layer?.borderWidth = 1
         selectionPill.layer?.masksToBounds = true
         selectionPill.isHidden = true
@@ -377,14 +395,14 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         self.selectedIndex = selectedIndex
         self.pins = pins
         self.tints = tints
-        // Plain tabs keep the neutral reference capsule; only an agent tint colors it.
-        if let selectedTint = tints[selectedIndex] {
-            selectionPill.layer?.backgroundColor = selectedTint.withAlphaComponent(0.24).cgColor
-            selectionPill.layer?.borderColor = selectedTint.withAlphaComponent(0.48).cgColor
-        } else {
-            selectionPill.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
-            selectionPill.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
-        }
+        // The capsule is the same glass as a pane card, on the same tint: an
+        // agent tint colors it, otherwise it carries the window's own tint so
+        // the tab and the panes below it stay one theme.
+        let selectedTint = tints[selectedIndex] ?? PaneTint.fallback
+        selectionPill.layer?.backgroundColor =
+            selectedTint.withAlphaComponent(PaneTint.glassFillAlpha).cgColor
+        selectionPill.layer?.borderColor = PaneTint.border(selectedTint)
+            .withAlphaComponent(PaneTint.glassBorderAlpha).cgColor
         if titles.count != self.titles.count {
             // Structure changed mid-rename: positional target is now ambiguous.
             if renameEditor != nil { finishRename(committing: false) }
@@ -559,8 +577,8 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         }
         let unpinnedScale = unpinnedCount > 0 && preferredUnpinnedTotal > remaining
             ? remaining / preferredUnpinnedTotal : 1
-        let tabHeight = min(26, max(bounds.height - 8, 1))
-        let tabY = max((bounds.height - tabHeight) / 2 - 2, 0)
+        let tabHeight = Self.tabHeight(inStripOfHeight: bounds.height)
+        let tabY = Self.tabY(inStripOfHeight: bounds.height)
         var xPos = leadingInset
         for (index, button) in tabButtons.enumerated() {
             let isPinned = pins[index] != nil
@@ -568,7 +586,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
             button.alignment = isPinned ? .center : .center
             let frame = NSRect(x: xPos, y: tabY, width: width, height: tabHeight)
             button.frame = frame
-            button.layer?.cornerRadius = min(8, tabHeight / 2)
+            button.layer?.cornerRadius = tabHeight / 2
             if isPinned {
                 tabIconViews[index].frame = NSRect(
                     x: frame.midX - 8, y: frame.midY - 8, width: 16, height: 16)
@@ -601,7 +619,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
            tabButtons.indices.contains(origin), origin != selectedIndex {
             selectionPill.frame = tabButtons[origin].frame
             selectionPill.isHidden = false
-            selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(8, target.height / 2)
+            selectionPill.layer?.cornerRadius = target.height / 2
             selectionAnimationOrigin = nil
             animateSelectionOnNextLayout = false
             guard window != nil else {
@@ -628,7 +646,7 @@ final class TerminalTabStripView: NSView, NSPopoverDelegate {
         }
         selectionAnimationOrigin = nil
         if pendingSelectionAnimationTarget != nil { return }
-        selectionPill.layer?.cornerRadius = vertical ? target.height / 2 : min(8, target.height / 2)
+        selectionPill.layer?.cornerRadius = target.height / 2
         let shouldAnimate = animateSelectionOnNextLayout
             && !selectionPill.isHidden && window != nil
         selectionPill.isHidden = false

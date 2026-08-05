@@ -148,12 +148,18 @@ public enum MCPConfiguration {
     /// THIS running instance rather than falling back to the shared
     /// `/tmp/infinitty-current.sock` symlink (which can be stale/dangling).
     static func codexConfigOverrides(
-        binaryPath: String, appSocketPath: String? = nil
+        binaryPath: String,
+        appSocketPath: String? = nil,
+        profile: AgentExecutionProfile? = nil
     ) -> [String] {
         var overrides = [codexConfigOverride(binaryPath: binaryPath)]
         if let appSocketPath {
             overrides.append(
                 "mcp_servers.\(serverName).env.INFINITTY_APP_SOCKET=\(tomlQuoted(appSocketPath))")
+        }
+        if let profile {
+            overrides.append(
+                "mcp_servers.\(serverName).env.INFINITTY_MCP_PROFILE=\(tomlQuoted(profile.rawValue))")
         }
         return overrides
     }
@@ -216,12 +222,23 @@ public enum MCPConfiguration {
         return claudeMCPJSON(binaryPath: binary)
     }
 
-    static func claudeMCPJSON(binaryPath: String, appSocketPath: String? = nil) -> Data? {
+    static func claudeMCPJSON(
+        binaryPath: String,
+        appSocketPath: String? = nil,
+        profile: AgentExecutionProfile? = nil
+    ) -> Data? {
         var server: [String: Any] = ["command": binaryPath]
+        var environment: [String: String] = [:]
         if let appSocketPath {
             // Pin the spawned infinitty-mcp to THIS instance's control socket
             // instead of the shared (possibly stale) current.sock symlink.
-            server["env"] = ["INFINITTY_APP_SOCKET": appSocketPath]
+            environment["INFINITTY_APP_SOCKET"] = appSocketPath
+        }
+        if let profile {
+            environment["INFINITTY_MCP_PROFILE"] = profile.rawValue
+        }
+        if !environment.isEmpty {
+            server["env"] = environment
         }
         let obj: [String: Any] = ["mcpServers": [serverName: server]]
         return try? JSONSerialization.data(

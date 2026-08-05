@@ -12,21 +12,50 @@ import SwiftUI
 final class ShadcnAssistantHost {
     let model = AIAssistantPanelModel()
     private(set) var view: ShadcnHostingView<AIAssistantPanel>!
+    private var baseTheme: ShadcnTheme
     /// Host-fed identity, separate from the eagerly updated SwiftUI binding.
     /// Comparing against `model.activeThreadId` would miss user-driven switches.
     private var lastPresentedThreadID: String?
 
-    init() {
+    init(config: AppConfig = AppConfig()) {
+        baseTheme = UISurfaceTheme.theme(for: config)
+        model.messageFontSize = config.interfaceFontSize
         let model = self.model
         view = ShadcnHostingView(
-            theme: ShadcnTheme(typography: .compact()),
-            colorScheme: .dark,
+            theme: Self.assistantTheme(
+                base: baseTheme, interfaceFontSize: config.interfaceFontSize),
+            colorScheme: UISurfaceTheme.colorScheme(for: config),
             paintsBackground: true
         ) {
             // Panel fills proposed size (see AIAssistantPanel body) so a
             // popover's contentSize isn't overflow-clipped at the footer.
             AIAssistantPanel(model: model, showsHeader: false)
         }
+    }
+
+    func applyAppearance(config: AppConfig) {
+        baseTheme = UISurfaceTheme.theme(for: config)
+        model.messageFontSize = config.interfaceFontSize
+        let model = self.model
+        view.update(
+            theme: Self.assistantTheme(
+                base: baseTheme, interfaceFontSize: config.interfaceFontSize),
+            colorScheme: UISurfaceTheme.colorScheme(for: config),
+            paintsBackground: true
+        ) {
+            AIAssistantPanel(model: model, showsHeader: false)
+        }
+    }
+
+    private static func assistantTheme(
+        base: ShadcnTheme, interfaceFontSize: CGFloat
+    ) -> ShadcnTheme {
+        var theme = base
+        // Keep the normal type ramp for editable controls. The compact ramp
+        // makes ShadKit text fields inherit its smallest token, so the
+        // interface-size setting only scales text that is already too small.
+        theme.typography = base.typography.scaled(by: interfaceFontSize / 15)
+        return theme
     }
 
     // MARK: Feeds mirroring PetAssistantPanelView
@@ -37,13 +66,28 @@ final class ShadcnAssistantHost {
                 id: "turn-\(index)",
                 role: message.role.caseInsensitiveCompare("You") == .orderedSame
                     ? .user : .assistant,
-                text: message.text)
+                text: message.text,
+                author: message.author,
+                createdAt: message.createdAt)
         }
     }
 
     func setQueuedMessages(_ queued: [String]) { model.queued = queued }
 
     func setStreamingText(_ text: String?) { model.streamingText = text }
+
+    func setRoster(_ agents: [ConfiguredChatAgent]) {
+        model.roster = agents.map {
+            AIAssistantRosterEntry(
+                id: $0.id, name: $0.alias,
+                detail: "\($0.modelTitle) · \($0.effort)",
+                isEnabled: $0.isEnabled)
+        }
+    }
+
+    func setStreamingAuthor(_ author: String?) {
+        model.streamingAuthor = author
+    }
 
     func setThinking(_ thinking: Bool, label: String?) {
         model.isThinking = thinking
@@ -60,6 +104,11 @@ final class ShadcnAssistantHost {
 
     func setHasFiles(_ hasFiles: Bool) { model.hasFiles = hasFiles }
 
+    func setTerminalAccess(available: Bool, enabled: Bool) {
+        model.terminalAvailable = available
+        model.terminalAccessEnabled = available && enabled
+    }
+
     func setThreads(_ threads: [(id: String, title: String)], activeId: String?) {
         if lastPresentedThreadID != activeId {
             model.tools.removeAll()
@@ -71,13 +120,21 @@ final class ShadcnAssistantHost {
         model.activeThreadId = activeId
     }
 
+    func setAgents(_ agents: [ShadcnSelectOption<String>], selected: String?) {
+        model.agentOptions = agents
+        model.agents = agents.map { (value: $0.value, label: $0.label) }
+        model.agent = selected
+    }
+
     func setModels(_ models: [ShadcnSelectOption<String>], selected: String?) {
-        model.models = models
+        model.modelOptions = models
+        model.models = models.map { (value: $0.value, label: $0.label) }
         model.model = selected
     }
 
     func setEfforts(_ efforts: [ShadcnSelectOption<String>], selected: String?) {
-        model.efforts = efforts
+        model.effortOptions = efforts
+        model.efforts = efforts.map { (value: $0.value, label: $0.label) }
         model.effort = selected
     }
 

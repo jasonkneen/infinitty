@@ -55,6 +55,9 @@ final class SettingsWindowController: NSWindowController {
     private let stylePopup = NSPopUpButton()
     private let sizeSlider = NSSlider(value: 13, minValue: 9, maxValue: 24, target: nil, action: nil)
     private let sizeValue = NSTextField(labelWithString: "")
+    private let interfaceSizeSlider = NSSlider(
+        value: 15, minValue: 11, maxValue: 22, target: nil, action: nil)
+    private let interfaceSizeValue = NSTextField(labelWithString: "")
     private let marginSlider = NSSlider(value: 8, minValue: 0, maxValue: 32, target: nil, action: nil)
     private let marginValue = NSTextField(labelWithString: "")
     private let lineSlider = NSSlider(value: 1, minValue: 0.8, maxValue: 1.6, target: nil, action: nil)
@@ -341,7 +344,9 @@ final class SettingsWindowController: NSWindowController {
         }
         panels = [
             "Appearance": panel([
-                section("Font"),
+                section("Interface"),
+                sliderRow("Text size", interfaceSizeSlider, interfaceSizeValue),
+                section("Terminal font"),
                 row("Family", fontCombo),
                 row("Style", stylePopup),
                 sliderRow("Size", sizeSlider, sizeValue),
@@ -484,6 +489,7 @@ final class SettingsWindowController: NSWindowController {
         rebuildStyles(for: current.fontName)
         if let style = current.fontStyle { stylePopup.selectItem(withTitle: style) }
         sizeSlider.doubleValue = Double(current.fontSize)
+        interfaceSizeSlider.doubleValue = Double(current.interfaceFontSize)
         marginSlider.doubleValue = Double(current.margin)
         lineSlider.doubleValue = Double(current.lineSpacing)
         kernSlider.doubleValue = Double(current.kerning)
@@ -559,6 +565,8 @@ final class SettingsWindowController: NSWindowController {
 
     private func refreshValueLabels() {
         sizeValue.stringValue = String(format: "%.0f pt", sizeSlider.doubleValue)
+        interfaceSizeValue.stringValue = String(
+            format: "%.0f pt", interfaceSizeSlider.doubleValue)
         marginValue.stringValue = String(format: "%.0f pt", marginSlider.doubleValue)
         lineValue.stringValue = String(format: "%.2f×", lineSlider.doubleValue)
         kernValue.stringValue = String(format: "%.2f×", kernSlider.doubleValue)
@@ -584,6 +592,7 @@ final class SettingsWindowController: NSWindowController {
         let style = stylePopup.titleOfSelectedItem ?? "Regular"
         c.fontStyle = style == "Regular" ? nil : style
         c.fontSize = CGFloat(sizeSlider.doubleValue.rounded())
+        c.interfaceFontSize = CGFloat(interfaceSizeSlider.doubleValue.rounded())
         c.margin = CGFloat(marginSlider.doubleValue.rounded())
         c.lineSpacing = CGFloat((lineSlider.doubleValue * 100).rounded() / 100)
         c.kerning = CGFloat((kernSlider.doubleValue * 100).rounded() / 100)

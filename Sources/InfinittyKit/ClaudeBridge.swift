@@ -57,6 +57,8 @@ final class ClaudeBridge: @unchecked Sendable {
     /// model forces a respawn (the CLI pins `--model` at launch).
     private var currentModel: String?
     private var currentSystemPrompt: String?
+    private var currentWorkingDirectory: String?
+    private var currentProfile: AgentExecutionProfile?
     /// One continuation is active at a time. `AgentTurnGate` serializes
     /// callers because Claude's result envelopes do not echo a client turn id.
     private var pending: [String: CheckedContinuation<String, Error>] = [:]
@@ -103,19 +105,27 @@ final class ClaudeBridge: @unchecked Sendable {
     func warmUp(
         system: String,
         model: String? = nil,
-        conversationID: String? = nil
+        conversationID: String? = nil,
+        cwd: String? = nil,
+        profile: AgentExecutionProfile = .workspaceChat
     ) {
         if let conversationID {
             registerConversationBridge(for: conversationID).warmUpLocally(
-                system: system, model: model)
+                system: system, model: model, cwd: cwd, profile: profile)
             return
         }
-        warmUpLocally(system: system, model: model)
+        warmUpLocally(system: system, model: model, cwd: cwd, profile: profile)
     }
 
-    private func warmUpLocally(system: String, model: String?) {
+    private func warmUpLocally(
+        system: String,
+        model: String?,
+        cwd: String?,
+        profile: AgentExecutionProfile
+    ) {
         guard queue.sync(execute: { !isReleased }) else { return }
-        try? ensureProcess(system: system, model: model)
+        try? ensureProcess(
+            system: system, model: model, cwd: cwd, profile: profile)
     }
 
     /// Run a single, blocking turn against the warm bridge. Lazy-sprawls
@@ -123,6 +133,8 @@ final class ClaudeBridge: @unchecked Sendable {
     func turn(prompt: String, system: String, model: String? = nil,
               timeout: TimeInterval = requestTimeoutSeconds,
               conversationID: String? = nil,
+              cwd: String? = nil,
+              profile: AgentExecutionProfile = .workspaceChat,
               onPartial: ((String) -> Void)? = nil) async throws -> String {
         if let conversationID {
             return try await conversationBridgeForTurn(
@@ -131,6 +143,8 @@ final class ClaudeBridge: @unchecked Sendable {
                 prompt: prompt,
                 system: system,
                 model: model,
+                cwd: cwd,
+                profile: profile,
                 timeout: timeout,
                 onPartial: onPartial)
         }
@@ -138,6 +152,8 @@ final class ClaudeBridge: @unchecked Sendable {
             prompt: prompt,
             system: system,
             model: model,
+            cwd: cwd,
+            profile: profile,
             timeout: timeout,
             onPartial: onPartial)
     }
@@ -146,6 +162,8 @@ final class ClaudeBridge: @unchecked Sendable {
         prompt: String,
         system: String,
         model: String?,
+        cwd: String?,
+        profile: AgentExecutionProfile,
         timeout: TimeInterval,
         onPartial: ((String) -> Void)?
     ) async throws -> String {
@@ -154,8 +172,8 @@ final class ClaudeBridge: @unchecked Sendable {
             try Task.checkCancellation()
             try ensureLocallyActive()
             let result = try await performTurn(
-                prompt: prompt, system: system, model: model, timeout: timeout,
-                onPartial: onPartial)
+                prompt: prompt, system: system, model: model, cwd: cwd,
+                profile: profile, timeout: timeout, onPartial: onPartial)
             await turnGate.release()
             return result
         } catch {
@@ -183,10 +201,12 @@ final class ClaudeBridge: @unchecked Sendable {
     }
 
     private func performTurn(
-        prompt: String, system: String, model: String?, timeout: TimeInterval,
+        prompt: String, system: String, model: String?, cwd: String?,
+        profile: AgentExecutionProfile, timeout: TimeInterval,
         onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
-        try ensureProcess(system: system, model: model)
+        try ensureProcess(
+            system: system, model: model, cwd: cwd, profile: profile)
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
                 let turnID = UUID().uuidString
@@ -278,6 +298,8 @@ final class ClaudeBridge: @unchecked Sendable {
         process = nil
         currentModel = nil
         currentSystemPrompt = nil
+        currentWorkingDirectory = nil
+        currentProfile = nil
         stdoutBuffer.removeAll()
         onPartial = nil
         for (_, c) in pending { c.resume(throwing: CancellationError()) }
@@ -335,12 +357,24 @@ final class ClaudeBridge: @unchecked Sendable {
 
     // MARK: - Process
 
-    private func ensureProcess(system: String, model: String?) throws {
+    private func ensureProcess(
+        system: String,
+        model: String?,
+        cwd: String?,
+        profile: AgentExecutionProfile
+    ) throws {
         try queue.sync {
             if isReleased { throw CancellationError() }
             let resolvedModel = model ?? Self.defaultModel
+            let resolvedCWD = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let workingDirectory = resolvedCWD?.isEmpty == false
+                ? resolvedCWD!
+                : FileManager.default.currentDirectoryPath
             if process?.isRunning == true {
-                if currentModel == resolvedModel, currentSystemPrompt == system { return }
+                if currentModel == resolvedModel,
+                   currentSystemPrompt == system,
+                   currentWorkingDirectory == workingDirectory,
+                   currentProfile == profile { return }
                 // A turn is in flight on this process — tearing it down here
                 // would resume its continuation with CancellationError (this
                 // was the "Claude: …CancellationError" the sidebar showed when
@@ -364,6 +398,8 @@ final class ClaudeBridge: @unchecked Sendable {
             sessionID = UUID().uuidString.lowercased()
             let p = Process()
             p.executableURL = executable
+            p.currentDirectoryURL = URL(
+                fileURLWithPath: workingDirectory, isDirectory: true)
             var args: [String] = [
                 "--print",
                 "--input-format", "stream-json",
@@ -383,35 +419,41 @@ final class ClaudeBridge: @unchecked Sendable {
                 "--setting-sources",
                 ProcessInfo.processInfo.environment["INFINITTY_AI_FULL_SETTINGS"] == "1"
                     ? "user,project,local" : "project,local",
-                // Disable the CLI's own shell tools. The embedded assistant is
-                // meant to DRIVE THE VISIBLE TERMINAL via the infinitty_* MCP
-                // tools (which type into a real pane the user can see). Left
-                // enabled, the model reached for its built-in Bash and ran
-                // `open -a "Claude"` — launching the desktop app in an invisible
-                // subprocess (wrong target) and adding slow shell round-trips.
-                // Removing Bash forces it to act in the pane. Opt out with
-                // INFINITTY_AI_ALLOW_SHELL=1.
+                // Native and MCP tools are selected below from the explicit
+                // execution profile. INFINITTY_AI_ALLOW_SHELL=1 retains the
+                // legacy escape hatch that skips these native-tool filters.
             ]
             if ProcessInfo.processInfo.environment["INFINITTY_AI_ALLOW_SHELL"] != "1" {
-                // Disable the CLI's built-in tools so ONLY the infinitty_* MCP
-                // tools remain. Two wins: (1) the assistant can't act outside
-                // the visible pane (no Bash `open -a`, no invisible file
-                // edits); (2) with a small tool set the MCP tools are presented
-                // to the model directly instead of being DEFERRED behind
-                // ToolSearch — which was costing ~10s of tool-discovery on the
-                // first turn. ToolSearch itself is left enabled as a safety net.
-                // File lookups go through the system prompt's SEARCH: directive,
-                // so Read/Grep/Glob aren't needed. Opt out: INFINITTY_AI_ALLOW_SHELL=1.
-                args += ["--disallowedTools",
-                    "Bash BashOutput KillShell Read Write Edit NotebookEdit "
-                    + "Glob Grep WebFetch WebSearch Task TodoWrite"]
+                switch profile {
+                case .workspaceChat:
+                    // Workspace Chat is a real coding agent. Keep Claude's
+                    // native file/search/edit and Bash tools available, while
+                    // excluding unrelated network/delegation surfaces.
+                    args += [
+                        "--settings",
+                        #"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}}"#,
+                        "--allowedTools", "Read Write Edit Glob Grep Bash BashOutput KillShell",
+                        "--disallowedTools", "WebFetch WebSearch Task TodoWrite",
+                    ]
+                case .visibleTerminal:
+                    // Terminal mode performs shell/interactive work through
+                    // the attached visible pane. Native file editing remains
+                    // available, but hidden subprocess shell tools do not.
+                    args += [
+                        "--allowedTools", "Read Write Edit Glob Grep",
+                        "--disallowedTools",
+                        "Bash BashOutput KillShell WebFetch WebSearch Task TodoWrite",
+                    ]
+                }
             }
             args += ProviderPermissionPolicy.claudePermissionArguments()
             let mcpURL = mcpExecutableURLOverride
                 ?? MCPConfiguration.mcpExecutablePath().map(URL.init(fileURLWithPath:))
             if let mcpURL,
                let data = MCPConfiguration.claudeMCPJSON(
-                   binaryPath: mcpURL.path, appSocketPath: AppControlServer.ownSocketPath),
+                   binaryPath: mcpURL.path,
+                   appSocketPath: AppControlServer.ownSocketPath,
+                   profile: profile),
                let json = String(data: data, encoding: .utf8) {
                 // Give the embedded assistant its terminal tools without
                 // depending on or mutating the user's global Claude config.
@@ -429,6 +471,7 @@ final class ClaudeBridge: @unchecked Sendable {
             // Belt-and-suspenders alongside the MCP config `env`: the spawned
             // infinitty-mcp inherits this and targets THIS instance's socket.
             env["INFINITTY_APP_SOCKET"] = AppControlServer.ownSocketPath
+            env["INFINITTY_MCP_PROFILE"] = profile.rawValue
             p.environment = env
             PetLog.log("ClaudeBridge.spawn model=\(resolvedModel) (cold start begins)")
             p.terminationHandler = { [weak self] proc in
@@ -440,6 +483,8 @@ final class ClaudeBridge: @unchecked Sendable {
                     self.process = nil
                     self.currentModel = nil
                     self.currentSystemPrompt = nil
+                    self.currentWorkingDirectory = nil
+                    self.currentProfile = nil
                     for (_, continuation) in self.pending {
                         continuation.resume(throwing: ClaudeBridgeError.processUnavailable(
                             "Claude bridge exited (\(proc.terminationStatus))."))
@@ -453,6 +498,8 @@ final class ClaudeBridge: @unchecked Sendable {
             self.process = p
             self.currentModel = resolvedModel
             self.currentSystemPrompt = system
+            self.currentWorkingDirectory = workingDirectory
+            self.currentProfile = profile
             self.stdinHandle = stdin.fileHandleForWriting
             self.stdoutHandle = stdout.fileHandleForReading
             self.stderrHandle = stderr.fileHandleForReading

@@ -23,7 +23,12 @@ final class CodexAppServer: @unchecked Sendable {
         "agentMessage", "userMessage", "reasoning", "todoList",
     ]
 
-    static let shared = CodexAppServer()
+    static let shared = CodexAppServer(profile: .workspaceChat)
+    static let visibleTerminalShared = CodexAppServer(profile: .visibleTerminal)
+
+    static func server(for profile: AgentExecutionProfile) -> CodexAppServer {
+        profile == .visibleTerminal ? visibleTerminalShared : shared
+    }
 
     // MARK: - State
 
@@ -31,6 +36,7 @@ final class CodexAppServer: @unchecked Sendable {
     private let initializationGate = AgentTurnGate()
     private let executableURLOverride: URL?
     private let mcpExecutableURLOverride: URL?
+    let profile: AgentExecutionProfile
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stdoutHandle: FileHandle?
@@ -56,6 +62,7 @@ final class CodexAppServer: @unchecked Sendable {
         let scopeID: String?
         var threadID: String?
         var model: String?
+        var cwd: String?
         var isReleased = false
         var cancellationGeneration = 0
 
@@ -75,9 +82,14 @@ final class CodexAppServer: @unchecked Sendable {
 
     var isRunning: Bool { queue.sync { process?.isRunning == true } }
 
-    init(executableURL: URL? = nil, mcpExecutableURL: URL? = nil) {
+    init(
+        executableURL: URL? = nil,
+        mcpExecutableURL: URL? = nil,
+        profile: AgentExecutionProfile = .workspaceChat
+    ) {
         self.executableURLOverride = executableURL
         self.mcpExecutableURLOverride = mcpExecutableURL
+        self.profile = profile
     }
 
     // MARK: - Public API
@@ -102,7 +114,8 @@ final class CodexAppServer: @unchecked Sendable {
             let generation = queue.sync { context.cancellationGeneration }
             try ensureContextIsActive(context, generation: generation)
             try ensureProcess()
-            let threadID = try await ensureThread(model: model, context: context)
+            let threadID = try await ensureThread(
+                model: model, cwd: cwd, context: context)
             try ensureContextIsActive(context, generation: generation)
             let turnID = try await startTurn(
                 threadID: threadID,
@@ -126,14 +139,22 @@ final class CodexAppServer: @unchecked Sendable {
     /// turn so its cold start (Node init + booting the ~/.codex MCP
     /// servers) overlaps with the user still typing. Idempotent. This is
     /// the openclicky trick — warm on interaction, not on first ask.
-    func warmUp(model: String, conversationID: String? = nil) {
+    func warmUp(
+        model: String,
+        conversationID: String? = nil,
+        cwd: String? = nil
+    ) {
         let context = registerConversationContext(for: conversationID)
         try? ensureProcess()
         Task { [weak self] in
             guard let self else { return }
             await context.turnGate.acquire()
             if (try? self.ensureContextIsActive(context)) != nil {
-                _ = try? await self.ensureThread(model: model, context: context)
+                let workingDirectory = cwd?.isEmpty == false
+                    ? cwd!
+                    : FileManager.default.currentDirectoryPath
+                _ = try? await self.ensureThread(
+                    model: model, cwd: workingDirectory, context: context)
             }
             await context.turnGate.release()
         }
@@ -205,6 +226,7 @@ final class CodexAppServer: @unchecked Sendable {
                 for context in conversations.values {
                     context.threadID = nil
                     context.model = nil
+                    context.cwd = nil
                 }
             }
             guard let executable = executableURLOverride
@@ -230,7 +252,9 @@ final class CodexAppServer: @unchecked Sendable {
                 // bridge without requiring a persistent user config edit, and
                 // pin it to THIS instance's control socket.
                 for override in MCPConfiguration.codexConfigOverrides(
-                    binaryPath: mcpURL.path, appSocketPath: AppControlServer.ownSocketPath) {
+                    binaryPath: mcpURL.path,
+                    appSocketPath: AppControlServer.ownSocketPath,
+                    profile: profile) {
                     arguments += ["-c", override]
                 }
             }
@@ -244,6 +268,7 @@ final class CodexAppServer: @unchecked Sendable {
             // Belt-and-suspenders alongside the `-c ...env...` override: the
             // spawned infinitty-mcp inherits this and targets THIS instance.
             env["INFINITTY_APP_SOCKET"] = AppControlServer.ownSocketPath
+            env["INFINITTY_MCP_PROFILE"] = profile.rawValue
             p.environment = env
             p.terminationHandler = { [weak self] proc in
                 self?.queue.async {
@@ -255,6 +280,7 @@ final class CodexAppServer: @unchecked Sendable {
                     for context in self.conversations.values {
                         context.threadID = nil
                         context.model = nil
+                        context.cwd = nil
                     }
                     for (_, continuation) in self.pending {
                         continuation.resume(throwing: CodexBridgeError.processUnavailable(
@@ -299,16 +325,20 @@ final class CodexAppServer: @unchecked Sendable {
 
     private func ensureThread(
         model: String,
+        cwd: String,
         context: ConversationContext
     ) async throws -> String {
         let cached: String? = queue.sync {
-            guard !context.isReleased, context.model == model else { return nil }
+            guard !context.isReleased,
+                  context.model == model,
+                  context.cwd == cwd
+            else { return nil }
             return context.threadID
         }
         if let cached { return cached }
         let threadStart = try await sendRequest(method: "thread/start", params: [
             "model": model,
-            "cwd": ProcessInfo.processInfo.environment["HOME"].flatMap { URL(fileURLWithPath: $0) }?.path ?? NSHomeDirectory(),
+            "cwd": cwd,
         ])
         guard let id = (threadStart["thread"] as? [String: Any])?["id"] as? String else {
             throw CodexBridgeError.protocolViolation(
@@ -318,6 +348,7 @@ final class CodexAppServer: @unchecked Sendable {
             guard !context.isReleased else { return false }
             context.threadID = id
             context.model = model
+            context.cwd = cwd
             return true
         }
         guard stored else { throw CancellationError() }

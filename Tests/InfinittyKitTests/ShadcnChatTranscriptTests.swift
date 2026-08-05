@@ -19,6 +19,14 @@ final class ShadcnChatTranscriptTests: XCTestCase {
         XCTAssertEqual(model.messages.map(\.text), ["hello", "hi", "again"])
     }
 
+    func testAttributedAssistantAuthorProjectsWithoutChangingText() {
+        let model = ShadcnTranscriptModel()
+        model.apply([AssistantChatMessage(
+            role: "Assistant", text: "answer", author: "Claude")])
+        XCTAssertEqual(model.messages.first?.author, "Claude")
+        XCTAssertEqual(model.messages.first?.text, "answer")
+    }
+
     func testUserRoleMatchIsCaseInsensitive() {
         let model = ShadcnTranscriptModel()
         model.apply([AssistantChatMessage(role: "you", text: "hey")])
@@ -106,6 +114,17 @@ final class ShadcnChatTranscriptTests: XCTestCase {
         let settingsOptedOut =
             ProcessInfo.processInfo.environment["INFINITTY_LEGACY_SETTINGS"] == "1"
         XCTAssertEqual(ShadcnChatFeature.usesShadcnSettings, !settingsOptedOut)
+    }
+
+    func testAssistantHostUsesAndLiveAppliesSettingsInterfaceSize() {
+        var config = AppConfig()
+        config.interfaceFontSize = 18
+        let host = ShadcnAssistantHost(config: config)
+        XCTAssertEqual(host.model.messageFontSize, 18)
+
+        config.interfaceFontSize = 20
+        host.applyAppearance(config: config)
+        XCTAssertEqual(host.model.messageFontSize, 20)
     }
 }
 

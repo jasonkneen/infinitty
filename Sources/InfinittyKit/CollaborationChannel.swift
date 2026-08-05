@@ -436,6 +436,16 @@ struct CollaborationChatEmission: Equatable, Sendable {
     let kind: Kind
     let text: String
     let threadID: String
+    /// In-pane ensemble attribution. The existing Chat pane participant stays
+    /// the authorized Channel author; this name is rendered into bounded text.
+    let agentName: String?
+
+    init(kind: Kind, text: String, threadID: String, agentName: String? = nil) {
+        self.kind = kind
+        self.text = text
+        self.threadID = threadID
+        self.agentName = agentName
+    }
 }
 
 struct CollaborationChannelState: Codable, Equatable, Sendable {

@@ -368,23 +368,13 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             self.pageControl = CodeSegmentedBar(
                 labels: ["CHAT"], icons: ["bubble.left.and.bubble.right"],
                 fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
-        case .browser, .channel, .surface:
+        case .browser, .surface:
             // Browser and agent-surface panes use their own controllers
             // directly. Keep this fallback exhaustive so a future caller
             // cannot crash while constructing the shared controller.
             self.pageControl = CodeSegmentedBar(
-                labels: [
-                    panelKind == .surface
-                        ? "SURFACE"
-                        : panelKind == .channel ? "CHANNEL" : "BROWSER",
-                ],
-                icons: [
-                    panelKind == .surface
-                        ? "sparkles.rectangle.stack"
-                        : panelKind == .channel
-                            ? "person.3.sequence"
-                            : "globe",
-                ],
+                labels: [panelKind == .surface ? "SURFACE" : "BROWSER"],
+                icons: [panelKind == .surface ? "sparkles.rectangle.stack" : "globe"],
                 fontSize: 10, fontWeight: .medium, squared: true, neutralSelection: true)
         case nil:
             self.pageControl = CodeSegmentedBar(
@@ -1800,6 +1790,16 @@ final class CodeViewController: NSViewController, NSOutlineViewDataSource, NSOut
             as? NSTableCellView
         return cell?.textField?.stringValue
     }
+    /// The folder this panel is currently showing, if any. Used by pane
+    /// connections to sync a sibling terminal/chat to the same location.
+    var connectedRootPath: String? { rootPath }
+
+    /// Point this panel at `path` (pane-connection path sync). Unlike
+    /// `track(session:)` this is an explicit, user-driven move.
+    func navigateToConnectedPath(_ path: String) {
+        reRoot(path)
+    }
+
     func reRootForTesting(_ path: String) { reRoot(path) }
     func loadPreviewForTesting(_ url: URL) { loadPreview(for: url) }
     func setMarkdownRenderedForTesting(_ rendered: Bool) {

@@ -104,8 +104,6 @@ private final class UtilityPanelRecord {
     let controller: CodeViewController?
     let browser: BrowserPaneController?
     let surface: SurfacePaneController?
-    let channelController: ChannelPanelController?
-    let channelID: String?
     let pane: UtilityPaneView
     /// Stable pane-ledger identity. Files stays a per-window singleton
     /// (`files`); each Chat and Browser instance gets a unique
@@ -140,8 +138,6 @@ private final class UtilityPanelRecord {
         self.controller = controller
         self.browser = nil
         self.surface = nil
-        self.channelController = nil
-        self.channelID = nil
         self.pane = pane
         self.ledgerID = ledgerID
     }
@@ -150,8 +146,6 @@ private final class UtilityPanelRecord {
         self.controller = nil
         self.browser = browser
         self.surface = nil
-        self.channelController = nil
-        self.channelID = nil
         self.pane = pane
         self.ledgerID = ledgerID
     }
@@ -160,23 +154,6 @@ private final class UtilityPanelRecord {
         self.controller = nil
         self.browser = nil
         self.surface = surface
-        self.channelController = nil
-        self.channelID = nil
-        self.pane = pane
-        self.ledgerID = ledgerID
-    }
-
-    init(
-        channel: ChannelPanelController,
-        channelID: String,
-        pane: UtilityPaneView,
-        ledgerID: String
-    ) {
-        self.controller = nil
-        self.browser = nil
-        self.surface = nil
-        self.channelController = channel
-        self.channelID = channelID
         self.pane = pane
         self.ledgerID = ledgerID
     }
@@ -1387,22 +1364,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// be skipped on the frequent tab/pane churn that happens with no
     /// modifiers held.
     private var shortcutHintsApplied = false
-    private func positionNativeTrafficLights(in window: NSWindow) {
-        guard config.trafficLights == "circle",
-              let chrome = terminalChromes[ObjectIdentifier(window)]
-        else { return }
-        chrome.layoutSubtreeIfNeeded()
-        let stripCenterInWindow = chrome.strip.convert(
-            NSPoint(x: chrome.strip.bounds.midX, y: chrome.strip.bounds.midY), to: nil)
-        for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            guard let button = window.standardWindowButton(type),
-                  let parent = button.superview else { continue }
-            let stripCenter = parent.convert(stripCenterInWindow, from: nil)
-            var frame = button.frame
-            frame.origin.y = stripCenter.y - frame.height / 2
-            button.frame = frame
-        }
-    }
 
     private func refreshShortcutHints() {
         let showingAny = showTabShortcutHints || showPaneShortcutHints
@@ -1428,10 +1389,72 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             .setPaneShortcutSelectionHighlighted(true)
     }
 
+    /// macOS centers the native traffic lights in the ~28pt titlebar, but our
+    /// tab strip is taller than that, so they sit high above the tabs. Drop them
+    /// onto the same axis as the tab capsules — the axis the custom
+    /// `TrafficLightsView` also uses, so both light styles agree.
+    ///
+    /// This is the single authority on that Y. AppKit re-lays the titlebar out
+    /// on creation, resize, key/main changes and full-screen transitions, and
+    /// every one of those resets the buttons to the native height, so all of
+    /// them call back here.
+    func centerTrafficLights(in window: NSWindow) {
+        guard config.trafficLights == "circle" else { return }
+        let buttons: [NSView] = [.closeButton, .miniaturizeButton, .zoomButton]
+            .compactMap { window.standardWindowButton($0) }
+        guard let container = buttons.first?.superview else { return }
+        // Derive the axis from the window's top edge, not from the container's
+        // own bounds: the titlebar container's height and origin vary by macOS
+        // version, so measuring against it drifts silently.
+        let axisInWindow = window.frame.height - TerminalTabStripView.tabCenterFromTop
+        let axis = container.convert(NSPoint(x: 0, y: axisInWindow), from: nil).y
+        for button in buttons {
+            let target = (axis - button.frame.height / 2).rounded()
+            guard abs(button.frame.origin.y - target) > 0.5 else { continue }
+            button.frame.origin.y = target
+        }
+    }
+
+    /// Reassert after AppKit's own titlebar layout pass has run. Calling
+    /// `centerTrafficLights` alone during window creation or a full-screen
+    /// transition is lost, because AppKit lays the buttons out afterwards.
+    func scheduleTrafficLightCentering(in window: NSWindow) {
+        centerTrafficLights(in: window)
+        DispatchQueue.main.async { [weak window] in
+            guard let window else { return }
+            self.centerTrafficLights(in: window)
+        }
+    }
+
+    public func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        centerTrafficLights(in: window)
+    }
+
+    public func windowDidBecomeMain(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        centerTrafficLights(in: window)
+    }
+
+    public func windowDidResignMain(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        centerTrafficLights(in: window)
+    }
+
+    public func windowDidEnterFullScreen(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        scheduleTrafficLightCentering(in: window)
+    }
+
+    public func windowDidExitFullScreen(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        scheduleTrafficLightCentering(in: window)
+    }
+
     public func windowDidBecomeKey(_ notification: Notification) {
         if let win = notification.object as? NSWindow,
            win.tabbingIdentifier == "infinitty" {
-            positionNativeTrafficLights(in: win)
+            centerTrafficLights(in: win)
             refreshTabStrips(in: win)
         }
         guard showPaneShortcutHints else { return }
@@ -1993,10 +2016,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             // as translucent throughout the activation transition.
             window.backgroundColor = .white.withAlphaComponent(0.001)
         } else {
-            let bg = renderer.backgroundColor
-            window.backgroundColor = NSColor(
-                srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1
-            )
+            window.backgroundColor = renderer.chromeBackgroundColor
         }
     }
 
@@ -2079,10 +2099,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             chrome.autoresizingMask = [.width, .height]
             chrome.sideTabs = config.sideTabs
             chrome.body.addSubview(session.view)
-            let bg = session.renderer.backgroundColor
             chrome.setBacking(
-                color: NSColor(srgbRed: CGFloat(bg.x), green: CGFloat(bg.y),
-                               blue: CGFloat(bg.z), alpha: CGFloat(bg.w)),
+                color: session.renderer.chromeBackgroundColor
+                    .withAlphaComponent(PaneTint.chromeOpacity(config.backgroundOpacity)),
                 blur: config.backgroundBlur)
             terminalChromes[ObjectIdentifier(window)] = chrome
             wireStrip(chrome, for: window)
@@ -2096,7 +2115,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if customLights, let shape = TrafficLightsView.Shape(rawValue: config.trafficLights) {
             let lights = TrafficLightsView(shape: shape)
             var f = lights.frame
-            f.origin = NSPoint(x: 12, y: contentSize.height - f.height - 15)
+            f.origin = NSPoint(
+                x: 12,
+                y: contentSize.height - TerminalTabStripView.tabCenterFromTop
+                    - f.height / 2)
             lights.frame = f
             lights.autoresizingMask = [.minYMargin, .maxXMargin]
             window.contentView?.addSubview(lights)
@@ -2104,6 +2126,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         if role == .standard { window.center() }
         if role == .standard { registerPaneLedgerTab(for: window, session: session) }
+        // A brand-new window never resizes or takes key before it is shown, so
+        // without this its lights would stay at the native titlebar height.
+        if role == .standard { scheduleTrafficLightCentering(in: window) }
 
         return (window, session)
     }
@@ -2295,18 +2320,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             _ = openUtilityPanel(
                 .chat, in: win, relativeTo: context.sourceView, vertical: context.vertical,
                 forceNewInstance: true)
-        case .channel:
-            guard let channelID = channelID(for: context.sourceView) else {
-                presentChannelSummary(
-                    for: context.sourceView,
-                    errorMessage: "Link this pane to a Channel first.")
-                return
-            }
-            _ = openChannelPanel(
-                channelID: channelID,
-                in: win,
-                relativeTo: context.sourceView,
-                vertical: context.vertical)
         case .browser:
             // The split chooser places a pane at a chosen spot, so it always
             // creates a fresh Browser instance instead of refocusing one.
@@ -2365,7 +2378,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     /// Resolves the stable handle returned by `list` for any pane kind. Legacy
     /// numeric terminal ids remain valid, while utility panes can be addressed
-    /// by ledger id, Channel endpoint id, browser id, or Channel panel id.
+    /// by ledger id, Channel endpoint id, or browser id.
     private func controlPane(withHandle handle: String) -> NSView? {
         if let terminalID = Int(handle),
            let session = sessions.first(where: { $0.id == terminalID })
@@ -2797,7 +2810,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         } else if let utility = view as? UtilityPaneView {
             switch utility.kind {
             case .chat: kind = .chat
-            case .channel: kind = .channel
             case .browser: kind = .browser
             case .surface: kind = .surface
             case .files: kind = CollaborationEndpoint.Kind(rawValue: "files")
@@ -2890,26 +2902,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func channelID(for pane: NSView) -> String? {
-        if let record = utilityRecord(forPane: pane),
-           let channelID = record.channelID
-        {
-            return channelID
-        }
-        return channel(for: collaborationEndpoint(for: pane).id)?.id
+        channel(for: collaborationEndpoint(for: pane).id)?.id
     }
 
+    /// The connector remains the room affordance, but Channel is no longer a
+    /// pane type. Clicking it shows the lightweight membership summary; drag
+    /// still creates or joins the durable room.
     private func activateChannel(for pane: NSView) {
-        guard let channelID = channelID(for: pane),
-              let window = pane.window
-        else {
-            presentChannelSummary(for: pane)
-            return
-        }
-        _ = openChannelPanel(
-            channelID: channelID,
-            in: window,
-            relativeTo: pane,
-            vertical: true)
+        presentChannelSummary(for: pane)
     }
 
     private func beginChannelConnectorDrag(sourceView: NSView, at point: NSPoint) {
@@ -2956,6 +2956,132 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         state.overlay.close()
         guard !cancelled, let target = state.targetView else { return }
         linkCollaborationPanes(source: state.sourceView, target: target)
+        applyConnectionSideEffects(source: state.sourceView, target: target)
+    }
+
+    /// Every pane connection creates a shared Channel, but some kinds carry
+    /// extra meaning: a Files pane syncs its folder onto a terminal/chat
+    /// sibling, and a Browser pane scopes itself to the sibling's agent as a
+    /// drivable tool. Runs after the link so the Channel already exists.
+    private func applyConnectionSideEffects(source: NSView, target: NSView) {
+        if let pair = filesConnection(source, target) {
+            promptFilePathSync(files: pair.files, other: pair.other)
+        }
+        if let pair = browserConnection(source, target) {
+            announceConnectedBrowser(browser: pair.browser, to: pair.other)
+        }
+    }
+
+    /// Returns the Files pane and its non-Files partner, in either drag
+    /// direction. Files-to-Files carries no sync meaning.
+    private func filesConnection(
+        _ a: NSView, _ b: NSView
+    ) -> (files: UtilityPaneView, other: NSView)? {
+        let aFiles = (a as? UtilityPaneView).flatMap { $0.kind == .files ? $0 : nil }
+        let bFiles = (b as? UtilityPaneView).flatMap { $0.kind == .files ? $0 : nil }
+        if let aFiles, bFiles == nil { return (aFiles, b) }
+        if let bFiles, aFiles == nil { return (bFiles, a) }
+        return nil
+    }
+
+    private func browserConnection(
+        _ a: NSView, _ b: NSView
+    ) -> (browser: UtilityPaneView, other: NSView)? {
+        let aBrowser = (a as? UtilityPaneView).flatMap { $0.kind == .browser ? $0 : nil }
+        let bBrowser = (b as? UtilityPaneView).flatMap { $0.kind == .browser ? $0 : nil }
+        if let aBrowser, bBrowser == nil { return (aBrowser, b) }
+        if let bBrowser, aBrowser == nil { return (bBrowser, a) }
+        return nil
+    }
+
+    /// Ask which way a Files connection should sync, then move the losing
+    /// side. Files-wins is the default: you usually navigate the tree first
+    /// and want the terminal to follow.
+    private func promptFilePathSync(files: UtilityPaneView, other: NSView) {
+        guard let controller = utilityRecord(forPane: files)?.controller else { return }
+        let filesPath = controller.connectedRootPath
+        let otherPath = connectedPanePath(other)
+        // Nothing to reconcile if neither side knows where it is, or they
+        // already agree.
+        guard filesPath != nil || otherPath != nil else { return }
+        if let filesPath, let otherPath, filesPath == otherPath { return }
+
+        let otherLabel = paneHeader(for: other)?.title ?? "pane"
+        let alert = NSAlert()
+        alert.messageText = "Sync folder between panes?"
+        alert.informativeText = """
+            Files: \(filesPath.map(abbreviatedPath) ?? "unknown")
+            \(otherLabel): \(otherPath.map(abbreviatedPath) ?? "unknown")
+            """
+        alert.addButton(withTitle: "Files → \(otherLabel)")
+        alert.addButton(withTitle: "\(otherLabel) → Files")
+        alert.addButton(withTitle: "Don't Sync")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            guard let filesPath else { return }
+            applyPathToPane(other, path: filesPath)
+        case .alertSecondButtonReturn:
+            guard let otherPath else { return }
+            controller.navigateToConnectedPath(otherPath)
+        default:
+            return
+        }
+    }
+
+    private func abbreviatedPath(_ path: String) -> String {
+        (path as NSString).abbreviatingWithTildeInPath
+    }
+
+    /// The folder a connected pane currently represents: a terminal's live
+    /// cwd, or another panel's displayed root.
+    private func connectedPanePath(_ view: NSView) -> String? {
+        if let terminal = view as? TerminalView {
+            return sessions.first { $0.view === terminal }?.currentDirectory()
+        }
+        if let utility = view as? UtilityPaneView {
+            return utilityRecord(forPane: utility)?.controller?.connectedRootPath
+        }
+        return nil
+    }
+
+    /// Move a connected pane to `path`: terminals cd, panels re-root.
+    private func applyPathToPane(_ view: NSView, path: String) {
+        if let terminal = view as? TerminalView,
+           let session = sessions.first(where: { $0.view === terminal })
+        {
+            let quoted = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            session.terminal.userDidInput()
+            session.pty.write(Array("cd \(quoted)".utf8) + [0x0D])
+            return
+        }
+        if let utility = view as? UtilityPaneView {
+            utilityRecord(forPane: utility)?.controller?
+                .navigateToConnectedPath(path)
+        }
+    }
+
+    /// A connected Browser is already drivable through the infinitty_browser_*
+    /// MCP tools, but the agent has to guess which instance is "its". Post the
+    /// concrete browserId into the shared Channel so the sibling's agent reads
+    /// it as scoped context on its next turn.
+    private func announceConnectedBrowser(browser: UtilityPaneView, to other: NSView) {
+        guard let record = utilityRecord(forPane: browser) else { return }
+        let browserID = record.ledgerID
+        let targetLabel = paneHeader(for: other)?.title ?? "the connected pane"
+        // The Channel is created asynchronously by the link that precedes
+        // this call, so resolve it on the next main-queue hop.
+        DispatchQueue.main.async { [weak self, weak other] in
+            guard let self, let other else { return }
+            let endpoint = self.collaborationEndpoint(for: other)
+            guard let channel = self.channel(for: endpoint.id) else { return }
+            let text = """
+                Browser \(browserID) is connected to \(targetLabel). \
+                Drive it with the infinitty_browser_* tools using \
+                browserId "\(browserID)" (navigate, snapshot, click, type, \
+                screenshot). Prefer this browser over opening a new one.
+                """
+            self.postChannelMessage(text, threadID: nil, channelID: channel.id)
+        }
     }
 
     private func linkCollaborationPanes(
@@ -3029,38 +3155,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         dispatchPrecondition(condition: .onQueue(.main))
         collaborationProjection = snapshot
         for pane in liveCollaborationPanes() {
-            if let utility = pane as? UtilityPaneView,
-               utility.kind == .channel,
-               let record = utilityRecord(forPane: utility),
-               let channelID = record.channelID,
-               let state = snapshot.channels.first(where: {
-                   $0.id == channelID
-               })
-            {
-                let color = collaborationColor(hex: state.colorHex)
-                utility.paneHeader.title = state.name
-                utility.setChannel(
-                    name: state.name,
-                    color: color,
-                    memberCount: state.endpoints.count)
-                utility.setPaneAccent(color)
-                record.channelController?.update(
-                    channel: state,
-                    proposals: snapshot.proposals)
-                continue
-            }
             let endpointID = collaborationEndpoint(for: pane).id
             let state = channel(for: endpointID)
             let color = state.map { collaborationColor(hex: $0.colorHex) }
-            let memberCount = state?.endpoints.count ?? 0
+            let memberCount = state.map(connectedPaneCount) ?? 0
             if let terminal = pane as? TerminalView {
                 terminal.setChannel(
                     name: state?.name, color: color, memberCount: memberCount)
-                terminal.setPaneAccent(color ?? CodePalette.paneFocusAccent)
+                terminal.setPaneAccent(color)
             } else if let utility = pane as? UtilityPaneView {
                 utility.setChannel(
                     name: state?.name, color: color, memberCount: memberCount)
-                utility.setPaneAccent(color ?? CodePalette.paneFocusAccent)
+                utility.setPaneAccent(color)
             }
         }
         presentPendingProposalConsents(snapshot)
@@ -3269,18 +3375,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 kind: .agent,
                 displayName: record.pane.paneHeader.title)
         case .runtimeFailure:
-            authorID = "system:runtime"
-            actor = CollaborationActor(
-                id: authorID,
-                kind: .system,
-                displayName:
-                    "Runtime for \(record.pane.paneHeader.title)")
+            if emission.agentName != nil {
+                // Ensemble children are in-pane identities, not registered
+                // Channel participants. Keep authorization on the Chat pane
+                // participant and carry attribution in the bounded text.
+                authorID = participantID
+                actor = CollaborationActor(
+                    id: participantID,
+                    kind: .agent,
+                    displayName: record.pane.paneHeader.title)
+            } else {
+                authorID = "system:runtime"
+                actor = CollaborationActor(
+                    id: authorID,
+                    kind: .system,
+                    displayName:
+                        "Runtime for \(record.pane.paneHeader.title)")
+            }
         }
         let messageText: String
         if emission.kind == .runtimeFailure {
-            messageText =
-                "Runtime failure for \(record.pane.paneHeader.title): "
+            let subject = emission.agentName.map { "[\($0)] " } ?? ""
+            messageText = subject
+                + "Runtime failure for \(record.pane.paneHeader.title): "
                 + emission.text
+        } else if let agentName = emission.agentName {
+            messageText = "[\(agentName)] \(emission.text)"
         } else {
             messageText = emission.text
         }
@@ -3322,7 +3442,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    private func postChannelPanelMessage(
+    private func postChannelMessage(
         _ text: String,
         threadID: String?,
         channelID: String
@@ -3346,14 +3466,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let request = CollaborationControlRequest(
                 op: .postMessage,
                 actor: actor,
-                idempotencyKey: "channel-panel-message:\(message.id)",
+                idempotencyKey: "channel-room-message:\(message.id)",
                 channelID: channelID,
                 message: message)
             guard let encoded = CollaborationControlCodec.encode(request) else {
                 self.appControl.broadcast([
                     "event": "channel-error",
                     "channelId": channelID,
-                    "message": "Could not encode Channel panel message.",
+                    "message": "Could not encode Channel message.",
                 ])
                 return
             }
@@ -3378,69 +3498,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    private func updateChannelParticipantRole(
-        participantID: String,
-        role: String,
-        channelID: String
-    ) {
-        let role = role.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !role.isEmpty,
-              let channel = authoritativeCollaborationSnapshot()
-                .channels.first(where: { $0.id == channelID }),
-              let participant = channel.participants.first(where: {
-                  $0.id == participantID
-              }),
-              participant.role != role,
-              let endpoint = channel.endpoints.first(where: {
-                  $0.participantID == participantID
-              })
-        else { return }
-        let updated = CollaborationParticipant(
-            id: participant.id,
-            displayName: participant.displayName,
-            role: role,
-            provider: participant.provider,
-            modelID: participant.modelID,
-            capabilities: participant.capabilities)
-        let actor = CollaborationActor(
-            id: "local-user:\(NSUserName())",
-            kind: .human,
-            displayName: NSFullUserName().isEmpty
-                ? NSUserName()
-                : NSFullUserName())
-        collaborationQueue.async { [weak self] in
-            guard let self else { return }
-            let request = CollaborationControlRequest(
-                op: .updateMembership,
-                actor: actor,
-                idempotencyKey:
-                    "channel-role:\(participantID):\(UUID().uuidString)",
-                channelID: channelID,
-                endpoint: endpoint,
-                participant: updated)
-            guard let encoded = CollaborationControlCodec.encode(request) else {
-                return
-            }
-            let result = self.collaborationCoordinator.execute(encoded)
-            guard let snapshot = result.snapshot else {
-                self.appControl.broadcast([
-                    "event": "channel-error",
-                    "channelId": channelID,
-                    "message": result.response,
-                ])
-                return
-            }
-            self.appControl.broadcast([
-                "event": "channel-role-updated",
-                "channelId": channelID,
-                "participantId": participantID,
-                "role": role,
-            ])
-            DispatchQueue.main.async { [weak self] in
-                self?.applyCollaborationProjection(snapshot)
-            }
-        }
-    }
 
     private func presentPendingProposalConsents(
         _ snapshot: CollaborationSnapshot
@@ -3720,7 +3777,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                                     "proposal:\(proposal.spec.id):link:"
                                     + agent.spec.id,
                                 channelID: proposal.spec.channelID,
-                                source: visual.channelEndpoint,
+                                source: visual.roomEndpoint,
                                 target: agent.endpoint,
                                 participants: [agent.participant]))
                     }
@@ -3856,7 +3913,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private struct ApprovedVisualRoom {
         let snapshot: CollaborationSnapshot
-        let channelEndpoint: CollaborationEndpoint
+        /// Stable non-visual endpoint used only to seed membership in a room
+        /// that may begin with one agent. It replaces the deleted Channel pane
+        /// as the durable link source without creating any AppKit surface.
+        let roomEndpoint: CollaborationEndpoint
         let agents: [ApprovedVisualAgent]
     }
 
@@ -3876,13 +3936,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                         $0.tabbingIdentifier == "infinitty"
                             && $0 !== self.quickTerminal.window
                     }),
-                  let channelRecord = self.openUtilityPanel(
-                    .channel,
-                    in: window,
-                    forceNewInstance: true,
-                    channelID: proposal.spec.channelID)
+                  let initialAnchor = self.focusedPaneLeaf(in: window)
+                    ?? self.activeSessions(in: window).first?.view
+                    ?? self.paneLeafViews(in: window).first
+                    ?? self.terminalRoot(of: window),
+                  initialAnchor.window === window
             else { return nil }
-            var anchor: NSView = channelRecord.pane
+            var anchor = initialAnchor
             var agents: [ApprovedVisualAgent] = []
             for spec in proposal.spec.agents {
                 guard let workspace = workspaces[spec.id] else {
@@ -3947,16 +4007,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     endpoint: endpoint,
                     participant: participant))
             }
+            let roomEndpoint = CollaborationEndpoint(
+                id: "\(self.collaborationInstanceID)/room-anchor/"
+                    + proposal.spec.channelID,
+                kind: .channel,
+                label: proposal.spec.roomName,
+                participantID: nil,
+                instanceID: self.collaborationInstanceID)
             return ApprovedVisualRoom(
                 snapshot: snapshot,
-                channelEndpoint: self.collaborationEndpoint(
-                    for: channelRecord.pane),
+                roomEndpoint: roomEndpoint,
                 agents: agents)
         }) else {
             throw CollaborationRoomError.invalidValue(
                 field: "visual host",
                 reason:
-                    "could not create the approved Channel and Chat panes")
+                    "could not create the approved Chat panes")
         }
         return result
     }
@@ -4015,6 +4081,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
+    /// Logical room anchors replace the deleted Channel pane for one-agent
+    /// provisioning, but badges and summaries count only real visible panes.
+    private func connectedPaneCount(_ channel: CollaborationChannelState) -> Int {
+        channel.endpoints.filter { $0.kind != .channel }.count
+    }
+
     private func collaborationColor(hex: String) -> NSColor {
         let value = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
         guard value.count == 6, let rgb = UInt32(value, radix: 16) else {
@@ -4061,10 +4133,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             title.textColor = collaborationColor(hex: state.colorHex)
             stack.addArrangedSubview(title)
             stack.addArrangedSubview(label(
-                "\(state.endpoints.count) connected panes · revision \(state.revision)",
+                "\(connectedPaneCount(state)) connected panes · revision \(state.revision)",
                 size: 11, weight: .regular))
             stack.addArrangedSubview(label(
-                state.endpoints.map { "\($0.label) · \($0.kind.rawValue)" }.joined(separator: "\n"),
+                state.endpoints
+                    .filter { $0.kind != .channel }
+                    .map { "\($0.label) · \($0.kind.rawValue)" }
+                    .joined(separator: "\n"),
                 size: 12, weight: .regular))
             if !state.participants.isEmpty {
                 stack.addArrangedSubview(label(
@@ -4435,21 +4510,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return nil
     }
 
-    private func channelRecord(
-        withID channelID: String,
-        in window: NSWindow? = nil
-    ) -> UtilityPanelRecord? {
-        let records: [UtilityPanelRecord]
-        if let window {
-            records = utilityRecords(in: window)
-        } else {
-            records = utilityPanels.values.flatMap { $0 }
-        }
-        return records.first {
-            $0.kind == .channel && $0.channelID == channelID
-        }
-    }
-
     private func removeUtilityRecord(_ record: UtilityPanelRecord, windowKey id: ObjectIdentifier) {
         utilityPanels[id]?.removeAll { $0 === record }
         if utilityPanels[id]?.isEmpty == true { utilityPanels.removeValue(forKey: id) }
@@ -4495,27 +4555,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let win = standardKeyWindow(),
               let record = openUtilityPanel(.chat, in: win) else { return }
         record.controller?.focusChatInput()
-    }
-
-    @discardableResult
-    private func openChannelPanel(
-        channelID: String,
-        in window: NSWindow,
-        relativeTo source: NSView? = nil,
-        vertical: Bool = true
-    ) -> UtilityPanelRecord? {
-        if let existing = channelRecord(withID: channelID, in: window) {
-            restorePaneZoom(revealing: existing.pane)
-            window.makeFirstResponder(existing.pane)
-            return existing
-        }
-        return openUtilityPanel(
-            .channel,
-            in: window,
-            relativeTo: source,
-            vertical: vertical,
-            forceNewInstance: true,
-            channelID: channelID)
     }
 
     /// Open (or focus the most recent) Browser pane in the key window.
@@ -4696,7 +4735,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func applyTabTint(to win: NSWindow) {
-        let color = tabTints[ObjectIdentifier(win)] ?? CodePalette.paneFocusAccent
+        // No explicit tab tint means no assigned color: the pane border falls
+        // back to a lit edge of its own background.
+        let color = tabTints[ObjectIdentifier(win)]
         for pane in paneLeafViews(in: win) {
             (pane as? TerminalView)?.setPaneAccent(color)
             (pane as? UtilityPaneView)?.setPaneAccent(color)
@@ -4871,6 +4912,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             source: source, target: target, completion: completion)
     }
 
+    /// Which kind-specific side-effect a connection resolves to, in either
+    /// drag direction. Nil when the pair carries no extra meaning.
+    func connectionRoutingForTesting(
+        source: NSView, target: NSView
+    ) -> String? {
+        if filesConnection(source, target) != nil { return "files-sync" }
+        if browserConnection(source, target) != nil { return "browser-tool" }
+        return nil
+    }
+
     func collaborationContextForTesting(
         pane: UtilityPaneView
     ) -> CollaborationChatContext? {
@@ -4878,27 +4929,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return CollaborationChatContext(
             snapshot: authoritativeCollaborationSnapshot(),
             endpointID: endpointID)
-    }
-
-    func openChannelPanelForTesting(
-        channelID: String,
-        in window: NSWindow,
-        relativeTo source: NSView
-    ) -> UtilityPaneView? {
-        openChannelPanel(
-            channelID: channelID,
-            in: window,
-            relativeTo: source)?.pane
-    }
-
-    func channelPanelControllerForTesting(
-        _ pane: UtilityPaneView
-    ) -> ChannelPanelController? {
-        utilityRecord(forPane: pane)?.channelController
-    }
-
-    func channelIDForTesting(_ pane: UtilityPaneView) -> String? {
-        utilityRecord(forPane: pane)?.channelID
     }
 
     func handleAppRequestForTesting(_ request: String) -> String {
@@ -5112,7 +5142,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         relativeTo requestedSource: NSView? = nil,
         vertical: Bool = true,
         forceNewInstance: Bool = false,
-        channelID: String? = nil,
         chatConfiguration: AppConfig? = nil,
         chatWorkspaceDirectory: String? = nil,
         chatTitle: String? = nil,
@@ -5122,25 +5151,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             ((String) -> Void)? = nil
     ) -> UtilityPanelRecord? {
         let id = ObjectIdentifier(win)
-        // Files stays one-per-window. Chat, Channel, and Browser support extra
-        // instances when forceNewInstance is set; a plain "open" focuses the
-        // newest existing pane of that kind.
-        if kind == .channel {
-            guard let channelID else { return nil }
-            if let existing = channelRecord(withID: channelID, in: win) {
-                restorePaneZoom(revealing: existing.pane)
-                win.makeFirstResponder(existing.pane)
-                return existing
-            }
-        }
-        let allowsMultiple =
-            kind == .browser || kind == .chat || kind == .channel
+        // Files stays one-per-window. Chat and Browser support extra instances
+        // when forceNewInstance is set; a plain "open" focuses the newest
+        // existing pane of that kind.
+        let allowsMultiple = kind == .browser || kind == .chat
         let wantsNewInstance = forceNewInstance && allowsMultiple
         let requestedRoot = requestedSource.flatMap {
             terminalRoot(of: win, containing: $0)
         } ?? (win === quickTerminal.window ? quickTerminal.activeRootView : nil)
-        if kind != .channel,
-           !wantsNewInstance,
+        if !wantsNewInstance,
            let existing = utilityRecord(kind, in: win, rootedAt: requestedRoot) {
             restorePaneZoom(revealing: existing.pane)
             win.makeFirstResponder(existing.pane)
@@ -5165,33 +5184,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             alpha: CGFloat(bg.w))
         let codeController: CodeViewController?
         let browserController: BrowserPaneController?
-        let channelController: ChannelPanelController?
         let contentView: NSView
         switch kind {
         case .files, .chat:
             let controller = CodeViewController(config: config, panelKind: kind)
             codeController = controller
             browserController = nil
-            channelController = nil
-            contentView = controller.view
-        case .channel:
-            guard let channelID,
-                  let state = authoritativeCollaborationSnapshot()
-                    .channels.first(where: { $0.id == channelID })
-            else { return nil }
-            let snapshot = authoritativeCollaborationSnapshot()
-            let controller = ChannelPanelController(
-                channel: state,
-                proposals: snapshot.proposals)
-            codeController = nil
-            browserController = nil
-            channelController = controller
             contentView = controller.view
         case .browser:
             let controller = BrowserPaneController()
             codeController = nil
             browserController = controller
-            channelController = nil
             contentView = controller.view
         case .surface:
             return nil // surfaces are agent-created via openSurfacePanel
@@ -5210,13 +5213,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             ledgerID = "chat-\(nextChatLedgerID)"
             nextChatLedgerID += 1
             pane.paneHeader.title = "Chat \(ledgerID.dropFirst("chat-".count))"
-        case .channel:
-            guard let channelID,
-                  let state = authoritativeCollaborationSnapshot()
-                    .channels.first(where: { $0.id == channelID })
-            else { return nil }
-            ledgerID = "channel-panel-\(channelID)"
-            pane.paneHeader.title = state.name
         case .files, .surface:
             ledgerID = kind.rawValue
         }
@@ -5225,12 +5221,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             record = UtilityPanelRecord(controller: controller, pane: pane, ledgerID: ledgerID)
         } else if let controller = browserController {
             record = UtilityPanelRecord(browser: controller, pane: pane, ledgerID: ledgerID)
-        } else if let controller = channelController, let channelID {
-            record = UtilityPanelRecord(
-                channel: controller,
-                channelID: channelID,
-                pane: pane,
-                ledgerID: ledgerID)
         } else {
             return nil
         }
@@ -5248,28 +5238,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
         }
         utilityPanels[id, default: []].append(record)
-        if let controller = channelController, let channelID {
-            controller.onSendMessage = { [weak self] text, threadID in
-                self?.postChannelPanelMessage(
-                    text,
-                    threadID: threadID,
-                    channelID: channelID)
-            }
-            controller.onUpdateRole = {
-                [weak self] participantID, role in
-                self?.updateChannelParticipantRole(
-                    participantID: participantID,
-                    role: role,
-                    channelID: channelID)
-            }
-            controller.onProposalDecision = {
-                [weak self] proposalID, digest, approved in
-                self?.decideChannelProposal(
-                    proposalID: proposalID,
-                    digest: digest,
-                    approved: approved)
-            }
-        }
         if let controller = codeController {
             controller.onPageChanged = { [weak self, weak win, weak record] page in
                 guard let self, let win, let record,
@@ -5595,13 +5563,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             // final-owner invalidation performs cancellation and backend release.
             if !remainsOwnedByPet { assistant.invalidate() }
             record.assistant = nil
-        }
-        if record.kind == .channel {
-            appControl.broadcast([
-                "event": "channel-panel-closed",
-                "channelId": record.channelID ?? "",
-                "panelId": record.ledgerID,
-            ])
         }
         removeUtilityRecord(record, windowKey: id)
         recordPaneLedgerUtilityRemoved(
@@ -6485,6 +6446,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             message: "Could not schedule Chat control.")
     }
 
+    /// Compatibility adapter for the former Channel pane control route.
+    /// Room data and mutations remain available, but visual lifecycle actions
+    /// fail explicitly because Channel is no longer an AppKit pane type.
     private func handleChannelPanelControl(_ encoded: String) -> String {
         let request: [String: Any]
         switch BrowserControlCodec.decode(encoded) {
@@ -6498,25 +6462,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard request["v"] as? Int == 1 else {
             return BrowserControlCodec.response(
                 error: "unsupported_version",
-                message: "Channel panel requests require version 1.")
+                message: "Channel room requests require version 1.")
         }
         let operation = request["op"] as? String ?? ""
         let snapshot = authoritativeCollaborationSnapshot()
 
+        if ["open", "focus", "close", "select_thread"].contains(operation) {
+            return BrowserControlCodec.response(
+                error: "channel_panel_removed",
+                message:
+                    "The Channel pane has been removed. Use connector badges "
+                    + "for room membership and Chat for conversation.")
+        }
+
         if operation == "list" {
-            let states = onMain {
-                snapshot.channels.map { channel in
-                    let record = self.channelRecord(withID: channel.id)
-                    return ChannelPanelProjection(
-                        channel: channel,
-                        selectedThreadID:
-                            record?.channelController?.selectedThreadID)
-                        .controlState(isOpen: record != nil)
-                }
-            } ?? snapshot.channels.map {
-                ChannelPanelProjection(
-                    channel: $0,
-                    selectedThreadID: nil)
+            let states = snapshot.channels.map {
+                ChannelPanelProjection(channel: $0, selectedThreadID: nil)
                     .controlState(isOpen: false)
             }
             return BrowserControlCodec.response(result: ["channels": states])
@@ -6537,6 +6498,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 message: "No Channel has id \(channelID).")
         }
 
+        let selectedThreadID = request["threadId"] as? String
+        if let selectedThreadID,
+           !channel.messages.contains(where: {
+               $0.threadID == selectedThreadID
+           })
+        {
+            return BrowserControlCodec.response(
+                error: "unknown_thread",
+                message: "No Channel thread has id \(selectedThreadID).")
+        }
+
         if operation == "post_message" {
             guard let rawText = request["text"] as? String else {
                 return BrowserControlCodec.response(
@@ -6549,14 +6521,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     error: "missing_text",
                     message: "text must not be empty.")
             }
-            let threadID = request["threadId"] as? String
-            if let threadID,
-               !channel.messages.contains(where: { $0.threadID == threadID })
-            {
-                return BrowserControlCodec.response(
-                    error: "unknown_thread",
-                    message: "No Channel thread has id \(threadID).")
-            }
             let messageID = UUID().uuidString.lowercased()
             let actor = CollaborationActor(
                 id: "local-user:\(NSUserName())",
@@ -6566,13 +6530,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     : NSFullUserName())
             let message = CollaborationMessage(
                 id: messageID,
-                threadID: threadID,
+                threadID: selectedThreadID,
                 authorID: actor.id,
                 text: CollaborationMessage.boundedChannelText(text))
             let mutation = CollaborationControlRequest(
                 op: .postMessage,
                 actor: actor,
-                idempotencyKey: "channel-panel:\(messageID)",
+                idempotencyKey: "channel-room:\(messageID)",
                 channelID: channelID,
                 message: message)
             guard let encodedMutation = CollaborationControlCodec.encode(mutation)
@@ -6591,11 +6555,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return BrowserControlCodec.response(result:
                 ChannelPanelProjection(
                     channel: updated,
-                    selectedThreadID: threadID)
-                    .controlState(
-                        isOpen: onMain {
-                            self.channelRecord(withID: channelID) != nil
-                        } ?? false))
+                    selectedThreadID: selectedThreadID)
+                    .controlState(isOpen: false))
         }
 
         if operation == "assign_role" {
@@ -6656,107 +6617,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                       $0.id == channelID
                   })
             else { return response }
-            let record = onMain {
-                self.channelRecord(withID: channelID)
-            } ?? nil
             return BrowserControlCodec.response(result:
                 ChannelPanelProjection(
                     channel: updated,
-                    selectedThreadID:
-                        record?.channelController?.selectedThreadID)
-                    .controlState(isOpen: record != nil))
+                    selectedThreadID: selectedThreadID)
+                    .controlState(isOpen: false))
         }
 
-        let result = onMain { () -> String in
-            let existing = self.channelRecord(withID: channelID)
-            switch operation {
-            case "snapshot":
-                return BrowserControlCodec.response(result:
-                    ChannelPanelProjection(
-                        channel: channel,
-                        selectedThreadID:
-                            existing?.channelController?.selectedThreadID)
-                        .controlState(isOpen: existing != nil))
-            case "open":
-                let window = existing?.pane.window
-                    ?? self.liveCollaborationPanes().first(where: { pane in
-                        guard let paneWindow = pane.window,
-                              paneWindow !== self.quickTerminal.window
-                        else { return false }
-                        let endpointID =
-                            self.collaborationEndpoint(for: pane).id
-                        return channel.endpoints.contains {
-                            $0.id == endpointID
-                        }
-                    })?.window
-                    ?? self.standardKeyWindow()
-                guard let window,
-                      let record = self.openChannelPanel(
-                          channelID: channelID,
-                          in: window)
-                else {
-                    return BrowserControlCodec.response(
-                        error: "open_failed",
-                        message: "No main tab can host the Channel panel.")
-                }
-                return BrowserControlCodec.response(result:
-                    record.channelController?.controlState()
-                        ?? ChannelPanelProjection(
-                            channel: channel,
-                            selectedThreadID: nil)
-                            .controlState(isOpen: true))
-            case "focus":
-                guard let existing else {
-                    return BrowserControlCodec.response(
-                        error: "panel_closed",
-                        message: "Open the Channel panel before focusing it.")
-                }
-                self.restorePaneZoom(revealing: existing.pane)
-                existing.pane.window?.makeFirstResponder(existing.pane)
-                return BrowserControlCodec.response(result:
-                    existing.channelController?.controlState()
-                        ?? ChannelPanelProjection(
-                            channel: channel,
-                            selectedThreadID: nil)
-                            .controlState(isOpen: true))
-            case "close":
-                if let existing, let window = existing.pane.window,
-                   !self.closeUtilityPanel(existing, in: window)
-                {
-                    return BrowserControlCodec.response(
-                        error: "close_failed",
-                        message: "The Channel panel could not be closed.")
-                }
-                return BrowserControlCodec.response(result:
-                    ChannelPanelProjection(
-                        channel: channel,
-                        selectedThreadID: nil)
-                        .controlState(isOpen: false))
-            case "select_thread":
-                guard let existing,
-                      let controller = existing.channelController
-                else {
-                    return BrowserControlCodec.response(
-                        error: "panel_closed",
-                        message: "Open the Channel panel before selecting a thread.")
-                }
-                let threadID = request["threadId"] as? String
-                guard controller.selectThreadForControl(threadID) else {
-                    return BrowserControlCodec.response(
-                        error: "unknown_thread",
-                        message: "No Channel thread has id \(threadID ?? "").")
-                }
-                return BrowserControlCodec.response(result:
-                    controller.controlState())
-            default:
-                return BrowserControlCodec.response(
-                    error: "unknown_operation",
-                    message: "Unknown Channel panel operation '\(operation)'.")
-            }
+        switch operation {
+        case "snapshot":
+            return BrowserControlCodec.response(result:
+                ChannelPanelProjection(
+                    channel: channel,
+                    selectedThreadID: selectedThreadID)
+                    .controlState(isOpen: false))
+        default:
+            return BrowserControlCodec.response(
+                error: "unknown_operation",
+                message: "Unknown Channel room operation '\(operation)'.")
         }
-        return result ?? BrowserControlCodec.response(
-            error: "main_thread_timeout",
-            message: "Could not schedule Channel panel control.")
     }
 
     private func handleAppRequest(_ request: String) -> String {
@@ -7226,6 +7105,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         configureSessionNotch()
         quickTerminal.applyConfig(config)
         configureQuickTerminalHotKey()
+        // Chat typography/base colour are Settings-owned too. Update every
+        // distinct assistant in place so transcripts and backend state survive.
+        var updatedAssistants = Set<ObjectIdentifier>()
+        let assistants = Array(petAssistants.values)
+            + utilityPanels.values.flatMap { records in
+                records.compactMap(\.assistant)
+            }
+        for assistant in assistants
+        where updatedAssistants.insert(ObjectIdentifier(assistant)).inserted {
+            assistant.applyConfig(config)
+        }
         var windows = Set<NSWindow>()
         for s in sessions {
             let scale = s.view.window?.backingScaleFactor
@@ -7240,12 +7130,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             if let s = sessions.first(where: { $0.view.window === win }) {
                 applyWindowBacking(to: win, renderer: s.renderer)
                 win.contentResizeIncrements = s.renderer.cellSizePoints
-                let bg = s.renderer.backgroundColor
-                let color = NSColor(
-                    srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z),
-                    alpha: CGFloat(bg.w))
+                let color = s.renderer.chromeBackgroundColor
                 terminalChromes[ObjectIdentifier(win)]?.setBacking(
-                    color: color, blur: config.backgroundBlur)
+                    color: color.withAlphaComponent(
+                        PaneTint.chromeOpacity(config.backgroundOpacity)),
+                    blur: config.backgroundBlur)
                 utilityPanels[ObjectIdentifier(win)]?.forEach {
                     $0.pane.updateSurface(
                         background: color.withAlphaComponent(config.backgroundOpacity),

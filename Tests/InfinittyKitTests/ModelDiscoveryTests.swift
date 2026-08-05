@@ -187,6 +187,31 @@ final class ModelDiscoveryTests: XCTestCase {
         XCTAssertEqual(models.filter(\.isDefault).count, 1)
     }
 
+    func testProviderScopedModelLabelsDropRedundantProviderNames() {
+        let claude = PetAssistant.AgentChoice(
+            DiscoveredModel(
+                id: "claude-sonnet-5", name: "Claude Sonnet 5",
+                description: nil, isDefault: true, efforts: [],
+                defaultEffort: nil, group: nil),
+            kind: .claude, symbolName: "a.circle")
+        let codex = PetAssistant.AgentChoice(
+            DiscoveredModel(
+                id: "gpt-5.6-sol", name: "GPT-5.6-Sol",
+                description: nil, isDefault: true, efforts: [],
+                defaultEffort: nil, group: nil),
+            kind: .codex, symbolName: "o.circle")
+
+        XCTAssertEqual(PetAssistantPanelView.shortModelLabel(for: claude), "Sonnet 5")
+        XCTAssertEqual(PetAssistantPanelView.shortModelLabel(for: codex), "GPT-5.6-Sol")
+    }
+
+    func testCodexSeedCatalogNeverShowsConfiguredDefaultPlaceholder() {
+        let models = ModelDiscovery.staticModels(for: .codex)
+        XCTAssertTrue(models.contains { $0.id == "gpt-5.6-sol" && $0.isDefault })
+        XCTAssertFalse(models.contains { $0.name.localizedCaseInsensitiveContains(
+            "configured default") })
+    }
+
     func testAmpExposesModesNotModels() {
         let modes = ModelDiscovery.staticModels(for: .amp)
         XCTAssertEqual(modes.map(\.id), ["low", "medium", "high", "ultra"],

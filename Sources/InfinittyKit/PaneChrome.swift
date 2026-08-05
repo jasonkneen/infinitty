@@ -39,16 +39,84 @@ enum PaneLog {
     }
 }
 
+/// One tint colors the whole window: the chrome behind the panes, each pane's
+/// fill, and its border are the same hue at three brightnesses. The tint itself
+/// is the border — the brightest of the three — so a pane reads as one lit
+/// surface rather than a neutral panel wearing a colored ring.
+enum PaneTint {
+    /// Tab/channel tint used until one is assigned. Follows the configured
+    /// accent-color, so one setting colors the window, the panes, and their
+    /// borders together.
+    static var fallback = PaneTint.builtInFallback
+    static let builtInFallback = NSColor(
+        srgbRed: 0.196, green: 0.447, blue: 0.706, alpha: 1)
+
+    /// The card is glass, like the selected tab: the tint is laid over the
+    /// window chrome at low alpha so the blur behind reads through it, rather
+    /// than replacing the surface with a solid block of color.
+    static let glassFillAlpha: CGFloat = 0.30
+    /// A pane card carries the tint harder than the tab capsule does: it is a
+    /// large surface that has to read as its own color, not as a tinted sheet
+    /// over the chrome. It uses the tint one step down (fillScale) so the
+    /// surface stays deep rather than washing out against a neutral chrome.
+    static let cardFillAlpha: CGFloat = 0.62
+    static let glassBorderAlpha: CGFloat = 0.48
+    static let fillScale: CGFloat = 0.72
+    /// The chrome behind the cards sits more opaque than the panes. Its color
+    /// is already near black, so the only thing lifting it is the desktop
+    /// showing through — holding more of it back is what makes it read dark.
+    static let chromeOpacityBoost: CGFloat = 0.18
+
+    static func chromeOpacity(_ backgroundOpacity: CGFloat) -> CGFloat {
+        min(backgroundOpacity + chromeOpacityBoost, 1)
+    }
+    /// Gutter color before a pane reports its window's own background.
+    static let defaultChrome = NSColor(srgbRed: 0.059, green: 0.067, blue: 0.086, alpha: 1)
+
+    /// The rim is the card's fill scaled up, not blended toward white. Blending
+    /// adds the same amount to every channel, which flattens the hue into a
+    /// grey line; scaling lifts the dominant channel most and keeps the rim the
+    /// same color as the surface it edges. Measured off the reference:
+    /// card #245780 → rim #3471b0, almost exactly x1.4.
+    static let borderScale: CGFloat = 1.4
+
+    static func border(_ tint: NSColor) -> NSColor { scaled(fill(tint), borderScale) }
+
+    /// The card's glass fill: the tint over the window chrome, still
+    /// translucent so the blur behind stays readable.
+    static func cardFill(_ tint: NSColor) -> NSColor {
+        fill(tint).withAlphaComponent(cardFillAlpha)
+    }
+
+    static func fill(_ tint: NSColor) -> NSColor { scaled(tint, fillScale) }
+
+    private static func scaled(_ tint: NSColor, _ factor: CGFloat) -> NSColor {
+        guard let rgb = tint.usingColorSpace(.sRGB) else { return tint }
+        return NSColor(
+            srgbRed: min(rgb.redComponent * factor, 1),
+            green: min(rgb.greenComponent * factor, 1),
+            blue: min(rgb.blueComponent * factor, 1),
+            alpha: 1)
+    }
+}
+
 enum PaneMetrics {
-    static let leadingInset: CGFloat = 8
-    static let trailingInset: CGFloat = 8
-    static let internalHorizontalInset: CGFloat = 2
-    static let topInset: CGFloat = 3
-    static let bottomInset: CGFloat = 8
-    static let internalVerticalInset: CGFloat = 2
+    static let leadingInset: CGFloat = 6
+    static let trailingInset: CGFloat = 6
+    static let internalHorizontalInset: CGFloat = 5
+    static let topInset: CGFloat = 6
+    static let bottomInset: CGFloat = 6
+    static let internalVerticalInset: CGFloat = 5
     static let horizontalCanvasInset: CGFloat = 0
-    static let cornerRadius: CGFloat = 10
+    static let cornerRadius: CGFloat = 14
+    /// Reference rim measures 4-5px on a 2.6 px/pt capture.
+    static let borderWidth: CGFloat = 1.5
     static let minimumTerminalContentInset: CGFloat = 15
+
+    /// Renderer top inset for a pane card: enough to clear the header and keep
+    /// the first text row a constant distance below its hairline, whatever
+    /// breathing room the card itself is given.
+    static var terminalTopOffset: CGFloat { topInset + PaneHeaderView.height - 8 }
 
     static func terminalContentInset(configured: CGFloat) -> CGFloat {
         max(configured, minimumTerminalContentInset)
@@ -791,6 +859,9 @@ final class ChannelConnectorView: NSView {
     }
 
     var isDropTargetForTesting: Bool { isDropTarget }
+    /// Diameter of the drawn ring (not the 28pt hit area), so layout tests
+    /// can assert it matches the neighbouring header icons' visual weight.
+    var drawnRingDiameterForTesting: CGFloat { bounds.insetBy(dx: 8, dy: 8).width }
     var accessibilityLabelForTesting: String { accessibilityLabel() ?? "" }
 
     override func accessibilityPerformPress() -> Bool {
@@ -814,21 +885,23 @@ final class ChannelConnectorView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let connected = channelName != nil
-        let outer = bounds.insetBy(dx: 5, dy: 5)
+        // Ring is inset to ~12pt so it reads at the same visual weight as the
+        // adjacent split/todo SF Symbols; the 28pt view keeps its hit area.
+        let outer = bounds.insetBy(dx: 8, dy: 8)
         let color = connected ? channelColor : NSColor.secondaryLabelColor
 
         if isDropTarget || isDragging {
             color.withAlphaComponent(isDropTarget ? 0.24 : 0.14).setFill()
-            NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).fill()
         }
 
         let ring = NSBezierPath(ovalIn: outer)
-        ring.lineWidth = isDropTarget ? 2.5 : 1.5
+        ring.lineWidth = isDropTarget ? 2 : 1.25
         color.withAlphaComponent(connected ? 0.95 : 0.55).setStroke()
         ring.stroke()
 
         let center = NSPoint(x: bounds.midX, y: bounds.midY)
-        let dot = NSRect(x: center.x - 2, y: center.y - 2, width: 4, height: 4)
+        let dot = NSRect(x: center.x - 1.5, y: center.y - 1.5, width: 3, height: 3)
         color.withAlphaComponent(connected ? 0.95 : 0.44).setFill()
         NSBezierPath(ovalIn: dot).fill()
     }
@@ -977,7 +1050,11 @@ final class ChannelWireOverlay {
 }
 
 final class PaneHeaderView: NSView {
-    static let height: CGFloat = 28
+    static let height: CGFloat = 32
+    /// How far the title sits below the row's axis. `NSTextField` renders its
+    /// text high in the frame, so a centred box reads as too high next to the
+    /// icon and the split buttons.
+    static let titleOpticalDrop: CGFloat = 3
 
     var onSplitRight: (() -> Void)?
     var onSplitDown: (() -> Void)?
@@ -1046,6 +1123,9 @@ final class PaneHeaderView: NSView {
     var splitDownFrameForTesting: NSRect { splitDownButton.frame }
     var isRenamingForTesting: Bool { renameEditor != nil }
     var todoButtonIsVisibleForTesting: Bool { !todoButton.isHidden }
+    var channelConnectorRingDiameterForTesting: CGFloat {
+        channelConnector.drawnRingDiameterForTesting
+    }
     var todoTooltipForTesting: String { todoButton.toolTip ?? "" }
     var channelConnectorFrameForTesting: NSRect { channelConnector.frame }
     var channelConnectorAccessibilityLabelForTesting: String {
@@ -1111,7 +1191,7 @@ final class PaneHeaderView: NSView {
         layer?.backgroundColor = NSColor.clear.cgColor
 
         updateIcon()
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
         iconView.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.72)
         iconView.imageScaling = .scaleProportionallyDown
         addSubview(iconView)
@@ -1215,18 +1295,24 @@ final class PaneHeaderView: NSView {
 
     override func layout() {
         super.layout()
+        // Everything in the row hangs off the header's own centre. Hard-coded
+        // offsets here go stale the moment `height` changes, which is how the
+        // icon ended up riding above the title and the split buttons.
+        let axis = bounds.midY
         let buttonSize: CGFloat = 26
         splitDownButton.frame = NSRect(
-            x: bounds.maxX - buttonSize - 8, y: 1, width: buttonSize, height: buttonSize)
+            x: bounds.maxX - buttonSize - 8, y: axis - buttonSize / 2,
+            width: buttonSize, height: buttonSize)
         splitRightButton.frame = NSRect(
-            x: splitDownButton.frame.minX - buttonSize, y: 1,
+            x: splitDownButton.frame.minX - buttonSize, y: axis - buttonSize / 2,
             width: buttonSize, height: buttonSize)
         todoButton.frame = NSRect(
-            x: splitRightButton.frame.minX - (todoButton.isHidden ? 0 : buttonSize), y: 1,
+            x: splitRightButton.frame.minX - (todoButton.isHidden ? 0 : buttonSize),
+            y: axis - buttonSize / 2,
             width: buttonSize, height: buttonSize)
         let connectorSize: CGFloat = 28
         channelConnector.frame = NSRect(
-            x: todoButton.frame.minX - connectorSize, y: 0,
+            x: todoButton.frame.minX - connectorSize, y: axis - connectorSize / 2,
             width: connectorSize, height: connectorSize)
         let badgeWidth: CGFloat
         if channelBadge.isHidden {
@@ -1258,7 +1344,7 @@ final class PaneHeaderView: NSView {
                     maximumBadgeWidth)
                 channelBadge.frame = NSRect(
                     x: channelConnector.frame.minX - badgeWidth - 4,
-                    y: 5, width: badgeWidth, height: 18)
+                    y: axis - 9, width: badgeWidth, height: 18)
             } else {
                 // At extremely small widths the connected ring remains
                 // visible and accessible; do not erase the unique pane name
@@ -1267,12 +1353,14 @@ final class PaneHeaderView: NSView {
                 channelBadge.frame = .zero
             }
         }
-        iconView.frame = NSRect(x: 10, y: 6, width: 16, height: 16)
+        iconView.frame = NSRect(x: 10, y: axis - 9, width: 18, height: 18)
         let titleLimit = channelBadge.isHidden
             ? channelConnector.frame.minX
             : channelBadge.frame.minX
+        // `titleOpticalDrop` below the axis: the label field renders its text
+        // high in the box, so a mathematically centred frame reads as too high.
         titleLabel.frame = NSRect(
-            x: 32, y: 1,
+            x: 32, y: axis - 10 - Self.titleOpticalDrop,
             width: max(titleLimit - 39, 0), height: 20)
         if let renameEditor {
             renameEditor.frame = renameFrame
@@ -1287,7 +1375,7 @@ final class PaneHeaderView: NSView {
         ]).width)
         let width = min(titleLabel.frame.width, max(96, textWidth + 28))
         return NSRect(
-            x: titleLabel.frame.minX - 4, y: 3,
+            x: titleLabel.frame.minX - 4, y: bounds.midY - 11,
             width: width, height: 22)
     }
 
@@ -1459,7 +1547,9 @@ final class PaneDropPreviewView: NSView {
 }
 
 final class PaneOutlineView: NSView {
-    var accentColor = CodePalette.paneFocusAccent {
+    /// The pane's tint. Its card is filled with this color (behind the glyphs,
+    /// by the renderer) and edged with the same color, brighter.
+    var accentColor = PaneTint.fallback {
         didSet { updateAppearance(animated: window != nil) }
     }
     var isSelected = false {
@@ -1469,44 +1559,78 @@ final class PaneOutlineView: NSView {
         }
     }
 
+    /// Top-weighted lift over the card. Paired with the trough's recess it
+    /// gives the pane a lit top edge instead of a flat accent wash.
+    private let lift = CAGradientLayer()
+    private var liftTopAlpha: CGFloat = 0
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.borderWidth = 1
+        layer?.borderWidth = PaneMetrics.borderWidth
         layer?.cornerRadius = PaneMetrics.cornerRadius
+        layer?.masksToBounds = true
+        lift.startPoint = CGPoint(x: 0.5, y: 1)
+        lift.endPoint = CGPoint(x: 0.5, y: 0)
+        lift.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        lift.actions = ["position": NSNull(), "bounds": NSNull()]
+        layer?.addSublayer(lift)
         updateAppearance(animated: false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    private func updateAppearance(animated: Bool) {
-        let oldBackground = layer?.presentation()?.backgroundColor ?? layer?.backgroundColor
-        let oldBorder = layer?.presentation()?.borderColor ?? layer?.borderColor
-        let background = accentColor.withAlphaComponent(
-            isSelected ? 0.09 : 0.045).cgColor
-        let border = (isSelected
-            ? accentColor.withAlphaComponent(0.68)
-            : accentColor.withAlphaComponent(0.30)).cgColor
-        layer?.backgroundColor = background
-        layer?.borderColor = border
-        layer?.borderWidth = isSelected ? 1.5 : 1
-        guard animated else { return }
-        for (keyPath, from, to) in [
-            ("backgroundColor", oldBackground, background),
-            ("borderColor", oldBorder, border),
-        ] {
-            let transition = CABasicAnimation(keyPath: keyPath)
-            transition.fromValue = from
-            transition.toValue = to
-            transition.duration = 0.18
-            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            layer?.add(transition, forKey: "pane-\(keyPath)")
-        }
+    override func layout() {
+        super.layout()
+        lift.frame = bounds
     }
 
-    var backgroundAlphaForTesting: CGFloat {
-        layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.alphaComponent ?? 0
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        lift.frame = bounds
+    }
+
+    private func updateAppearance(animated: Bool) {
+        let oldLift = lift.presentation()?.colors ?? lift.colors
+        let oldBorder = layer?.presentation()?.borderColor ?? layer?.borderColor
+        // The lightest of the window's three steps. Focus lifts the rim a
+        // little further rather than switching it to a different color.
+        let edge = PaneTint.border(accentColor)
+        let border = edge.withAlphaComponent(isSelected ? 1 : 0.85).cgColor
+        // The reference card runs lighter at the top and deeper at the bottom
+        // (#235482 -> #123374). There the backdrop supplies it through the
+        // glass; the chrome behind ours is near-opaque, so paint it: a small
+        // lift at the top and a deepening toward the bottom. Weighted toward
+        // darkening because a white wash over the whole card would flatten the
+        // terminal's text contrast.
+        liftTopAlpha = 0.06
+        let liftColors = [
+            NSColor.white.withAlphaComponent(liftTopAlpha).cgColor,
+            NSColor.clear.cgColor,
+            NSColor.black.withAlphaComponent(0.10).cgColor,
+        ]
+        lift.locations = [0, 0.42, 1]
+        lift.colors = liftColors
+        layer?.borderColor = border
+        guard animated else { return }
+        let fade = CABasicAnimation(keyPath: "colors")
+        fade.fromValue = oldLift
+        fade.toValue = liftColors
+        fade.duration = 0.18
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        lift.add(fade, forKey: "pane-lift")
+        let stroke = CABasicAnimation(keyPath: "borderColor")
+        stroke.fromValue = oldBorder
+        stroke.toValue = border
+        stroke.duration = 0.18
+        stroke.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer?.add(stroke, forKey: "pane-borderColor")
+    }
+
+    var backgroundAlphaForTesting: CGFloat { liftTopAlpha }
+    var borderAlphaForTesting: CGFloat {
+        layer?.borderColor.flatMap(NSColor.init(cgColor:))?.alphaComponent ?? 0
     }
     var accentColorForTesting: NSColor { accentColor }
 }

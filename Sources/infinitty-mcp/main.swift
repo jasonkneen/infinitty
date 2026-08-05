@@ -673,8 +673,8 @@ let tools: [Tool] = [
     ),
     Tool(
         name: "infinitty_list_panes",
-        description: "List every live infinitty pane, including terminals, named Chat "
-            + "participants, and Channel workspaces. The id is the stable handle accepted "
+        description: "List every live infinitty pane, including terminals and named Chat "
+            + "participants. The id is the stable handle accepted "
             + "by infinitty_split, infinitty_focus, infinitty_close, and infinitty_events. "
             + "Collaboration-capable panes also include the endpoint object used to link a "
             + "Channel.",
@@ -1134,17 +1134,16 @@ let tools: [Tool] = [
     ),
     Tool(
         name: "infinitty_channel_panel",
-        description: "Control the first-class Channel workspace pane. List room panels; "
-            + "open, focus, close, or inspect a room; select a delegation thread; "
-            + "post a durable human message; or assign a connected participant's role.",
+        description: "Inspect and update durable Channel room state without opening a "
+            + "separate pane. List or inspect rooms, post a room/thread message, or "
+            + "assign a connected participant's role.",
         schema: [
             "type": "object",
             "properties": [
                 "action": [
                     "type": "string",
                     "enum": [
-                        "list", "open", "focus", "close", "snapshot",
-                        "select_thread", "post_message", "assign_role",
+                        "list", "snapshot", "post_message", "assign_role",
                     ],
                 ] as [String: Any],
                 "channelId": [
@@ -1701,6 +1700,33 @@ let tools: [Tool] = [
     ),
 ]
 
+/// Ephemeral Chat bridges set this at process launch. Persistent/manual MCP
+/// registrations omit it and retain the full visible-terminal tool surface for
+/// compatibility.
+let mcpToolProfile = ProcessInfo.processInfo.environment["INFINITTY_MCP_PROFILE"]
+    ?? "visible-terminal"
+let workspaceBlockedToolNames: Set<String> = [
+    "infinitty_toggle_quick_terminal",
+    "infinitty_list_panes",
+    "infinitty_events",
+    "infinitty_run",
+    "infinitty_screen",
+    "infinitty_history",
+    "infinitty_send",
+    "infinitty_last_output",
+    "infinitty_exit_code",
+    "infinitty_new_tab",
+    "infinitty_new_window",
+    "infinitty_split",
+    "infinitty_focus",
+    "infinitty_close",
+]
+func toolIsAvailableForProfile(_ tool: Tool) -> Bool {
+    mcpToolProfile != "workspace-chat"
+        || !workspaceBlockedToolNames.contains(tool.name)
+}
+let availableTools = tools.filter(toolIsAvailableForProfile)
+
 // MARK: - JSON-RPC over stdio (newline-delimited)
 
 func send(_ object: [String: Any]) {
@@ -1730,8 +1756,12 @@ func isToolError(_ text: String) -> Bool {
     return !ok
 }
 
-let terminalBootstrapResponse = bootstrapTerminalChannel()
-let terminalBootstrapInstructions = paneSocketPath.map { _ in
+let terminalBootstrapResponse = mcpToolProfile == "workspace-chat"
+    ? nil
+    : bootstrapTerminalChannel()
+let terminalBootstrapInstructions = mcpToolProfile == "workspace-chat"
+    ? nil
+    : paneSocketPath.map { _ in
     var instructions = terminalChannelInstructions()
     if let context = bootstrapModelContext(from: terminalBootstrapResponse) {
         instructions += "\n\nInitial live Channel snapshot (refresh with infinitty_channel_self on later turns):\n"
@@ -1769,7 +1799,7 @@ while let line = readLine(strippingNewline: true) {
     case "tools/list":
         guard let id else { break }
         reply(id: id, result: [
-            "tools": tools.map {
+            "tools": availableTools.map {
                 ["name": $0.name, "description": $0.description, "inputSchema": $0.schema]
             },
         ])
@@ -1780,6 +1810,13 @@ while let line = readLine(strippingNewline: true) {
         let args = params["arguments"] as? [String: Any] ?? [:]
         guard let tool = tools.first(where: { $0.name == name }) else {
             replyError(id: id, code: -32602, message: "unknown tool \(name)")
+            continue
+        }
+        guard toolIsAvailableForProfile(tool) else {
+            replyError(
+                id: id,
+                code: -32602,
+                message: "tool \(name) is unavailable in workspace-chat profile")
             continue
         }
         let text = tool.invoke(args)

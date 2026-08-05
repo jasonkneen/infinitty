@@ -1,3 +1,4 @@
+import AppKit
 import simd
 
 // One terminal cell: 16 bytes, cache-friendly, trivially memcpy-able.

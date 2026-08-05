@@ -33,6 +33,80 @@ for line in sys.stdin:
         XCTAssertEqual(second, "reply:two")
     }
 
+    func testClaudeBridgeLaunchesInWorkspaceWithModeSpecificToolPolicy() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import os
+import sys
+
+for line in sys.stdin:
+    event = json.loads(line)
+    result = {
+        "type": "result",
+        "subtype": "success",
+        "result": json.dumps({
+            "cwd": os.getcwd(),
+            "profile": os.environ.get("INFINITTY_MCP_PROFILE"),
+            "args": sys.argv[1:],
+            "session": event["session_id"],
+        }),
+    }
+    sys.stdout.write(json.dumps(result) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-profile-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let bridge = ClaudeBridge(executableURL: executable)
+        defer { bridge.stop() }
+        let chatText = try await bridge.turn(
+            prompt: "chat", system: "test", model: "test-model", timeout: 2,
+            conversationID: "profile-conversation", cwd: workspace.path,
+            profile: .workspaceChat)
+        let chat = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(chatText.utf8)) as? [String: Any])
+        let chatArgs = try XCTUnwrap(chat["args"] as? [String])
+        XCTAssertEqual(
+            (chat["cwd"] as? String).map {
+                URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
+            },
+            workspace.resolvingSymlinksInPath().path)
+        XCTAssertEqual(chat["profile"] as? String, "workspace-chat")
+        XCTAssertTrue(chatArgs.contains(
+            #"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}}"#))
+        XCTAssertTrue(chatArgs.contains(
+            "Read Write Edit Glob Grep Bash BashOutput KillShell"))
+        XCTAssertTrue(chatArgs.contains("WebFetch WebSearch Task TodoWrite"))
+        XCTAssertFalse(chatArgs.contains(
+            "Bash BashOutput KillShell WebFetch WebSearch Task TodoWrite"))
+
+        let terminalText = try await bridge.turn(
+            prompt: "terminal", system: "test", model: "test-model", timeout: 2,
+            conversationID: "profile-conversation", cwd: workspace.path,
+            profile: .visibleTerminal)
+        let terminal = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(terminalText.utf8)) as? [String: Any])
+        let terminalArgs = try XCTUnwrap(terminal["args"] as? [String])
+        XCTAssertEqual(terminal["profile"] as? String, "visible-terminal")
+        XCTAssertTrue(terminalArgs.contains("Read Write Edit Glob Grep"))
+        XCTAssertTrue(terminalArgs.contains {
+            $0.contains("Bash BashOutput KillShell")
+        })
+        XCTAssertNotEqual(chat["session"] as? String, terminal["session"] as? String)
+    }
+
+    func testCodexUsesDistinctProcessPoolsForWorkspaceAndTerminalProfiles() {
+        XCTAssertFalse(CodexAppServer.shared === CodexAppServer.visibleTerminalShared)
+        XCTAssertEqual(CodexAppServer.shared.profile, .workspaceChat)
+        XCTAssertEqual(
+            CodexAppServer.visibleTerminalShared.profile,
+            .visibleTerminal)
+    }
+
     func testClaudeBridgeSerializesOverlappingTurns() async throws {
         let executable = try makePythonExecutable(#"""
 import json

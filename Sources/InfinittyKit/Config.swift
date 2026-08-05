@@ -42,9 +42,9 @@ struct AppConfig {
     /// UI accent for chrome selection (active tab, file-row highlight, chat
     /// bubbles, send button, pinned-tab default). nil = built-in indigo.
     var accentColor: UInt32?
-    /// shadcn base colour driving the app's SwiftUI surfaces
-    /// (neutral | zinc | stone | gray | slate), or a path to a CSS theme.
-    var uiTheme: String?
+    /// Shared type size for Chat and ShadKit interface chrome. The complete
+    /// typography ramp scales with it; terminal glyph size remains `fontSize`.
+    var interfaceFontSize: CGFloat = 15
     var palette: [Int: UInt32] = [:] // index (0-255) -> 0xRRGGBB overrides
     var trafficLights = "circle" // circle | square | rectangle | diamond
     var pet: String? = "infinitty" // built-in name, codex pet name, or directory path
@@ -220,8 +220,8 @@ struct AppConfig {
                 selectionBackground = AppConfig.parseColor(value)
             case "accent-color", "accent":
                 accentColor = AppConfig.parseColor(value)
-            case "ui-theme", "uitheme", "theme":
-                uiTheme = value
+            case "interface-font-size", "ui-font-size", "chat-font-size":
+                if let v = Double(value) { interfaceFontSize = CGFloat(v) }
             case "palette":
                 if let (index, color) = AppConfig.parsePaletteEntry(value) {
                     palette[index] = color
@@ -418,6 +418,9 @@ struct AppConfig {
         } else {
             out += "pet = none\n"
         }
+        if interfaceFontSize != 15 {
+            out += "interface-font-size = \(Double(interfaceFontSize))\n"
+        }
         if !agentGlow { out += "agent-glow = false\n" }
         if sideTabs { out += "side-tabs = true\n" }
         if optionAsAlt != "true" { out += "macos-option-as-alt = \(optionAsAlt)\n" }
@@ -483,6 +486,7 @@ struct AppConfig {
 
     private mutating func clamp() {
         fontSize = min(max(fontSize, 6), 72)
+        interfaceFontSize = min(max(interfaceFontSize, 11), 22)
         margin = min(max(margin, 0), 64)
         lineSpacing = min(max(lineSpacing, 0.7), 3)
         kerning = min(max(kerning, 0.7), 2)

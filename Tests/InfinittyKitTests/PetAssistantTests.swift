@@ -228,6 +228,196 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: cwd))
     }
 
+    func testTerminalAccessDefaultsOffRejectsMissingTerminalAndResetsOnDetach() {
+        let assistant = PetAssistant(config: AppConfig())
+        XCTAssertFalse(assistant.terminalAvailable)
+        XCTAssertFalse(assistant.terminalAccessEnabled)
+        XCTAssertFalse(assistant.setTerminalAccessEnabled(true))
+        XCTAssertEqual(assistant.controlState().executionMode, "workspace-chat")
+
+        let terminal = TerminalSession(config: AppConfig(), scale: 2)
+        terminal.workingDirectory = "/tmp"
+        defer { terminal.shutdown() }
+        assistant.attach(to: terminal)
+
+        XCTAssertTrue(assistant.terminalAvailable)
+        XCTAssertFalse(assistant.terminalAccessEnabled)
+        XCTAssertTrue(assistant.setTerminalAccessEnabled(true))
+        XCTAssertTrue(assistant.effectiveTerminalAccessEnabled)
+        XCTAssertEqual(assistant.controlState().executionMode, "visible-terminal")
+
+        let replacement = TerminalSession(config: AppConfig(), scale: 2)
+        replacement.workingDirectory = "/tmp"
+        defer { replacement.shutdown() }
+        assistant.attach(to: replacement)
+        XCTAssertFalse(
+            assistant.terminalAccessEnabled,
+            "binding a different terminal must require fresh authorization")
+        XCTAssertTrue(assistant.setTerminalAccessEnabled(true))
+
+        assistant.detach()
+        XCTAssertFalse(assistant.terminalAvailable)
+        XCTAssertFalse(assistant.terminalAccessEnabled)
+        assistant.attach(to: terminal)
+        XCTAssertTrue(assistant.terminalAvailable)
+        XCTAssertFalse(assistant.terminalAccessEnabled)
+        XCTAssertEqual(assistant.controlState().executionMode, "workspace-chat")
+    }
+
+    func testExplicitWorkspaceWinsAcrossChatAndTerminalModes() {
+        let assistant = PetAssistant(config: AppConfig())
+        assistant.setWorkspaceDirectory("/tmp/explicit-workspace")
+        let terminal = TerminalSession(config: AppConfig(), scale: 2)
+        terminal.workingDirectory = "/tmp/terminal-workspace"
+        defer { terminal.shutdown() }
+        assistant.attach(to: terminal)
+
+        XCTAssertEqual(
+            assistant.workspaceDirectoryForChat(),
+            "/tmp/explicit-workspace")
+        XCTAssertTrue(assistant.setTerminalAccessEnabled(true))
+        XCTAssertEqual(
+            assistant.workspaceDirectoryForChat(),
+            "/tmp/explicit-workspace")
+    }
+
+    func testModeSpecificPromptsAndSignaturesSeparateTerminalAuthorization() {
+        let chat = PetAssistant.systemPromptForTesting(profile: .workspaceChat)
+        let terminal = PetAssistant.systemPromptForTesting(profile: .visibleTerminal)
+        XCTAssertTrue(chat.contains("EXECUTION MODE: CHAT"))
+        XCTAssertTrue(chat.contains("No visible terminal is authorized"))
+        XCTAssertTrue(chat.contains("native workspace Read, Write, Edit"))
+        XCTAssertTrue(terminal.contains("EXECUTION MODE: TERMINAL"))
+        XCTAssertTrue(terminal.contains("explicitly enabled access"))
+        XCTAssertTrue(terminal.contains("visible pane"))
+
+        let chatSignature = PetAssistant.backendSessionSignatureForTesting(
+            backend: .codex(model: "gpt-test"), cwd: "/tmp/work",
+            profile: .workspaceChat)
+        let terminalSignature = PetAssistant.backendSessionSignatureForTesting(
+            backend: .codex(model: "gpt-test"), cwd: "/tmp/work",
+            profile: .visibleTerminal)
+        XCTAssertNotEqual(chatSignature, terminalSignature)
+    }
+
+    func testStatefulModeToggleReleasesAndBootstrapsNewProfileLifecycle() {
+        let terminal = TerminalSession(config: AppConfig(), scale: 2)
+        terminal.workingDirectory = "/tmp"
+        defer { terminal.shutdown() }
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-mode-test",
+            displayName: "Codex mode test", symbolName: "o.circle")
+        let starts = [
+            expectation(description: "chat profile turn"),
+            expectation(description: "terminal profile turn"),
+        ]
+        let firstFinished = expectation(description: "chat profile finished")
+        var conversationIDs: [String] = []
+        var dones: [(PetAssistant.AIOutcome) -> Void] = []
+        var registeredSystems: [String] = []
+        var releases: [String] = []
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { _, _, _, _, conversationID, _, _, done in
+                DispatchQueue.main.async {
+                    conversationIDs.append(conversationID ?? "")
+                    dones.append(done)
+                    starts[dones.count - 1].fulfill()
+                }
+            },
+            conversationRegistrar: { _, system, _, _ in
+                registeredSystems.append(system)
+            },
+            conversationReleaser: { releases.append($0) })
+        assistant.attach(to: terminal)
+        assistant.onPetMessage = { text in
+            if text == "chat profile answer" { firstFinished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("first mode request")
+        wait(for: [starts[0]], timeout: 2)
+        dones[0](.text("chat profile answer"))
+        wait(for: [firstFinished], timeout: 2)
+
+        XCTAssertTrue(assistant.setTerminalAccessEnabled(true))
+        panel.submitForTesting("second mode request")
+        wait(for: [starts[1]], timeout: 2)
+
+        XCTAssertEqual(releases.count, 1)
+        XCTAssertNotEqual(conversationIDs[0], conversationIDs[1])
+        XCTAssertEqual(registeredSystems.count, 2)
+        XCTAssertTrue(registeredSystems[0].contains("EXECUTION MODE: CHAT"))
+        XCTAssertTrue(registeredSystems[1].contains("EXECUTION MODE: TERMINAL"))
+        dones[1](.text("terminal profile answer"))
+    }
+
+    func testTerminalHistoryIsInjectedOnlyWhenTerminalModeIsEffective() {
+        let terminal = TerminalSession(config: AppConfig(), scale: 2)
+        terminal.workingDirectory = "/tmp"
+        let bytes = Array("SECRET_TERMINAL_OUTPUT\r\n".utf8)
+        bytes.withUnsafeBufferPointer {
+            terminal.terminal.feed($0.baseAddress!, $0.count)
+        }
+        defer { terminal.shutdown() }
+
+        let first = expectation(description: "chat-mode turn")
+        let second = expectation(description: "terminal-mode turn")
+        var users: [String] = []
+        let amp = PetAssistant.AgentChoice(
+            kind: .amp, modelID: "amp-test",
+            displayName: "Amp test", symbolName: "bolt")
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, amp],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                users.append(user)
+                done(.text("ok"))
+                (users.count == 1 ? first : second).fulfill()
+            })
+        assistant.attach(to: terminal)
+        let panel = assistant.makeSidebarPanelView()
+        panel.selectModelForTesting(1)
+        panel.submitForTesting("chat request")
+        wait(for: [first], timeout: 2)
+
+        XCTAssertTrue(assistant.setTerminalAccessEnabled(true))
+        panel.submitForTesting("terminal request")
+        wait(for: [second], timeout: 2)
+
+        XCTAssertEqual(users.count, 2)
+        XCTAssertTrue(users[0].contains("workspace Chat mode"))
+        XCTAssertFalse(users[0].contains("SECRET_TERMINAL_OUTPUT"))
+        XCTAssertTrue(users[1].contains("recent terminal output"))
+        XCTAssertTrue(users[1].contains("SECRET_TERMINAL_OUTPUT"))
+    }
+
+    func testPanelModeCallbacksUpdateAssistantInLegacyAndShadKitSurfaces() {
+        let terminal = TerminalSession(config: AppConfig(), scale: 2)
+        terminal.workingDirectory = "/tmp"
+        defer { terminal.shutdown() }
+
+        ShadcnChatFeature.overrideForTesting = false
+        let legacyAssistant = PetAssistant(config: AppConfig())
+        legacyAssistant.attach(to: terminal)
+        let legacy = legacyAssistant.makeSidebarPanelView()
+        XCTAssertTrue(legacy.terminalModeAvailableForTesting)
+        XCTAssertFalse(legacy.terminalModeEnabledForTesting)
+        legacy.selectTerminalModeForTesting(true)
+        XCTAssertTrue(legacyAssistant.effectiveTerminalAccessEnabled)
+        XCTAssertTrue(legacy.terminalModeEnabledForTesting)
+
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+        let shadAssistant = PetAssistant(config: AppConfig())
+        shadAssistant.attach(to: terminal)
+        let shad = shadAssistant.makeSidebarPanelView()
+        XCTAssertEqual(shad.shadcnTerminalModeAvailableForTesting, true)
+        XCTAssertEqual(shad.shadcnTerminalModeEnabledForTesting, false)
+        shad.selectShadcnTerminalModeForTesting(true)
+        XCTAssertTrue(shadAssistant.effectiveTerminalAccessEnabled)
+        XCTAssertEqual(shad.shadcnTerminalModeEnabledForTesting, true)
+    }
+
     func testConnectedChatInjectsIdentityAndPublishesBothSidesOfTurn() throws {
         let endpointOne = CollaborationEndpoint(
             id: "instance/chat-1", kind: .chat, label: "Chat 1",

@@ -3,6 +3,40 @@ import XCTest
 @testable import InfinittyKit
 
 final class ProviderDiscoveryTests: XCTestCase {
+    func testWorkspaceMCPExecutableOmitsPaneDiscoveryAndEventTools() throws {
+        let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/debug/infinitty-mcp").path
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            throw XCTSkip("infinitty-mcp executable is not built")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        var environment = ProcessInfo.processInfo.environment
+        environment["INFINITTY_MCP_PROFILE"] = "workspace-chat"
+        process.environment = environment
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        input.fileHandleForWriting.write(Data(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n".utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        let tools = try XCTUnwrap(result["tools"] as? [[String: Any]])
+        let names = Set(tools.compactMap { $0["name"] as? String })
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertFalse(names.contains("infinitty_list_panes"))
+        XCTAssertFalse(names.contains("infinitty_events"))
+        XCTAssertFalse(names.contains("infinitty_run"))
+        XCTAssertTrue(names.contains("infinitty_browser_list"))
+    }
+
 
     // MARK: CLIExecutableResolver
 
@@ -178,13 +212,16 @@ final class ProviderDiscoveryTests: XCTestCase {
     /// block, instead of relying on the shared (stale-prone) current.sock.
     func testClaudeMCPJSONInjectsAppSocketEnv() {
         let data = MCPConfiguration.claudeMCPJSON(
-            binaryPath: "/b/infinitty-mcp", appSocketPath: "/tmp/infinitty-app-42.sock")
+            binaryPath: "/b/infinitty-mcp",
+            appSocketPath: "/tmp/infinitty-app-42.sock",
+            profile: .workspaceChat)
         XCTAssertNotNil(data)
         let root = try? JSONSerialization.jsonObject(with: data!) as? [String: Any]
         let server = ((root?["mcpServers"] as? [String: Any])?["infinitty"]) as? [String: Any]
         XCTAssertEqual(server?["command"] as? String, "/b/infinitty-mcp")
         let env = server?["env"] as? [String: String]
         XCTAssertEqual(env?["INFINITTY_APP_SOCKET"], "/tmp/infinitty-app-42.sock")
+        XCTAssertEqual(env?["INFINITTY_MCP_PROFILE"], "workspace-chat")
 
         // Without a socket path (persistent global config) there is no env.
         let plain = MCPConfiguration.claudeMCPJSON(binaryPath: "/b/infinitty-mcp")
@@ -195,11 +232,17 @@ final class ProviderDiscoveryTests: XCTestCase {
 
     func testCodexConfigOverridesInjectAppSocketEnv() {
         let overrides = MCPConfiguration.codexConfigOverrides(
-            binaryPath: "/b/infinitty-mcp", appSocketPath: "/tmp/infinitty-app-42.sock")
+            binaryPath: "/b/infinitty-mcp",
+            appSocketPath: "/tmp/infinitty-app-42.sock",
+            profile: .visibleTerminal)
         XCTAssertTrue(overrides.contains { $0.hasPrefix("mcp_servers.infinitty.command=") })
         XCTAssertTrue(overrides.contains {
             $0.contains("mcp_servers.infinitty.env.INFINITTY_APP_SOCKET")
                 && $0.contains("/tmp/infinitty-app-42.sock")
+        })
+        XCTAssertTrue(overrides.contains {
+            $0.contains("mcp_servers.infinitty.env.INFINITTY_MCP_PROFILE")
+                && $0.contains("visible-terminal")
         })
         // No socket path → command only, no env override.
         let plain = MCPConfiguration.codexConfigOverrides(binaryPath: "/b/infinitty-mcp")

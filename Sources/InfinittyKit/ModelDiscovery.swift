@@ -207,9 +207,10 @@ actor ModelDiscovery {
 
     // MARK: - Static providers
 
-    /// Providers with no listing surface. Claude's aliases are the ones
-    /// `claude --help` documents for `--model`; amp's are the modes its `-m`
-    /// flag accepts.
+    /// Providers with no listing surface plus the last-known Codex catalog
+    /// used only before its live/cache-backed `model/list` result arrives.
+    /// Claude's aliases are documented by `claude --help`; amp's entries are
+    /// the modes its `-m` flag accepts.
     static func staticModels(
         for kind: PetAssistant.AgentChoice.Kind
     ) -> [DiscoveredModel] {
@@ -224,6 +225,15 @@ actor ModelDiscovery {
                 model("claude-opus-4-8", "Claude Opus 4.8"),
                 model("claude-sonnet-5", "Claude Sonnet 5"),
                 model("claude-haiku-4-5", "Claude Haiku 4.5"),
+            ]
+        case .codex:
+            return [
+                model("gpt-5.6-sol", "GPT-5.6-Sol", isDefault: true),
+                model("gpt-5.6-terra", "GPT-5.6-Terra"),
+                model("gpt-5.6-luna", "GPT-5.6-Luna"),
+                model("gpt-5.5", "GPT-5.5"),
+                model("gpt-5.4", "GPT-5.4"),
+                model("gpt-5.4-mini", "GPT-5.4-Mini"),
             ]
         case .amp:
             return [

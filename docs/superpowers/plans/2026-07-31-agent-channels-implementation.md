@@ -143,19 +143,17 @@ persistent; keyboard linking and frame coalescing remain.
 
 ### 1.4 Channel and Plan/Status projections
 
-Status: a connector popover projects endpoints, roles, plan status, and recent
-messages. Linked Chat providers receive bounded live Channel identity,
-membership, peer, and recent-message context on every turn; accepted user and
-provider messages are appended to the durable room transcript. A full movable
-Channel pane, DAG interactions, approval/evidence views, and reopen/stage
-behavior remain.
+Status: implemented as durable room state without a Channel pane. Connector
+badges project membership while linked Chat providers receive bounded live
+identity, peer, plan, and recent-message context. Data operations remain
+available to MCP/headless clients; former visual lifecycle operations return
+`channel_panel_removed`.
 
-- Add `UtilityPanelKind.channel`.
-- Render room transcript, participant status, delegation subthreads, plan DAG,
-  responsibilities, conflicts, approvals, evidence, and audit receipts.
-- Support normal pane movement, tab/window placement, double-click stage/restore,
-  close/reopen, and headless open/focus/stage commands.
-- Turn per-pane todos into room-plan projections.
+A Chat thread may additionally own an ordered in-pane roster. `/add-agent` and
+the model picker's `+` add exact configured agents. Broadcasts run one bounded
+sequential round; `@alias` routes only to recognized members. Responses remain
+in one attributed transcript and publish through the Chat endpoint as bounded
+`[Agent]` messages rather than creating endpoints.
 
 ### 1.5 MCP/action manifest parity
 

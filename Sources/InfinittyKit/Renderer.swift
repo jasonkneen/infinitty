@@ -149,6 +149,43 @@ final class Renderer: NSObject {
         buildPipelines()
     }
 
+    /// A pane's card is filled with its tint and edged with the same color,
+    /// brighter. Panes carry the fallback tint until a tab or channel assigns
+    /// one of its own.
+    static var defaultPaneTint: NSColor { PaneTint.fallback }
+    private var paneTint: NSColor = Renderer.defaultPaneTint
+
+    /// Assign this pane's tint. Nil restores the default.
+    func setPaneTint(_ color: NSColor?) {
+        let next = color ?? Renderer.defaultPaneTint
+        renderLock.lock()
+        guard paneTint != next else {
+            renderLock.unlock()
+            return
+        }
+        paneTint = next
+        if let layer { prepare(layer: layer) }
+        renderLock.unlock()
+        poke()
+    }
+
+    /// The pane fill, tint included — what the card and its border are built from.
+    var paneTintColor: NSColor {
+        renderLock.lock()
+        defer { renderLock.unlock() }
+        return paneTint
+    }
+
+    /// The window's own background, untinted. The tint colors a pane's card and
+    /// its border only — the chrome behind the cards stays the title bar color.
+    var chromeBackgroundColor: NSColor {
+        renderLock.lock()
+        let bg = theme.background
+        renderLock.unlock()
+        return NSColor(
+            srgbRed: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1)
+    }
+
     /// Live config reload: swap atlas, theme, and metrics. The caller
     /// re-runs view geometry afterwards.
     func applyConfig(_ newConfig: AppConfig, scale: CGFloat) {
@@ -220,9 +257,18 @@ final class Renderer: NSObject {
             && config.backgroundOpacity >= 1 && !config.backgroundBlur
         layer.isOpaque = opaque
         let bg = theme.background
-        layer.backgroundColor = opaque
-            ? CGColor(red: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1)
-            : nil
+        if opaque {
+            layer.backgroundColor = CGColor(
+                red: CGFloat(bg.x), green: CGFloat(bg.y), blue: CGFloat(bg.z), alpha: 1)
+        } else if usesSharedWindowSurface {
+            // A shared surface clears the drawable fully transparent, so the
+            // card's glass goes on the layer *behind* the glyphs: the tint at
+            // low alpha over the window chrome, which keeps the blur behind it
+            // readable the way the selected tab's pill does.
+            layer.backgroundColor = PaneTint.cardFill(paneTint).cgColor
+        } else {
+            layer.backgroundColor = nil
+        }
     }
 
     private func buildPipelines() {

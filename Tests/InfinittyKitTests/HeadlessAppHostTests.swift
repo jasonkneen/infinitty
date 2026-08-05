@@ -647,57 +647,67 @@ final class HeadlessAppHostTests: XCTestCase {
         let channels = try XCTUnwrap(result["channels"] as? [[String: Any]])
         XCTAssertEqual(channels.first?["id"] as? String, "headless-channel")
 
-        let panelRequest = try XCTUnwrap(BrowserControlCodec.encode([
+        let openRequest = try XCTUnwrap(BrowserControlCodec.encode([
             "v": 1,
             "op": "open",
             "channelId": "headless-channel",
         ]))
-        let panelText = try XCTUnwrap(AppSocketClient.request(
-            "channel-panel \(panelRequest)",
+        let openText = try XCTUnwrap(AppSocketClient.request(
+            "channel-panel \(openRequest)",
             socketPath: fixture.socketPath))
-        let panelEnvelope = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(panelText.utf8))
+        let openEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(openText.utf8))
                 as? [String: Any])
-        XCTAssertEqual(panelEnvelope["ok"] as? Bool, true)
-        let panel = try XCTUnwrap(
-            panelEnvelope["result"] as? [String: Any])
-        XCTAssertEqual(panel["panelId"] as? String,
-                       "channel-panel-headless-channel")
-        XCTAssertEqual(panel["title"] as? String, "Headless Channel")
-        XCTAssertEqual(panel["open"] as? Bool, true)
-        let panelID = try XCTUnwrap(panel["panelId"] as? String)
-        XCTAssertEqual(
-            AppSocketClient.request(
-                "focus \(panelID)",
-                socketPath: fixture.socketPath),
-            "ok")
+        XCTAssertEqual(openEnvelope["ok"] as? Bool, false)
+        let openError = try XCTUnwrap(openEnvelope["error"] as? [String: Any])
+        XCTAssertEqual(openError["code"] as? String, "channel_panel_removed")
 
-        let listWithPanelText = try XCTUnwrap(
+        let snapshotRequest = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "op": "snapshot",
+            "channelId": "headless-channel",
+        ]))
+        let snapshotText = try XCTUnwrap(AppSocketClient.request(
+            "channel-panel \(snapshotRequest)",
+            socketPath: fixture.socketPath))
+        let snapshotEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(snapshotText.utf8))
+                as? [String: Any])
+        XCTAssertEqual(snapshotEnvelope["ok"] as? Bool, true)
+        let room = try XCTUnwrap(snapshotEnvelope["result"] as? [String: Any])
+        XCTAssertEqual(room["title"] as? String, "Headless Channel")
+        XCTAssertEqual(room["open"] as? Bool, false)
+
+        let postRequest = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "op": "post_message",
+            "channelId": "headless-channel",
+            "text": "Room data remains mutable",
+        ]))
+        let postText = try XCTUnwrap(AppSocketClient.request(
+            "channel-panel \(postRequest)",
+            socketPath: fixture.socketPath))
+        let postEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(postText.utf8))
+                as? [String: Any])
+        XCTAssertEqual(postEnvelope["ok"] as? Bool, true)
+        let postedRoom = try XCTUnwrap(postEnvelope["result"] as? [String: Any])
+        let roomMessages = try XCTUnwrap(
+            postedRoom["roomMessages"] as? [[String: Any]])
+        XCTAssertEqual(roomMessages.last?["text"] as? String,
+                       "Room data remains mutable")
+        XCTAssertEqual(postedRoom["open"] as? Bool, false)
+
+        let listAfterRoomRequest = try XCTUnwrap(
             AppSocketClient.request("list", socketPath: fixture.socketPath))
-        let listWithPanel = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(listWithPanelText.utf8))
+        let panesAfterRoomRequest = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(listAfterRoomRequest.utf8))
                 as? [[String: Any]])
-        XCTAssertEqual(
-            listWithPanel.compactMap { $0["kind"] as? String },
-            ["channel"])
-        let listedPanel = try XCTUnwrap(listWithPanel.first(where: {
+        XCTAssertEqual(panesAfterRoomRequest.count, 1)
+        XCTAssertEqual(panesAfterRoomRequest.first?["id"] as? Int, 1)
+        XCTAssertFalse(panesAfterRoomRequest.contains {
             $0["kind"] as? String == "channel"
-        }))
-        XCTAssertEqual(listedPanel["focused"] as? Bool, true)
-        XCTAssertEqual(
-            AppSocketClient.request(
-                "close \(panelID)",
-                socketPath: fixture.socketPath),
-            "ok")
-        let listAfterPanelClose = try XCTUnwrap(
-            AppSocketClient.request(
-                "list", socketPath: fixture.socketPath))
-        let panesAfterPanelClose = try XCTUnwrap(
-            JSONSerialization.jsonObject(
-                with: Data(listAfterPanelClose.utf8))
-                as? [[String: Any]])
-        XCTAssertEqual(panesAfterPanelClose.count, 1)
-        XCTAssertEqual(panesAfterPanelClose.first?["id"] as? Int, 1)
+        })
     }
 
     func testTerminalAgentsRegisterAndShareDynamicChannelContext() throws {

@@ -14,6 +14,7 @@ final class ShadcnTranscriptModel: ObservableObject {
     @Published var messages: [UIMessage] = []
     /// Text of the answer currently arriving, if any.
     @Published var streamingText: String?
+    @Published var streamingAuthor: String?
     @Published var isThinking = false
     @Published var thinkingLabel = "Thinking"
     /// Tool calls for the turn in flight, in the order they started.
@@ -62,7 +63,8 @@ final class ShadcnTranscriptModel: ObservableObject {
                 // and SwiftUI doesn't rebuild every row on each append.
                 id: "turn-\(index)",
                 role: Self.role(for: message.role),
-                text: message.text
+                text: message.text,
+                author: message.author
             )
         }
     }
@@ -100,7 +102,9 @@ private struct ShadcnTranscriptView: View {
             // markdown, lists and code blocks appear as they stream.
             if let streamingText, !streamingText.isEmpty {
                 AIMessageView(
-                    message: UIMessage(id: "in-flight", role: .assistant, text: streamingText)
+                    message: UIMessage(
+                        id: "in-flight", role: .assistant, text: streamingText,
+                        author: model.streamingAuthor)
                 )
             } else if model.isThinking {
                 AIMessage(.assistant) {
@@ -138,7 +142,9 @@ final class ShadcnTranscriptHostView: NSView {
             // A sidebar is a dense surface; the web type scale reads oversized
             // there, and a 64pt resting composer looks like an empty box that
             // then shrinks once content arrives.
-            .shadcnTheme(ShadcnTheme(typography: .compact()))
+            // Editable controls should use the normal type ramp. The compact
+            // ramp makes input text inherit its smallest token.
+            .shadcnTheme(ShadcnTheme())
 
         let hosting = NSHostingView(rootView: AnyView(root))
         hosting.translatesAutoresizingMaskIntoConstraints = false
@@ -162,6 +168,10 @@ final class ShadcnTranscriptHostView: NSView {
 
     func setStreamingText(_ text: String?) {
         MainActor.assumeIsolated { model.streamingText = text }
+    }
+
+    func setStreamingAuthor(_ author: String?) {
+        MainActor.assumeIsolated { model.streamingAuthor = author }
     }
 
     func setThinking(_ thinking: Bool, label: String?) {

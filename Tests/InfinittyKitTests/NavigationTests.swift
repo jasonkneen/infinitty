@@ -378,8 +378,10 @@ final class NavigationTests: XCTestCase {
         XCTAssertGreaterThan(strip.addButtonFrameForTesting.minX, frames[2].minX)
         XCTAssertLessThan(strip.searchButtonFrameForTesting.maxX, frames[0].minX)
         XCTAssertGreaterThanOrEqual(strip.searchButtonFrameForTesting.minX, 86)
+        // A full capsule: radius is half the tab's own height.
         XCTAssertEqual(
-            strip.tabButtonCornerRadiiForTesting[1], 8,
+            strip.tabButtonCornerRadiiForTesting[1],
+            frames[1].height / 2,
             accuracy: 0.5)
         XCTAssertEqual(strip.selectionPillFrameForTesting, frames[1])
         XCTAssertGreaterThanOrEqual(strip.selectionPillAlphaForTesting, 0.16)
@@ -464,18 +466,22 @@ final class NavigationTests: XCTestCase {
         let tint = try XCTUnwrap(
             strip.selectionPillColorForTesting?.usingColorSpace(.sRGB))
         XCTAssertGreaterThan(tint.redComponent, tint.blueComponent)
-        XCTAssertEqual(tint.alphaComponent, 0.24, accuracy: 0.01)
+        XCTAssertEqual(tint.alphaComponent, PaneTint.glassFillAlpha, accuracy: 0.01)
     }
 
-    func testExpandedTabSelectionDefaultsToNeutralPill() throws {
+    /// Without a per-tab tint the capsule still carries the window's tint, so
+    /// the tab and the pane cards below it read as one theme.
+    func testExpandedTabSelectionDefaultsToWindowTint() throws {
         let strip = TerminalTabStripView(
             frame: NSRect(x: 0, y: 0, width: 600, height: 34))
         strip.update(titles: ["infinitty"], selectedIndex: 0)
 
         let tint = try XCTUnwrap(
             strip.selectionPillColorForTesting?.usingColorSpace(.sRGB))
-        XCTAssertEqual(tint.blueComponent, tint.redComponent, accuracy: 0.001)
-        XCTAssertEqual(tint.alphaComponent, 0.18, accuracy: 0.01)
+        let fallback = try XCTUnwrap(PaneTint.fallback.usingColorSpace(.sRGB))
+        XCTAssertEqual(tint.blueComponent, fallback.blueComponent, accuracy: 0.001)
+        XCTAssertEqual(tint.redComponent, fallback.redComponent, accuracy: 0.001)
+        XCTAssertEqual(tint.alphaComponent, PaneTint.glassFillAlpha, accuracy: 0.01)
     }
 
     func testMainTabContextMenuOffersPinAndTintColorsTogether() {
@@ -547,18 +553,68 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(strip.tabButtonImagesForTesting[0]?.accessibilityDescription, "shell")
     }
 
-    func testMainTabUsesWiderShorterRoundedRectWhenSpaceAllows() throws {
+    func testMainTabUsesWiderFullyRoundedPillWhenSpaceAllows() throws {
         let strip = TerminalTabStripView(
             frame: NSRect(x: 0, y: 0, width: 900, height: TerminalTabStripView.height))
         strip.update(titles: ["infinitty"], selectedIndex: 0)
         strip.layoutSubtreeIfNeeded()
 
         let frame = try XCTUnwrap(strip.tabButtonFramesForTesting.first)
-        XCTAssertEqual(frame.height, 26, accuracy: 0.5)
-        XCTAssertEqual(frame.minY, 5, accuracy: 0.5)
+        XCTAssertEqual(frame.height, TerminalTabStripView.maximumTabHeight, accuracy: 0.5)
+        XCTAssertEqual(
+            frame.minY,
+            TerminalTabStripView.tabY(inStripOfHeight: TerminalTabStripView.height),
+            accuracy: 0.5)
         XCTAssertGreaterThanOrEqual(frame.width, 160)
         XCTAssertLessThanOrEqual(frame.width, 230)
-        XCTAssertEqual(strip.tabButtonCornerRadiiForTesting.first, 8)
+        // A full capsule, not a rounded rect: radius is half the tab height.
+        XCTAssertEqual(
+            strip.tabButtonCornerRadiiForTesting.first,
+            TerminalTabStripView.maximumTabHeight / 2)
+    }
+
+    /// The native traffic lights must land on the same axis as the tab
+    /// capsules — the axis the custom `TrafficLightsView` also uses. AppKit
+    /// leaves them centred in the ~28pt titlebar, well above the tabs.
+    func testNativeTrafficLightsSitOnTabCapsuleAxis() throws {
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 500),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+
+        delegate.centerTrafficLights(in: window)
+
+        for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            let button = try XCTUnwrap(window.standardWindowButton(type))
+            let container = try XCTUnwrap(button.superview)
+            let centreInWindow = container.convert(
+                NSPoint(x: button.frame.midX, y: button.frame.midY), to: nil).y
+            XCTAssertEqual(
+                window.frame.height - centreInWindow,
+                TerminalTabStripView.tabCenterFromTop,
+                accuracy: 1,
+                "\(type) is off the tab axis")
+        }
+    }
+
+    /// Repositioning is reasserted on resize, focus and full-screen changes, so
+    /// it has to be idempotent: a second pass must not drift the buttons.
+    func testCenteringTrafficLightsTwiceIsStable() throws {
+        let delegate = AppDelegate()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 500),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+
+        delegate.centerTrafficLights(in: window)
+        let button = try XCTUnwrap(window.standardWindowButton(.closeButton))
+        let first = button.frame.origin.y
+        delegate.centerTrafficLights(in: window)
+
+        XCTAssertEqual(button.frame.origin.y, first, accuracy: 0.01)
     }
 
     /// Side-tabs mode lays the strip out as a left column and the body fills
@@ -597,14 +653,19 @@ final class NavigationTests: XCTestCase {
     }
 
     func testReferencePaneMetricsKeepTerminalTextInsideCard() {
-        XCTAssertEqual(PaneMetrics.leadingInset, 8)
-        XCTAssertEqual(PaneMetrics.trailingInset, 8)
-        XCTAssertEqual(PaneMetrics.internalHorizontalInset, 2)
-        XCTAssertEqual(PaneMetrics.topInset, 3)
-        XCTAssertEqual(PaneMetrics.bottomInset, 8)
-        XCTAssertEqual(PaneMetrics.internalVerticalInset, 2)
+        XCTAssertEqual(PaneMetrics.leadingInset, 6)
+        XCTAssertEqual(PaneMetrics.trailingInset, 6)
+        XCTAssertEqual(PaneMetrics.internalHorizontalInset, 5)
+        XCTAssertEqual(PaneMetrics.topInset, 6)
+        XCTAssertEqual(PaneMetrics.bottomInset, 6)
+        XCTAssertEqual(PaneMetrics.internalVerticalInset, 5)
         XCTAssertEqual(PaneMetrics.horizontalCanvasInset, 0)
-        XCTAssertEqual(PaneMetrics.cornerRadius, 10)
+        XCTAssertEqual(PaneMetrics.cornerRadius, 14)
+        // The first text row keeps its distance below the header hairline as
+        // the card's top breathing room changes.
+        XCTAssertEqual(
+            PaneMetrics.terminalTopOffset,
+            PaneMetrics.topInset + PaneHeaderView.height - 8)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 0), 15)
         XCTAssertEqual(PaneMetrics.terminalContentInset(configured: 24), 24)
     }
@@ -686,21 +747,22 @@ final class NavigationTests: XCTestCase {
 
     func testEveryPaneUsesSubtleBlueAndFocusBrightensIt() throws {
         let outline = PaneOutlineView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
-        let idleFillAlpha = outline.backgroundAlphaForTesting
-        XCTAssertEqual(idleFillAlpha, 0.045, accuracy: 0.01)
+        XCTAssertEqual(outline.backgroundAlphaForTesting, 0.055, accuracy: 0.01)
         let idle = try XCTUnwrap(outline.layer?.borderColor)
         let idleColor = try XCTUnwrap(NSColor(cgColor: idle)?.usingColorSpace(.sRGB))
-        XCTAssertEqual(idleColor.alphaComponent, 0.30, accuracy: 0.01)
+        XCTAssertEqual(idleColor.alphaComponent, 0.85, accuracy: 0.01)
         XCTAssertGreaterThan(idleColor.blueComponent, idleColor.redComponent)
-        XCTAssertEqual(outline.layer?.borderWidth, 1)
+        XCTAssertEqual(outline.layer?.borderWidth, PaneMetrics.borderWidth)
 
         outline.isSelected = true
         let focused = try XCTUnwrap(outline.layer?.borderColor)
         let focusedColor = try XCTUnwrap(NSColor(cgColor: focused)?.usingColorSpace(.sRGB))
-        XCTAssertEqual(focusedColor.alphaComponent, 0.68, accuracy: 0.01)
+        XCTAssertEqual(focusedColor.alphaComponent, 1.0, accuracy: 0.01)
         XCTAssertGreaterThan(focusedColor.blueComponent, focusedColor.redComponent)
-        XCTAssertEqual(outline.layer?.borderWidth, 1.5)
-        XCTAssertGreaterThan(outline.backgroundAlphaForTesting, idleFillAlpha)
+        // Focus stays a hairline: it brightens the edge and the lift, it does
+        // not thicken into a ring.
+        XCTAssertEqual(outline.layer?.borderWidth, PaneMetrics.borderWidth)
+        XCTAssertGreaterThan(focusedColor.alphaComponent, idleColor.alphaComponent)
 
         outline.accentColor = .systemRed
         let custom = try XCTUnwrap(
@@ -716,12 +778,14 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(header.accessibilityLabel(), "Terminal pane: fish")
         XCTAssertEqual(header.splitRightAccessibilityLabelForTesting, "Split pane right")
         XCTAssertEqual(header.splitDownAccessibilityLabelForTesting, "Split pane down")
-        XCTAssertEqual(header.iconFrameForTesting.minY, 6, accuracy: 0.5)
-        XCTAssertEqual(header.titleFrameForTesting.minY, 1, accuracy: 0.5)
+        // Assert the shared axis rather than fixed offsets, so changing
+        // `PaneHeaderView.height` can't silently leave one control behind.
+        let axis = PaneHeaderView.height / 2
         XCTAssertEqual(
             header.splitRightFrameForTesting.midY,
             header.splitDownFrameForTesting.midY,
             accuracy: 0.5)
+        XCTAssertEqual(header.splitRightFrameForTesting.midY, axis, accuracy: 0.5)
         XCTAssertEqual(
             header.iconFrameForTesting.midY,
             header.splitRightFrameForTesting.midY,
@@ -730,7 +794,7 @@ final class NavigationTests: XCTestCase {
         // renders its text high, so the offset optically centers it.
         XCTAssertEqual(
             header.titleFrameForTesting.midY,
-            header.splitRightFrameForTesting.midY - 3,
+            header.splitRightFrameForTesting.midY - PaneHeaderView.titleOpticalDrop,
             accuracy: 1)
         XCTAssertEqual(
             header.channelConnectorAccessibilityLabelForTesting,
@@ -744,6 +808,12 @@ final class NavigationTests: XCTestCase {
         XCTAssertLessThanOrEqual(
             header.channelConnectorFrameForTesting.maxX,
             header.splitRightFrameForTesting.minX)
+        // The ring is drawn at icon weight (~12pt) even though the view keeps
+        // a 28pt hit area, so it doesn't tower over the split glyphs.
+        XCTAssertEqual(header.channelConnectorRingDiameterForTesting, 12, accuracy: 0.5)
+        XCTAssertLessThan(
+            header.channelConnectorRingDiameterForTesting,
+            header.splitRightFrameForTesting.width)
     }
 
     func testPaneHeaderConnectorReflectsChannelMembership() {
@@ -814,13 +884,12 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(closed, 0)
     }
 
-    func testSplitChooserOffersTerminalFilesChatChannelAndBrowser() {
+    func testSplitChooserOffersTerminalFilesChatAndBrowser() {
         XCTAssertEqual(
             PaneType.allCases.map(\.title),
-            ["Terminal", "Files", "Chat", "Channel", "Browser"])
+            ["Terminal", "Files", "Chat", "Browser"])
         XCTAssertEqual(PaneType.allCases.map(\.symbol), [
-            "terminal", "folder", "bubble.left.and.bubble.right",
-            "person.3.sequence", "globe",
+            "terminal", "folder", "bubble.left.and.bubble.right", "globe",
         ])
     }
 
@@ -830,8 +899,8 @@ final class NavigationTests: XCTestCase {
             kind: .files, contentView: content, background: NSColor.black)
         pane.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
         pane.layoutSubtreeIfNeeded()
-        XCTAssertEqual(pane.paneHeader.frame.minX, 8, accuracy: 0.5)
-        XCTAssertEqual(content.frame.minX, 8, accuracy: 0.5)
+        XCTAssertEqual(pane.paneHeader.frame.minX, PaneMetrics.leadingInset, accuracy: 0.5)
+        XCTAssertEqual(content.frame.minX, PaneMetrics.leadingInset, accuracy: 0.5)
         XCTAssertEqual(content.frame.minY, PaneMetrics.bottomInset, accuracy: 0.5)
         XCTAssertGreaterThan(content.frame.height, 400)
         XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
@@ -885,7 +954,7 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(secondInsets.bottom, PaneMetrics.bottomInset)
     }
 
-    func testHorizontallySplitPanesUseCompactSharedGapAndEightPointOuterEdges() {
+    func testHorizontallySplitPanesUseCompactSharedGapAndInsetOuterEdges() {
         let split = PaneSplitView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
         split.isVertical = true
         split.dividerStyle = .thin
@@ -1031,6 +1100,57 @@ final class NavigationTests: XCTestCase {
         try verify(
             source: UtilityPaneView(kind: .files, contentView: NSView(), background: .black),
             target: TerminalView(frame: .zero))
+    }
+
+    /// A Files pane connected to a terminal/chat means "sync the folder",
+    /// and it must resolve the same way whichever end you drag from.
+    func testFilesConnectionRoutesToPathSyncInEitherDirection() {
+        let delegate = AppDelegate()
+        let files = UtilityPaneView(
+            kind: .files, contentView: NSView(), background: .black)
+        let terminal = TerminalView(frame: .zero)
+        XCTAssertEqual(
+            delegate.connectionRoutingForTesting(source: files, target: terminal),
+            "files-sync")
+        XCTAssertEqual(
+            delegate.connectionRoutingForTesting(source: terminal, target: files),
+            "files-sync")
+    }
+
+    /// A Browser pane connected to a terminal/chat scopes that browser to the
+    /// sibling's agent as a drivable tool, in either drag direction.
+    func testBrowserConnectionRoutesToToolScopingInEitherDirection() {
+        let delegate = AppDelegate()
+        let browser = UtilityPaneView(
+            kind: .browser, contentView: NSView(), background: .black)
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        XCTAssertEqual(
+            delegate.connectionRoutingForTesting(source: browser, target: chat),
+            "browser-tool")
+        XCTAssertEqual(
+            delegate.connectionRoutingForTesting(source: chat, target: browser),
+            "browser-tool")
+    }
+
+    /// Pairs that carry no extra meaning stay a plain Channel link: two chats,
+    /// and same-kind pairs that would otherwise sync against themselves.
+    func testPlainPairsCarryNoKindSpecificConnectionBehaviour() {
+        let delegate = AppDelegate()
+        func chat() -> UtilityPaneView {
+            UtilityPaneView(kind: .chat, contentView: NSView(), background: .black)
+        }
+        func files() -> UtilityPaneView {
+            UtilityPaneView(kind: .files, contentView: NSView(), background: .black)
+        }
+        XCTAssertNil(
+            delegate.connectionRoutingForTesting(source: chat(), target: chat()))
+        XCTAssertNil(
+            delegate.connectionRoutingForTesting(source: files(), target: files()))
+        XCTAssertNil(
+            delegate.connectionRoutingForTesting(
+                source: TerminalView(frame: .zero),
+                target: TerminalView(frame: .zero)))
     }
 
     func testTwoPaneTopAndBottomDropNeverCollapseRootGeometry() throws {
@@ -1558,8 +1678,8 @@ final class NavigationTests: XCTestCase {
         }) == true)
         XCTAssertEqual(
             delegate.utilityPaneCountForTesting(in: window),
-            2,
-            "The approved room owns one Channel pane and one named Chat.")
+            1,
+            "The approved room owns only its named Chat; no Channel pane is created.")
     }
 
     func testApprovedVisualCloudRoomUsesPreparedRemoteAdapter()
@@ -1717,7 +1837,7 @@ final class NavigationTests: XCTestCase {
             spec.channelID)
         XCTAssertEqual(
             delegate.utilityPaneCountForTesting(in: window),
-            2)
+            1)
         let prompt = try XCTUnwrap(
             factory.adapters.first?.users.first)
         XCTAssertTrue(
@@ -1807,6 +1927,25 @@ final class NavigationTests: XCTestCase {
             ["Chat 1"])
         let channelID = try XCTUnwrap(
             delegate.collaborationContextForTesting(pane: chat1)?.channelID)
+        let snapshotRequest = try XCTUnwrap(BrowserControlCodec.encode([
+            "v": 1,
+            "op": "snapshot",
+            "channelId": channelID,
+        ]))
+        let snapshotResponse = delegate.handleAppRequestForTesting(
+            "channel-panel \(snapshotRequest)")
+        let snapshotEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(snapshotResponse.utf8))
+                as? [String: Any])
+        XCTAssertEqual(snapshotEnvelope["ok"] as? Bool, true)
+        let snapshotResult = try XCTUnwrap(
+            snapshotEnvelope["result"] as? [String: Any])
+        XCTAssertEqual(snapshotResult["title"] as? String, "Channel 1")
+        XCTAssertEqual(snapshotResult["open"] as? Bool, false)
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 2)
+
+        // Old visual lifecycle calls fail explicitly instead of silently
+        // resurrecting the removed Channel pane.
         let openRequest = try XCTUnwrap(BrowserControlCodec.encode([
             "v": 1,
             "op": "open",
@@ -1817,14 +1956,12 @@ final class NavigationTests: XCTestCase {
         let openEnvelope = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(openResponse.utf8))
                 as? [String: Any])
-        XCTAssertEqual(openEnvelope["ok"] as? Bool, true)
-        let openResult = try XCTUnwrap(
-            openEnvelope["result"] as? [String: Any])
+        XCTAssertEqual(openEnvelope["ok"] as? Bool, false)
         XCTAssertEqual(
-            openResult["panelId"] as? String,
-            "channel-panel-\(channelID)")
-        XCTAssertEqual(openResult["title"] as? String, "Channel 1")
-        XCTAssertEqual(openResult["open"] as? Bool, true)
+            (openEnvelope["error"] as? [String: Any])?["code"] as? String,
+            "channel_panel_removed")
+        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 2)
+
         let participantID = try XCTUnwrap(
             delegate.collaborationContextForTesting(pane: chat1)?
                 .identity.participantID)
@@ -1845,51 +1982,10 @@ final class NavigationTests: XCTestCase {
             delegate.collaborationContextForTesting(pane: chat1)?
                 .identity.role,
             "lead planner")
-        let channelPane = try XCTUnwrap(
-            delegate.openChannelPanelForTesting(
-                channelID: channelID,
-                in: window,
-                relativeTo: chat2))
-        let channelController = try XCTUnwrap(
-            delegate.channelPanelControllerForTesting(channelPane))
-        XCTAssertEqual(channelPane.kind, .channel)
-        XCTAssertEqual(channelPane.paneHeader.title, "Channel 1")
-        XCTAssertEqual(delegate.channelIDForTesting(channelPane), channelID)
-        XCTAssertTrue(channelController.renderedTextForTesting.contains("Channel 1"))
-        XCTAssertTrue(channelController.renderedTextForTesting.contains("Chat 1"))
-        XCTAssertTrue(channelController.renderedTextForTesting.contains("Chat 2"))
-        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 3)
-
-        let closeRequest = try XCTUnwrap(BrowserControlCodec.encode([
-            "v": 1,
-            "op": "close",
-            "channelId": channelID,
-        ]))
-        let closeResponse = delegate.handleAppRequestForTesting(
-            "channel-panel \(closeRequest)")
-        let closeEnvelope = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(closeResponse.utf8))
-                as? [String: Any])
-        XCTAssertEqual(closeEnvelope["ok"] as? Bool, true)
-        XCTAssertEqual(delegate.utilityPaneCountForTesting(in: window), 2)
         XCTAssertEqual(
             delegate.collaborationContextForTesting(pane: chat1)?
                 .peers.map(\.displayName),
             ["Chat 2"])
-        let reopenedChannelPane = try XCTUnwrap(
-            delegate.openChannelPanelForTesting(
-                channelID: channelID,
-                in: window,
-                relativeTo: chat1))
-        XCTAssertEqual(delegate.channelIDForTesting(reopenedChannelPane), channelID)
-        let panelID = "channel-panel-\(channelID)"
-        XCTAssertEqual(
-            delegate.handleAppRequestForTesting("focus \(panelID)"),
-            "ok")
-        XCTAssertEqual(
-            delegate.handleAppRequestForTesting("close \(panelID)"),
-            "ok")
-        XCTAssertNil(reopenedChannelPane.superview)
 
         let firstTranscript = assistant1.makeSidebarPanelView()
         assistant1.submitForQA("Tell the Channel what you completed.")

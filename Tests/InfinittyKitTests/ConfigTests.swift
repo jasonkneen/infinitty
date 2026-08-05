@@ -7,6 +7,21 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(AppConfig().pet, "infinitty")
     }
 
+    func testInterfaceFontSizeParsesAndRoundTripsSeparatelyFromTerminalFont() {
+        var config = AppConfig()
+        config.apply(fileContents: """
+            font-size = 13
+            interface-font-size = 19
+            """)
+        XCTAssertEqual(config.fontSize, 13)
+        XCTAssertEqual(config.interfaceFontSize, 19)
+
+        var reparsed = AppConfig()
+        reparsed.apply(fileContents: config.serializeApp())
+        XCTAssertEqual(reparsed.interfaceFontSize, 19)
+        XCTAssertEqual(reparsed.fontSize, AppConfig().fontSize)
+    }
+
     func testPetOptOutParsesAndSurvivesSerialization() {
         var config = AppConfig()
         config.apply(fileContents: "pet = none")

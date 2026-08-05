@@ -114,7 +114,7 @@ assert rendered behavior, not only direct view state.
 - **Channel** — the durable coordination scope visible to the human.
 - **Room kernel** — the authoritative state machine behind a Channel.
 - **Participant** — a human or agent identity with a name and role.
-- **Endpoint** — a terminal, Chat, Channel panel, remote execution, or other
+- **Endpoint** — a terminal, Chat, Files, Browser, remote execution, or other
   visible or windowless app surface attached to a Channel.
 - **Responsibility** — the human-readable ownership assignment.
 - **Claim** — the enforceable workspace/resource lease behind a
@@ -238,22 +238,27 @@ Drop behavior:
 After drop the wire disappears. Members keep the same contrast-safe accent,
 connector state, Channel name, and member count. Color is never the only cue.
 
-Clicking the connector opens membership actions and the Channel panel.
+Clicking the connector opens a compact membership summary. Channel is not a
+pane type: conversation stays in Chat, terminal work stays in Terminal, file
+navigation stays in Files, and page control stays in Browser. Chat defaults to
+workspace coding without terminal authority; terminal control requires the
+explicit Chat/Terminal control and fails closed without a supported visible
+integration. A thread may hold an ordered in-pane agent roster configured with
+`/add-agent` or the model picker's `+`. Members receive short collision-safe
+names derived from their models. Unmentioned prompts invoke each member
+sequentially; recognized user `@alias` mentions select members and unknown
+mentions invoke no backend. An agent may also request another agent's response
+with its exact `@alias`; peer hand-offs stay sequential and each agent receives
+at most one mention-triggered follow-up per user turn, preventing recursive
+agent debates. Every child sees bounded explicitly-untrusted shared transcript
+context including earlier same-round answers. Responses carry structured author
+attribution and publish through the existing Chat participant
+as bounded `[Agent]` Channel messages; no extra pane or endpoint is created.
+Room-level plan, role, responsibility, thread, proposal, and audit state remains available to
+MCP/headless adapters without adding a second coordination interface.
 
-### Channel panel
-
-`UtilityPanelKind.channel` is a normal movable pane/window projection. It
-inherits existing double-click stage/restore behavior and contains:
-
-- room-level conversation;
-- participant names, roles, status, provider, and workspace;
-- delegation subthreads;
-- plan/status rail with owners, dependencies, blockers, and evidence;
-- responsibility/claim conflicts;
-- approvals, failures, recovery actions, and audit receipts.
-
-Closing a projection does not destroy the Channel or stop provider
-executions.
+Removing a visual pane never destroys the Channel or stops provider executions;
+only explicit endpoint leave/close mutations change membership.
 
 ## Permission-first six-agent flow
 

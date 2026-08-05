@@ -38,12 +38,19 @@ struct AssistantChatMessage {
     let text: String
     let createdAt: Date
     let tokenCount: Int?
+    /// Structured configured-agent attribution. Canonical message text stays
+    /// free of presentation prefixes so it can be safely reused as context.
+    let author: String?
 
-    init(role: String, text: String, createdAt: Date = Date(), tokenCount: Int? = nil) {
+    init(
+        role: String, text: String, createdAt: Date = Date(),
+        tokenCount: Int? = nil, author: String? = nil
+    ) {
         self.role = role
         self.text = text
         self.createdAt = createdAt
         self.tokenCount = tokenCount
+        self.author = author
     }
 
     static func approximateTokenCount(for text: String) -> Int {
@@ -79,6 +86,9 @@ struct ChatThread: Identifiable {
     var backendEpoch: Int
     /// Bumped when this thread is abandoned mid-flight so stale answers drop.
     var generation: Int
+    /// Ordered ensemble roster and independent keyed state for each member.
+    var ensembleAgents: [ConfiguredChatAgent]
+    var agentBackendStates: [String: ChatAgentBackendState]
 
     init(
         id: UUID = UUID(),
@@ -90,7 +100,9 @@ struct ChatThread: Identifiable {
         backendSessionSignature: String? = nil,
         needsBackendBootstrap: Bool = false,
         backendEpoch: Int = 0,
-        generation: Int = 0
+        generation: Int = 0,
+        ensembleAgents: [ConfiguredChatAgent] = [],
+        agentBackendStates: [String: ChatAgentBackendState] = [:]
     ) {
         self.id = id
         self.title = title
@@ -102,6 +114,8 @@ struct ChatThread: Identifiable {
         self.needsBackendBootstrap = needsBackendBootstrap
         self.backendEpoch = backendEpoch
         self.generation = generation
+        self.ensembleAgents = ensembleAgents
+        self.agentBackendStates = agentBackendStates
     }
 
     /// First user line, trimmed and capped for the thread switcher.
@@ -136,6 +150,11 @@ struct AssistantChatControlState: Equatable, Sendable {
     let requestInFlight: Bool
     let streamingThreadID: String?
     let workspaceDirectory: String
+    let terminalAvailable: Bool
+    let terminalAccessRequested: Bool
+    let terminalAccessEffective: Bool
+    let executionMode: String
+    let ensembleAgents: [String]
 
     func jsonObject() -> [String: Any] {
         [
@@ -164,6 +183,11 @@ struct AssistantChatControlState: Equatable, Sendable {
             "requestInFlight": requestInFlight,
             "streamingThreadId": streamingThreadID ?? NSNull(),
             "workspaceDirectory": workspaceDirectory,
+            "terminalAvailable": terminalAvailable,
+            "terminalAccessRequested": terminalAccessRequested,
+            "terminalAccessEffective": terminalAccessEffective,
+            "executionMode": executionMode,
+            "ensembleAgents": ensembleAgents,
         ]
     }
 }
@@ -181,7 +205,10 @@ final class ChatMessageView: NSView {
     private weak var metadataView: NSView?
     private var timeRefreshTimer: Timer?
 
-    init(role: String, text: String, timestamp: Date = Date(), tokenCount: Int? = nil) {
+    init(
+        role: String, text: String, timestamp: Date = Date(),
+        tokenCount: Int? = nil, author: String? = nil
+    ) {
         messageText = text
         self.timestamp = timestamp
         super.init(frame: .zero)
@@ -241,6 +268,14 @@ final class ChatMessageView: NSView {
             metadata.alignment = .centerY
             metadata.spacing = 7
             metadata.translatesAutoresizingMaskIntoConstraints = false
+            let authorLabel = author.map { value -> NSTextField in
+                let field = NSTextField(labelWithString: value)
+                field.font = .systemFont(ofSize: 11, weight: .semibold)
+                field.textColor = .secondaryLabelColor
+                field.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(field)
+                return field
+            }
             addSubview(label)
             addSubview(metadata)
             self.timeLabel = timeLabel
@@ -250,8 +285,7 @@ final class ChatMessageView: NSView {
             }
             RunLoop.main.add(timer, forMode: .common)
             timeRefreshTimer = timer
-            NSLayoutConstraint.activate([
-                label.topAnchor.constraint(equalTo: topAnchor),
+            var constraints = [
                 label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
                 label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
                 metadata.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 3),
@@ -259,7 +293,17 @@ final class ChatMessageView: NSView {
                 metadata.bottomAnchor.constraint(equalTo: bottomAnchor),
                 copyButton.widthAnchor.constraint(equalToConstant: 18),
                 copyButton.heightAnchor.constraint(equalToConstant: 16),
-            ])
+            ]
+            if let authorLabel {
+                constraints += [
+                    authorLabel.topAnchor.constraint(equalTo: topAnchor),
+                    authorLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+                    label.topAnchor.constraint(equalTo: authorLabel.bottomAnchor, constant: 3),
+                ]
+            } else {
+                constraints.append(label.topAnchor.constraint(equalTo: topAnchor))
+            }
+            NSLayoutConstraint.activate(constraints)
         }
     }
 
@@ -431,7 +475,7 @@ final class PetAssistantPanelView: NSView {
     }
 
     private let presentation: Presentation
-    private let config: AppConfig
+    private var config: AppConfig
     private let glassBackground = NSVisualEffectView()
     var onSubmit: ((String, String, String) -> Void)?
     /// Concrete model choices for the composer picker, injected at init so
@@ -442,6 +486,9 @@ final class PetAssistantPanelView: NSView {
     /// "not asked yet"; the submenu shows its seed rows until an answer lands.
     private var discovered: [PetAssistant.AgentChoice.Kind: ProviderModels] = [:]
     var onShowFiles: (() -> Void)?
+    var onTerminalAccessChange: ((Bool) -> Void)?
+    var onAddAgent: ((String, String) -> Void)?
+    var onToggleAgent: ((String) -> Void)?
     var onNewChat: (() -> Void)?
     var onSelectThread: ((String) -> Void)?
     var onClose: (() -> Void)?
@@ -464,6 +511,10 @@ final class PetAssistantPanelView: NSView {
     private let modelPicker = NSPopUpButton()
     private let effortPicker = NSPopUpButton()
     private let modelButton = PrimaryMenuButton()
+    private let addAgentButton = NSButton()
+    private let modeControl = NSSegmentedControl(
+        labels: ["", ""], trackingMode: .selectOne,
+        target: nil, action: nil)
     private let effortButton = PrimaryMenuButton()
     private let inputContainer = NSView()
     private let inputScroll = NSScrollView()
@@ -625,6 +676,16 @@ final class PetAssistantPanelView: NSView {
         modelButton.menu = makeModelMenu()
         refreshModelChip()
 
+        addAgentButton.image = NSImage(
+            systemSymbolName: "plus", accessibilityDescription: "Add selected agent")
+        addAgentButton.isBordered = false
+        addAgentButton.target = self
+        addAgentButton.action = #selector(addAgentTapped(_:))
+        addAgentButton.toolTip = "Add selected model to this Chat"
+        addAgentButton.setAccessibilityLabel("Add selected agent")
+
+        configureModeControl()
+
         styleChip(effortButton)
         effortButton.menu = makeEffortMenu()
         refreshEffortChip()
@@ -688,6 +749,29 @@ final class PetAssistantPanelView: NSView {
         sendWrap.layer?.backgroundColor = CodePalette.selectionAccent.cgColor
         sendWrap.layer?.cornerRadius = 15
         sendWrap.layer?.masksToBounds = true
+    }
+
+    private func configureModeControl() {
+        modeControl.segmentStyle = .rounded
+        modeControl.controlSize = .small
+        modeControl.selectedSegment = 0
+        modeControl.target = self
+        modeControl.action = #selector(modeChanged(_:))
+        modeControl.setImage(
+            NSImage(
+                systemSymbolName: "bubble.left",
+                accessibilityDescription: "Chat mode"),
+            forSegment: 0)
+        modeControl.setImage(
+            NSImage(
+                systemSymbolName: "terminal",
+                accessibilityDescription: "Terminal mode"),
+            forSegment: 1)
+        modeControl.setToolTip("Chat mode", forSegment: 0)
+        modeControl.setToolTip("Terminal mode", forSegment: 1)
+        modeControl.setAccessibilityLabel("Chat execution mode")
+        modeControl.setAccessibilityHelp(
+            "Choose workspace Chat mode or attached visible Terminal mode")
     }
 
     /// The composer's currently-selected model choice. Read at submit time.
@@ -806,14 +890,14 @@ final class PetAssistantPanelView: NSView {
         let views = [
             newChatButton, closeButton,
             separator, transcriptScroll, emptyStateLabel, showFilesButton, queueScroll,
-            modelPicker, modelButton, effortButton, inputContainer, attachmentButton,
+            modelPicker, modelButton, addAgentButton, modeControl, effortButton, inputContainer, attachmentButton,
             inputScroll, sendButton, sendWrap,
         ]
         for view in views { view.translatesAutoresizingMaskIntoConstraints = false }
         for view in [
             newChatButton, closeButton, separator,
             transcriptScroll, emptyStateLabel, showFilesButton, queueScroll,
-            modelButton, effortButton, inputContainer,
+            modelButton, addAgentButton, modeControl, effortButton, inputContainer,
         ] { addSubview(view) }
 
         legacyLayoutConstraints = headerConstraints() + bodyConstraints() + composerConstraints()
@@ -846,7 +930,7 @@ final class PetAssistantPanelView: NSView {
         NSLayoutConstraint.deactivate(legacyLayoutConstraints)
         for child in subviews { child.isHidden = true }
 
-        let host = ShadcnAssistantHost()
+        let host = ShadcnAssistantHost(config: config)
         // Forward the panel's chosen model/effort — never ignore them in
         // favour of AppKit-only state. selectChoice/onModelChange keep the two
         // in lockstep; if they diverge, the panel is the surface the user saw.
@@ -879,6 +963,15 @@ final class PetAssistantPanelView: NSView {
             self.effortPicker.selectItem(withTitle: value)
             self.refreshEffortChip()
             self.syncShadcnComposerState()
+        }
+        host.model.onTerminalAccessChange = { [weak self] enabled in
+            self?.onTerminalAccessChange?(enabled)
+        }
+        host.model.onAddAgent = { [weak self] model, effort in
+            self?.onAddAgent?(model, effort)
+        }
+        host.model.onToggleAgent = { [weak self] id in
+            self?.onToggleAgent?(id)
         }
 
         // Seed the three pickers from the live AppKit selection store.
@@ -917,6 +1010,11 @@ final class PetAssistantPanelView: NSView {
         }
 
         shadcnPanel = host
+    }
+
+    func applyConfig(_ config: AppConfig) {
+        self.config = config
+        shadcnPanel?.applyAppearance(config: config)
     }
 
     /// Observe only the backend conversation represented by this panel's
@@ -987,8 +1085,14 @@ final class PetAssistantPanelView: NSView {
             inputContainer.heightAnchor.constraint(equalToConstant: 44),
             modelButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             modelButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            modelButton.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
-            effortButton.leadingAnchor.constraint(equalTo: modelButton.trailingAnchor, constant: 6),
+            modelButton.widthAnchor.constraint(lessThanOrEqualToConstant: 190),
+            addAgentButton.leadingAnchor.constraint(equalTo: modelButton.trailingAnchor, constant: 2),
+            addAgentButton.centerYAnchor.constraint(equalTo: modelButton.centerYAnchor),
+            addAgentButton.widthAnchor.constraint(equalToConstant: 24),
+            modeControl.leadingAnchor.constraint(equalTo: addAgentButton.trailingAnchor, constant: 4),
+            modeControl.centerYAnchor.constraint(equalTo: modelButton.centerYAnchor),
+            modeControl.widthAnchor.constraint(equalToConstant: 58),
+            effortButton.leadingAnchor.constraint(equalTo: modeControl.trailingAnchor, constant: 6),
             effortButton.centerYAnchor.constraint(equalTo: modelButton.centerYAnchor),
             effortButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             attachmentButton.leadingAnchor.constraint(equalTo: inputContainer.leadingAnchor, constant: 8),
@@ -1073,7 +1177,8 @@ final class PetAssistantPanelView: NSView {
         for message in lastMessages {
             let row = ChatMessageView(
                 role: message.role, text: message.text,
-                timestamp: message.createdAt, tokenCount: message.tokenCount)
+                timestamp: message.createdAt, tokenCount: message.tokenCount,
+                author: message.author)
             transcriptStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: transcriptStack.widthAnchor).isActive = true
         }
@@ -1128,8 +1233,27 @@ final class PetAssistantPanelView: NSView {
         shadcnPanel?.setHasFiles(hasFiles)
     }
 
+    func setTerminalAccess(available: Bool, enabled: Bool) {
+        modeControl.setEnabled(true, forSegment: 0)
+        modeControl.setEnabled(available, forSegment: 1)
+        modeControl.setToolTip(
+            available ? "Terminal mode" : "No terminal attached",
+            forSegment: 1)
+        modeControl.selectedSegment = available && enabled ? 1 : 0
+        shadcnPanel?.setTerminalAccess(available: available, enabled: enabled)
+    }
+
     func setThreads(_ threads: [(id: String, title: String)], activeId: String?) {
         shadcnPanel?.setThreads(threads, activeId: activeId)
+    }
+
+    func setRoster(_ agents: [ConfiguredChatAgent]) {
+        shadcnPanel?.setRoster(agents)
+    }
+
+    func setStreamingAuthor(_ author: String?) {
+        shadcnPanel?.setStreamingAuthor(author)
+        shadcnTranscript?.setStreamingAuthor(author)
     }
 
     func focusInput() {
@@ -1166,6 +1290,13 @@ final class PetAssistantPanelView: NSView {
 
     @objc private func sendTapped(_ sender: Any?) { submit() }
     @objc private func showFilesTapped(_ sender: Any?) { onShowFiles?() }
+    @objc private func addAgentTapped(_ sender: Any?) {
+        onAddAgent?(selectedChoice.displayName, selectedEffort)
+    }
+    @objc private func modeChanged(_ sender: NSSegmentedControl) {
+        let enabled = sender.selectedSegment == 1
+        onTerminalAccessChange?(enabled)
+    }
     @objc private func newChatTapped(_ sender: Any?) { onNewChat?() }
     @objc private func closeTapped(_ sender: Any?) { onClose?() }
 
@@ -1371,12 +1502,10 @@ final class PetAssistantPanelView: NSView {
                 label: kind.providerLabel,
                 kind: kind))
         }
-        target.model.agents = agentOptions
-
         let agentLabel: String = selectedChoice.kind == .auto
             ? "Auto"
             : selectedChoice.kind.providerLabel
-        target.model.agent = agentLabel
+        target.setAgents(agentOptions, selected: agentLabel)
 
         // Model = concrete choices. Always populate when anything is known so
         // the chip (and its brand icon) is present — not just after picking
@@ -1394,13 +1523,12 @@ final class PetAssistantPanelView: NSView {
                 : matching
         }
         let modelOptions = modelChoices.map { choice -> ShadcnSelectOption<String> in
-            // Prefer the bare model name in the chip; keep the full display
-            // name as the value so selectChoice still matches.
-            let short = Self.shortModelLabel(for: choice)
-            return Self.selectOption(
+            // Provider identity already lives in the left chip. Model rows stay
+            // short and text-only; their value remains the full unambiguous
+            // display title used by selectChoice/backend routing.
+            ShadcnSelectOption(
                 value: choice.displayName,
-                label: short,
-                kind: choice.kind)
+                label: Self.shortModelLabel(for: choice))
         }
         target.setModels(
             modelOptions,
@@ -1411,37 +1539,27 @@ final class PetAssistantPanelView: NSView {
         let titles = effortPicker.itemTitles.isEmpty
             ? Self.fallbackEfforts
             : effortPicker.itemTitles
-        // Vertical phone-signal bars at different fill levels (SF Symbol
-        // `cellularbars` + variableValue). Chip is icon-only; menu still
-        // shows the full label (Auto / Low / Max / …).
-        let effortBars: (String) -> Double = { title in
-            switch title.lowercased() {
-            case "none", "off": return 0
-            case "low", "minimal": return 0.25
-            case "auto": return 0.4
-            case "medium": return 0.55
-            case "high", "max": return 0.8
-            case "ultra", "xhigh": return 1
-            default: return 0.4
-            }
-        }
+        // ShadKit renders these semantic effort labels as one variable-fill
+        // cellular-bars glyph, from no bars through all bars.
         target.setEfforts(
-            titles.map {
-                ShadcnSelectOption(
-                    value: $0, label: $0,
-                    systemImage: "cellularbars",
-                    symbolVariableValue: effortBars($0))
-            },
+            titles.map { ShadcnSelectOption(value: $0, label: $0) },
             selected: selectedEffort)
     }
 
-    /// "Hermes · gpt-5.6-sol" → "gpt-5.6-sol" for compact model chips.
-    private static func shortModelLabel(for choice: PetAssistant.AgentChoice) -> String {
-        let prefix = "\(choice.kind.providerLabel) · "
-        if choice.displayName.hasPrefix(prefix) {
-            return String(choice.displayName.dropFirst(prefix.count))
+    /// Provider is shown by the left chip, so `Claude · Claude Sonnet 5`
+    /// becomes `Sonnet 5` and `Codex · GPT-5.6-Sol` becomes `GPT-5.6-Sol`.
+    static func shortModelLabel(for choice: PetAssistant.AgentChoice) -> String {
+        let provider = choice.kind.providerLabel
+        var label = choice.displayName
+        let qualifiedPrefix = "\(provider) · "
+        if label.hasPrefix(qualifiedPrefix) {
+            label.removeFirst(qualifiedPrefix.count)
         }
-        return choice.displayName
+        let redundantPrefix = provider + " "
+        if label.lowercased().hasPrefix(redundantPrefix.lowercased()) {
+            label.removeFirst(redundantPrefix.count)
+        }
+        return label.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Build a select option with the models.dev brand logo when we have one.
@@ -1616,6 +1734,31 @@ final class PetAssistantPanelView: NSView {
     var modelItemTitlesForTesting: [String] { modelPicker.itemTitles }
     var effortTitlesForTesting: [String] { effortPicker.itemTitles }
     var effortValueForTesting: String { effortPicker.titleOfSelectedItem ?? "" }
+    var terminalModeAvailableForTesting: Bool {
+        modeControl.isEnabled(forSegment: 1)
+    }
+    var terminalModeEnabledForTesting: Bool {
+        modeControl.selectedSegment == 1
+    }
+    func selectTerminalModeForTesting(_ enabled: Bool) {
+        modeControl.selectedSegment = enabled ? 1 : 0
+        modeChanged(modeControl)
+    }
+    var shadcnTerminalModeAvailableForTesting: Bool? {
+        shadcnPanel?.model.terminalAvailable
+    }
+    var shadcnTerminalModeEnabledForTesting: Bool? {
+        shadcnPanel?.model.terminalAccessEnabled
+    }
+    func selectShadcnTerminalModeForTesting(_ enabled: Bool) {
+        shadcnPanel?.model.selectTerminalAccess(enabled)
+    }
+    var shadcnMessageFontSizeForTesting: CGFloat? {
+        shadcnPanel?.model.messageFontSize
+    }
+    func selectShadcnMessageFontSizeForTesting(_ size: CGFloat) {
+        shadcnPanel?.model.messageFontSize = size
+    }
     /// The visible composer controls are the flat labeled chips, not the old
     /// stock popup + brain glyph.
     var modelChipTitleForTesting: String { modelButton.title }
@@ -1798,11 +1941,21 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     private struct PendingRequest {
         let id: UUID
+        let groupID: UUID
         let text: String
         let model: String
         let effort: String
         let threadId: UUID
         let generation: Int
+        let agent: ConfiguredChatAgent?
+        let isFirstInGroup: Bool
+        let isLastInGroup: Bool
+        let isPeerFollowUp: Bool
+    }
+
+    private struct EnsembleTurnState {
+        let threadId: UUID
+        var followUpAgentIDs: Set<String> = []
     }
 
     // A model-visible user item is finally capped at 10KB. Keep the current
@@ -1817,7 +1970,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private static let maxLastCommandBytes = 1_000
 
     private weak var session: TerminalSession?
-    private let config: AppConfig
+    /// User authorization, never inferred from a terminal attachment.
+    private var requestedTerminalAccessEnabled = false
+    private var config: AppConfig
+    /// Production Chats start with one implicit Auto agent. Injected test
+    /// choices keep the historical empty roster unless the test adds one.
+    private let seedsDefaultAgent: Bool
     private let requestRunner: RequestRunner?
     /// Lower transport seam used by focused tests while retaining the real
     /// request/context/finish pipeline. Production calls `askAI` directly.
@@ -1841,8 +1999,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private var threads: [ChatThread] = [ChatThread()]
     private var activeThreadId: UUID
     private var pendingRequests: [PendingRequest] = []
+    /// Per-user-turn peer coordination budget. Every agent may receive at most
+    /// one mention-triggered follow-up, preventing recursive debate loops.
+    private var ensembleTurnStates: [UUID: EnsembleTurnState] = [:]
     private var requestInFlight = false
     private var activeRequestID: UUID?
+    private var activeAgentID: String?
     /// Thread id of the turn currently streaming (if any).
     private var streamingThreadId: UUID?
     /// Generation-qualified keyed transport id for the active backend call.
@@ -1859,7 +2021,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Extra embedded sidebar surfaces when more than one Chat pane hosts this
     /// assistant (multi-pane). Weak so closed panes drop out.
     private var extraSidebarPanels: [WeakPetAssistantPanel] = []
-    /// Last known project root for file SEARCH/LIST when no terminal is attached.
+    /// Explicit checkout/worktree chosen for this Chat.
+    private var explicitWorkspaceDirectory: String?
+    /// Last known project root retained after a terminal detaches.
     private var lastWorkspaceDirectory: String?
     /// Dynamic Channel state is resolved at the beginning of every turn. It is
     /// intentionally not cached in the provider's constant system prompt:
@@ -1928,13 +2092,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         conversationReleaser: ((String) -> Void)? = nil
     ) {
         self.config = config
+        let injected = availableChoices != nil
+        self.seedsDefaultAgent = !injected
         self.requestRunner = requestRunner
         self.backendRunner = backendRunner
         self.backendWorkScheduler = backendWorkScheduler
         self.backendStartBoundaryObserver = backendStartBoundaryObserver
         self.conversationRegistrar = conversationRegistrar
         self.conversationReleaser = conversationReleaser
-        let injected = availableChoices != nil
         var resolved = PetAssistant.interactiveChoices(
             availableChoices ?? PetAssistant.resolveChoices(config: config))
         // Re-add the user's recently typed custom models (cross-launch),
@@ -1947,9 +2112,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             }
         }
         self.availableChoices = resolved
-        // Seed one empty thread; `threads` default already has it, but the
-        // active id must match that instance.
-        let seed = ChatThread()
+        // A visible Chat always has one primary agent in production. Auto is
+        // replaced (not appended) when the user explicitly adds their first
+        // concrete provider/model.
+        let primary = ConfiguredChatAgent(
+            provider: "auto", modelTitle: "Auto", effort: "Auto", alias: "auto")
+        let seed = ChatThread(ensembleAgents: injected ? [] : [primary])
         self.threads = [seed]
         self.activeThreadId = seed.id
         super.init()
@@ -1990,14 +2158,63 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     func attach(to session: TerminalSession) {
         guard !invalidated else { return }
+        if self.session !== session {
+            // A different terminal is a new authorization target.
+            requestedTerminalAccessEnabled = false
+        }
         self.session = session
         if let cwd = session.currentDirectory(), !cwd.isEmpty {
             lastWorkspaceDirectory = cwd
         }
+        // Attachment only changes availability. It must never authorize access.
+        updatePanels()
     }
 
     func isAttached(to candidate: TerminalSession) -> Bool {
         session === candidate
+    }
+
+    var terminalAvailable: Bool { session != nil }
+    var terminalAccessEnabled: Bool { requestedTerminalAccessEnabled }
+    var effectiveTerminalAccessEnabled: Bool {
+        requestedTerminalAccessEnabled && terminalAvailable
+    }
+    var executionProfile: AgentExecutionProfile {
+        effectiveTerminalAccessEnabled ? .visibleTerminal : .workspaceChat
+    }
+
+    /// Returns the effective value. Enabling without an attachment is rejected
+    /// and normalized to Chat mode.
+    @discardableResult
+    func setTerminalAccessEnabled(_ enabled: Bool) -> Bool {
+        guard !invalidated else { return false }
+        let previous = executionProfile
+        requestedTerminalAccessEnabled = enabled && terminalAvailable
+        if previous != executionProfile {
+            if requestInFlight {
+                // A capability transition cannot share a transport lifecycle.
+                cancelConversationWork()
+            } else {
+                releaseIdleConversations(for: activeThreadId)
+            }
+        }
+        updatePanels()
+        return effectiveTerminalAccessEnabled
+    }
+
+    private func releaseIdleConversations(for threadID: UUID) {
+        guard let index = threadIndex(threadID) else { return }
+        let prefix = threadID.uuidString
+        for conversationID in registeredConversationIDs
+        where conversationID.hasPrefix(prefix) {
+            releaseRegisteredBackendConversation(conversationID)
+        }
+        threads[index].backendEpoch &+= 1
+        threads[index].needsBackendBootstrap = true
+        for key in Array(threads[index].agentBackendStates.keys) {
+            threads[index].agentBackendStates[key]?.epoch &+= 1
+            threads[index].agentBackendStates[key]?.needsBootstrap = true
+        }
     }
 
     func configureCollaboration(
@@ -2010,11 +2227,15 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         collaborationIdentityPublisher = identityPublisher
     }
 
-    /// Workspace used for chat-side file listing when a terminal is absent.
-    /// Prefers the live pane cwd, then the last attached project, then the
-    /// process cwd (often the repo when Infinitty was launched from one).
+    /// Workspace precedence is explicit checkout, then the live terminal cwd
+    /// only when Terminal mode is effective, then the last project, process
+    /// cwd, and finally the home directory.
     func workspaceDirectoryForChat() -> String {
-        if let cwd = session?.currentDirectory(), !cwd.isEmpty {
+        if let explicit = explicitWorkspaceDirectory, !explicit.isEmpty {
+            return explicit
+        }
+        if effectiveTerminalAccessEnabled,
+           let cwd = session?.currentDirectory(), !cwd.isEmpty {
             lastWorkspaceDirectory = cwd
             return cwd
         }
@@ -2035,7 +2256,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         let value = path.trimmingCharacters(
             in: .whitespacesAndNewlines)
         guard !invalidated, !value.isEmpty else { return }
+        explicitWorkspaceDirectory = value
         lastWorkspaceDirectory = value
+        updatePanels()
     }
 
     /// Versioned app-control projection. This intentionally exposes the
@@ -2060,7 +2283,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             requestInFlight: requestInFlight,
             streamingThreadID:
                 streamingThreadId?.uuidString.lowercased(),
-            workspaceDirectory: workspaceDirectoryForChat())
+            workspaceDirectory: workspaceDirectoryForChat(),
+            terminalAvailable: terminalAvailable,
+            terminalAccessRequested: requestedTerminalAccessEnabled,
+            terminalAccessEffective: effectiveTerminalAccessEnabled,
+            executionMode: executionProfile.rawValue,
+            ensembleAgents: activeThread?.ensembleAgents.map(\.displayName) ?? [])
     }
 
     func submitFromControl(
@@ -2128,6 +2356,19 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             guard let self, !self.lastFiles.isEmpty else { return }
             self.onShowInSidePanel?(self.lastFiles, self.lastQuery)
         }
+        panel.onTerminalAccessChange = { [weak self] enabled in
+            self?.setTerminalAccessEnabled(enabled)
+        }
+        panel.onAddAgent = { [weak self] model, effort in
+            self?.addSelectedAgent(model: model, effort: effort)
+        }
+        panel.onToggleAgent = { [weak self] id in
+            self?.toggleAgent(id: id)
+        }
+        panel.setTerminalAccess(
+            available: terminalAvailable,
+            enabled: effectiveTerminalAccessEnabled)
+        panel.setRoster(activeThread?.ensembleAgents ?? [])
         panel.onNewChat = { [weak self] in self?.startNewChat() }
         panel.onSelectThread = { [weak self] id in
             guard let uuid = UUID(uuidString: id) else { return }
@@ -2161,7 +2402,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 return
             }
         }
-        let fresh = ChatThread()
+        let primary = ConfiguredChatAgent(
+            provider: "auto", modelTitle: "Auto", effort: "Auto", alias: "auto")
+        let fresh = ChatThread(
+            ensembleAgents: seedsDefaultAgent ? [primary] : [])
         threads.insert(fresh, at: 0)
         activeThreadId = fresh.id
         lastFiles.removeAll()
@@ -2191,6 +2435,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private func dropPending(for id: UUID) -> Bool {
         let hadPendingRequest = pendingRequests.contains { $0.threadId == id }
         pendingRequests.removeAll { $0.threadId == id }
+        ensembleTurnStates = ensembleTurnStates.filter { $0.value.threadId != id }
         let cancelledActiveRequest = streamingThreadId == id
         if hadPendingRequest || cancelledActiveRequest {
             let oldConversationID = cancelledActiveRequest
@@ -2203,12 +2448,17 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             if let idx = threadIndex(id) {
                 threads[idx].backendEpoch &+= 1
                 threads[idx].needsBackendBootstrap = true
+                for key in Array(threads[idx].agentBackendStates.keys) {
+                    threads[idx].agentBackendStates[key]?.epoch &+= 1
+                    threads[idx].agentBackendStates[key]?.needsBootstrap = true
+                }
             }
         }
         if cancelledActiveRequest {
             streamingThreadId = nil
             activeBackendConversationID = nil
             activeRequestID = nil
+            activeAgentID = nil
             requestInFlight = false
         }
         return cancelledActiveRequest
@@ -2225,8 +2475,21 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func backendConversationID(for threadID: UUID) -> String {
-        let epoch = threads.first(where: { $0.id == threadID })?.backendEpoch ?? 0
-        return Self.backendConversationID(threadID: threadID, epoch: epoch)
+        backendConversationID(for: threadID, agent: nil)
+    }
+
+    private func backendConversationID(
+        for threadID: UUID, agent: ConfiguredChatAgent?
+    ) -> String {
+        guard let agent,
+              let thread = threads.first(where: { $0.id == threadID })
+        else {
+            let epoch = threads.first(where: { $0.id == threadID })?.backendEpoch ?? 0
+            return Self.backendConversationID(threadID: threadID, epoch: epoch)
+        }
+        let epoch = thread.agentBackendStates[agent.id]?.epoch ?? 0
+        return AgentConversationIdentity.transportID(
+            threadID: threadID, agentID: agent.id, epoch: epoch)
     }
 
     private func appendMessage(
@@ -2295,13 +2558,19 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             (id: $0.id.uuidString, title: $0.title)
         }
         let activeId = activeThreadId.uuidString
-        let activeBackendID = backendConversationID(for: activeThreadId)
+        let activeBackendID = (streamingThreadId == activeThreadId
+            ? activeBackendConversationID : nil)
+            ?? backendConversationID(for: activeThreadId)
         for panel in allVisiblePanels {
             panel.setToolEventScopeID(activeBackendID)
             panel.setMessages(sidebarMessages)
             panel.setQueuedMessages(activePending)
             panel.setHasFiles(!lastFiles.isEmpty)
+            panel.setTerminalAccess(
+                available: terminalAvailable,
+                enabled: effectiveTerminalAccessEnabled)
             panel.setThreads(threadSummaries, activeId: activeId)
+            panel.setRoster(activeThread?.ensembleAgents ?? [])
         }
     }
 
@@ -2309,6 +2578,15 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         var panels = allSidebarPanels
         if let popoverPanel { panels.append(popoverPanel) }
         return panels
+    }
+
+    /// Applies Settings-owned ShadKit appearance without replacing the Chat
+    /// thread or backend state.
+    func applyConfig(_ config: AppConfig) {
+        self.config = config
+        for panel in allVisiblePanels {
+            panel.applyConfig(config)
+        }
     }
 
     private func setPanelsThinking(_ thinking: Bool, label: String? = nil) {
@@ -2357,20 +2635,131 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         submitFromControl(request)
     }
 
+    var configuredAgentsForTesting: [ConfiguredChatAgent] {
+        activeThread?.ensembleAgents ?? []
+    }
+
+    func toggleAgentForTesting(_ id: String) {
+        toggleAgent(id: id)
+    }
+
     private func submitFromPanel(_ request: String, model: String, effort: String = "Auto") {
         guard !invalidated else { return }
         let request = Self.bounded(
             request.trimmingCharacters(in: .whitespacesAndNewlines),
             to: Self.maxComposerBytes)
         guard !request.isEmpty else { return }
-        let threadId = activeThreadId
-        let thread = threads.first(where: { $0.id == threadId })
-        let generation = thread?.generation ?? 0
-        pendingRequests.append(PendingRequest(
-            id: UUID(), text: request, model: model, effort: effort,
-            threadId: threadId, generation: generation))
+        if let command = ChatEnsemble.addAgentArgument(in: request) {
+            switch command {
+            case .failure(let error):
+                appendMessage(AssistantChatMessage(role: "System", text: error.description),
+                              to: activeThreadId)
+            case .success(let query):
+                addAgent(query: query, effort: effort)
+            }
+            updatePanels()
+            return
+        }
+        enqueueTurnGroup(request, model: model, effort: effort)
         updatePanels()
         processNextRequest()
+    }
+
+    private func addAgent(query: String, effort: String) {
+        guard let index = threadIndex(activeThreadId) else { return }
+        guard var agent = ChatEnsemble.resolve(
+            query, choices: availableChoices, effort: effort)
+        else {
+            appendMessage(AssistantChatMessage(
+                role: "System", text: ChatEnsembleError.unknownAgent(query).description),
+                to: activeThreadId)
+            return
+        }
+        // The implicit Auto agent is the single-agent default. The first
+        // explicit provider/model replaces it; later additions form an ensemble.
+        if threads[index].ensembleAgents.count == 1,
+           threads[index].ensembleAgents[0].provider == "auto" {
+            let implicitID = threads[index].ensembleAgents[0].id
+            threads[index].ensembleAgents.removeAll()
+            threads[index].agentBackendStates.removeValue(forKey: implicitID)
+        }
+        guard !threads[index].ensembleAgents.contains(where: { $0.id == agent.id }) else {
+            appendMessage(AssistantChatMessage(
+                role: "System", text: ChatEnsembleError.duplicateAgent(agent.displayName).description),
+                to: activeThreadId)
+            return
+        }
+        if threads[index].ensembleAgents.contains(where: { $0.alias == agent.alias }) {
+            let base = agent.alias
+            var suffix = 2
+            while threads[index].ensembleAgents.contains(where: {
+                $0.alias == "\(base)-\(suffix)"
+            }) { suffix += 1 }
+            agent = ConfiguredChatAgent(
+                provider: agent.provider, modelTitle: agent.modelTitle,
+                effort: agent.effort, alias: "\(base)-\(suffix)")
+        }
+        threads[index].ensembleAgents.append(agent)
+        threads[index].agentBackendStates[agent.id] = ChatAgentBackendState()
+        appendMessage(AssistantChatMessage(
+            role: "System",
+            text: "Added \(agent.displayName) (\(agent.modelTitle)) to this Chat."),
+            to: activeThreadId)
+    }
+
+    private func addSelectedAgent(model: String, effort: String) {
+        addAgent(query: model, effort: effort)
+        updatePanels()
+    }
+
+    private func toggleAgent(id: String) {
+        guard let index = threadIndex(activeThreadId),
+              let agentIndex = threads[index].ensembleAgents.firstIndex(where: {
+                  $0.id == id
+              })
+        else { return }
+        let disabling = threads[index].ensembleAgents[agentIndex].isEnabled
+        threads[index].ensembleAgents[agentIndex].isEnabled.toggle()
+        if disabling {
+            pendingRequests.removeAll { $0.agent?.id == id }
+            if requestInFlight, activeAgentID == id {
+                cancelConversationWork()
+                return
+            }
+        }
+        updatePanels()
+    }
+
+    private func enqueueTurnGroup(_ text: String, model: String, effort: String) {
+        guard let thread = activeThread else { return }
+        let generation = thread.generation
+        let groupID = UUID()
+        if thread.ensembleAgents.isEmpty {
+            pendingRequests.append(PendingRequest(
+                id: UUID(), groupID: groupID, text: text, model: model, effort: effort,
+                threadId: thread.id, generation: generation, agent: nil,
+                isFirstInGroup: true, isLastInGroup: true,
+                isPeerFollowUp: false))
+            return
+        }
+        switch ChatEnsemble.route(prompt: text, roster: thread.ensembleAgents) {
+        case .failure(let error):
+            appendMessage(AssistantChatMessage(role: "You", text: text),
+                          to: thread.id, titleFromUser: true)
+            appendMessage(AssistantChatMessage(role: "System", text: error.description),
+                          to: thread.id)
+        case .success(let targets):
+            ensembleTurnStates[groupID] = EnsembleTurnState(threadId: thread.id)
+            for (offset, agent) in targets.enumerated() {
+                pendingRequests.append(PendingRequest(
+                    id: UUID(), groupID: groupID, text: text,
+                    model: agent.modelTitle, effort: agent.effort,
+                    threadId: thread.id, generation: generation, agent: agent,
+                    isFirstInGroup: offset == 0,
+                    isLastInGroup: offset == targets.count - 1,
+                    isPeerFollowUp: false))
+            }
+        }
     }
 
     private func processNextRequest() {
@@ -2383,6 +2772,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             return req.generation != thread.generation
         }
         guard !pendingRequests.isEmpty else {
+            ensembleTurnStates.removeAll()
             streamingThreadId = nil
             setPanelsThinking(false)
             updatePanels()
@@ -2390,7 +2780,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
 
         let request = pendingRequests.removeFirst()
-        let conversationID = backendConversationID(for: request.threadId)
+        let conversationID = backendConversationID(
+            for: request.threadId, agent: request.agent)
         let priorHistory = statelessHistory(for: request.threadId)
         let backendRequest: String
         if let recoveryContext = recoveryContexts.removeValue(forKey: request.threadId) {
@@ -2400,27 +2791,46 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             --- new user request ---
             \(request.text)
             """
+        } else if let agent = request.agent,
+                  agent.provider != "auto",
+                  let thread = threads.first(where: { $0.id == request.threadId }) {
+            let coordinationContext = ChatEnsemble.peerContext(
+                messages: thread.messages,
+                roster: thread.ensembleAgents,
+                currentAgent: agent)
+            let requestHeading = request.isPeerFollowUp
+                ? "--- bounded peer follow-up ---\nA peer @mentioned you. Respond to the latest peer message in the shared transcript while continuing the user's request.\n"
+                : "--- bounded user request ---\n"
+            backendRequest = coordinationContext
+                + "\n\n" + requestHeading + request.text
         } else {
             backendRequest = request.text
         }
         requestInFlight = true
         activeRequestID = request.id
+        activeAgentID = request.agent?.id
         streamingThreadId = request.threadId
         activeBackendConversationID = conversationID
-        appendMessage(
-            AssistantChatMessage(role: "You", text: request.text),
-            to: request.threadId, titleFromUser: true)
-        collaborationMessagePublisher?(CollaborationChatEmission(
-            kind: .humanPrompt,
-            text: request.text,
-            threadID: request.threadId.uuidString.lowercased()))
+        if request.isFirstInGroup {
+            appendMessage(
+                AssistantChatMessage(role: "You", text: request.text),
+                to: request.threadId, titleFromUser: true)
+            collaborationMessagePublisher?(CollaborationChatEmission(
+                kind: .humanPrompt,
+                text: request.text,
+                threadID: request.threadId.uuidString.lowercased()))
+        }
         updatePanels()
+        for panel in allVisiblePanels {
+            panel.setStreamingAuthor(request.agent?.displayName)
+        }
         // Only the active thread shows the thinking chrome.
         if request.threadId == activeThreadId {
             setPanelsThinking(
                 true,
-                label: request.model.hasPrefix("Auto")
-                    ? "Thinking" : "\(request.model) · thinking")
+                label: request.agent.map { "\($0.displayName) · thinking" }
+                    ?? (request.model.hasPrefix("Auto")
+                        ? "Thinking" : "\(request.model) · thinking"))
         }
 
         let completion: AskCompletion = { [weak self] answer, files, query in
@@ -2571,6 +2981,41 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         return marker + String(reversed.reversed())
     }
 
+    private func enqueuePeerFollowUps(
+        mentionedIn answer: String, after request: PendingRequest
+    ) {
+        guard let source = request.agent,
+              let index = threadIndex(request.threadId),
+              threads[index].ensembleAgents.count > 1,
+              var state = ensembleTurnStates[request.groupID]
+        else { return }
+
+        let targets = ChatEnsemble.mentionedAgents(
+            in: answer, roster: threads[index].ensembleAgents)
+        for target in targets where target.id != source.id {
+            // A peer still waiting in the initial sequential pass will see the
+            // mention in shared context naturally; don't queue a duplicate.
+            if pendingRequests.contains(where: {
+                $0.groupID == request.groupID && $0.agent?.id == target.id
+            }) { continue }
+            guard state.followUpAgentIDs.insert(target.id).inserted else { continue }
+
+            let followUp = PendingRequest(
+                id: UUID(), groupID: request.groupID, text: request.text,
+                model: target.modelTitle, effort: target.effort,
+                threadId: request.threadId, generation: request.generation,
+                agent: target, isFirstInGroup: false, isLastInGroup: false,
+                isPeerFollowUp: true)
+            // Peer hand-offs belong before later user turns while preserving
+            // the order of any same-group work already queued.
+            let insertion = pendingRequests.lastIndex(where: {
+                $0.groupID == request.groupID
+            }).map { $0 + 1 } ?? 0
+            pendingRequests.insert(followUp, at: insertion)
+        }
+        ensembleTurnStates[request.groupID] = state
+    }
+
     private func completeRequest(
         _ request: PendingRequest, outcome: AIOutcome,
         files: [String], query: String?
@@ -2579,6 +3024,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         // started another turn. It must not clear that newer turn's state.
         guard activeRequestID == request.id else { return }
         activeRequestID = nil
+        activeAgentID = nil
         requestInFlight = false
         activeBackendConversationID = nil
         if streamingThreadId == request.threadId {
@@ -2606,22 +3052,27 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         } else {
             isSuccessfulAgentResponse = false
         }
+        let author = request.agent?.displayName
         appendMessage(
             AssistantChatMessage(
                 role: isSuccessfulAgentResponse ? "Assistant" : "System",
                 text: answer,
-                tokenCount: AssistantChatMessage.approximateTokenCount(for: answer)),
+                tokenCount: AssistantChatMessage.approximateTokenCount(for: answer),
+                author: author),
             to: request.threadId)
         if isSuccessfulAgentResponse {
             collaborationMessagePublisher?(CollaborationChatEmission(
                 kind: .agentResponse,
                 text: answer,
-                threadID: request.threadId.uuidString.lowercased()))
+                threadID: request.threadId.uuidString.lowercased(),
+                agentName: author))
+            enqueuePeerFollowUps(mentionedIn: answer, after: request)
         } else {
             collaborationMessagePublisher?(CollaborationChatEmission(
                 kind: .runtimeFailure,
                 text: answer,
-                threadID: request.threadId.uuidString.lowercased()))
+                threadID: request.threadId.uuidString.lowercased(),
+                agentName: author))
         }
         // Move completed thread to the top of the switcher.
         if let idx = threadIndex(request.threadId), idx > 0 {
@@ -2632,11 +3083,15 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         if request.threadId == activeThreadId {
             setPanelsThinking(false)
             setPanelsStreaming(nil)
+            for panel in allVisiblePanels { panel.setStreamingAuthor(nil) }
         }
         // Pet bubble is for answers you would otherwise miss. If the chat
         // surface is already on screen, the transcript is the notification.
         if !isChatSurfaceVisible {
             onPetMessage?(answer)
+        }
+        if !pendingRequests.contains(where: { $0.groupID == request.groupID }) {
+            ensembleTurnStates.removeValue(forKey: request.groupID)
         }
         processNextRequest()
     }
@@ -2644,6 +3099,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     func detach() {
         closePopover()
         session = nil
+        // Authorization does not survive detach/re-attach.
+        requestedTerminalAccessEnabled = false
+        updatePanels()
     }
 
     /// Stop this assistant's queued/active conversation work. Backends may
@@ -2659,6 +3117,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             let id = Self.backendConversationID(
                 threadID: thread.id, epoch: thread.backendEpoch)
             return conversationIDs.contains(id)
+                || conversationIDs.contains(where: { $0.hasPrefix(thread.id.uuidString) })
                 || pendingThreadIDs.contains(thread.id)
                 || streamingThreadId == thread.id
                 ? thread.id : nil
@@ -2674,10 +3133,16 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             if affectedThreadIDs.contains(threads[index].id) {
                 threads[index].backendEpoch &+= 1
                 threads[index].needsBackendBootstrap = true
+                for key in Array(threads[index].agentBackendStates.keys) {
+                    threads[index].agentBackendStates[key]?.epoch &+= 1
+                    threads[index].agentBackendStates[key]?.needsBootstrap = true
+                }
             }
         }
         pendingRequests.removeAll()
+        ensembleTurnStates.removeAll()
         activeRequestID = nil
+        activeAgentID = nil
         requestInFlight = false
         streamingThreadId = nil
         activeBackendConversationID = nil
@@ -2763,73 +3228,62 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     // MARK: - the ask pipeline
 
-    private static let systemPrompt = """
-    You are infinitty — an agentic coding assistant inside a terminal app. You \
-    can drive a visible terminal when one is attached, and you can also answer \
-    entirely from chat when no terminal exists.
-
-    CHAT WITHOUT A TERMINAL (context will say "no active terminal"):
-    - Do NOT refuse. Do NOT open a terminal, new tab, or pane just to list \
-    files, search the project, or answer a question.
-    - File listings and project lookups stay in chat: reply with EXACTLY one \
-    line "SEARCH: <keywords>" (or "SEARCH: *" for a broad listing under the \
-    workspace cwd) and nothing else; you will get matching paths and then \
-    compose the final answer in chat.
-    - Only call infinitty_new_tab / infinitty_run / infinitty_send when the user \
-    explicitly wants shell work or a program launched in a terminal.
-
-    WHEN A TERMINAL IS ATTACHED you have infinitty tools (infinitty_list_panes, \
-    infinitty_run, infinitty_send, infinitty_screen, infinitty_history, \
-    infinitty_last_output, infinitty_exit_code, infinitty_new_tab, \
-        infinitty_split, infinitty_focus, infinitty_close, infinitty_surface, \
-        infinitty_todos, infinitty_channels, infinitty_channel_link, \
-        infinitty_channel_apply, infinitty_channel_self, infinitty_channel_post). To SHOW the user something rich — a plan, a doc, a \
-    rendered preview, a small UI — use infinitty_surface (markdown, HTML, or a \
-    URL; target=split for a side panel at a ratio like 0.25, target=window for \
-    a standalone doc). For multi-step work, keep infinitty_todos updated so the \
-    pane header shows your progress. When the user asks you to DO something in \
-    the terminal — run a command, type text, open a tab, launch a program — \
-    you MUST call the matching tool. Never describe an action as done unless \
-    the tool call returned success. Never invent output, exit codes, or state: \
-    read them with infinitty_screen / infinitty_last_output / \
-    infinitty_exit_code and report exactly what came back. If a tool returns an \
-    error, say so plainly.
-
-    To act on a specific pane, first call infinitty_list_panes to get pane ids \
-    (the focused pane is marked). "Type X and press enter" = infinitty_send \
-    with submit:true. "Type X" without running = submit:false. To run a command \
-    and capture its result, prefer infinitty_run.
-
-    To OPEN or LAUNCH a program, TYPE ITS COMMAND INTO A VISIBLE PANE so the \
-    user sees it. Never launch a macOS desktop app (never `open -a`, never \
-    `open`); the user wants the command-line program in their terminal, not a \
-    GUI app. Examples: "open claude code" / "open claude" → send `claude`; \
-    "open vim" → send `vim`; "start a python repl" → send `python3`. \
-    CHOOSE THE RIGHT TOOL: use infinitty_send (submit:true) to launch anything \
-    interactive or long-running (claude, vim, a REPL, a server) — it types the \
-    command and returns immediately. Use infinitty_run ONLY for a one-shot \
-    command that finishes on its own and whose output you need, because \
-    infinitty_run WAITS for the command to complete and will hang on an \
-    interactive program. Prefer the focused pane; open a new tab \
-    (infinitty_new_tab) only if asked or no pane exists and they want a shell. \
-    Act in ONE or two tool calls — don't retry with variations.
-
-    For plain questions that need no terminal action, answer concisely in a few \
-    sentences of plain text (no markdown). If answering requires finding or \
-    listing files in the project, reply with EXACTLY one line \
-    "SEARCH: <filename or path keywords>" or "SEARCH: *" and nothing else; you \
-    will receive the matching files to compose the final answer in chat.
+    private static let commonCodingPrompt = """
+    You are infinitty, an agentic coding assistant inside a developer workspace.
+    Work directly on the requested code: inspect relevant files, make focused
+    edits, run appropriate checks, and report the actual result. Keep all file
+    and shell work within the workspace unless the user explicitly authorizes a
+    different path. Never invent command output, test results, files, or state.
+    Browser, surface, todo, and Channel collaboration tools remain available.
 
     CHANNEL AWARENESS:
-    - A turn may contain an "ACTIVE INFINITTY CHANNEL" section. When present, \
-    it is authoritative live app state: you are connected to that Channel as \
-    the named participant and the listed peer endpoints are connected with you.
-    - Never describe yourself as a solo chat when an active Channel section is \
-    present. If asked about the connection, state your participant name, the \
-    Channel name, and the exact connected peer names.
-    - Read recent Channel messages as shared collaboration context and refer to \
-    other participants by their displayed names.
+    - A turn may contain an "ACTIVE INFINITTY CHANNEL" section. When present,
+      it is authoritative live app state. Use the exact participant, peer, role,
+      plan, responsibility, and recent-message information it contains.
+    - Never describe yourself as solo when that section lists connected peers.
+    - Treat recent Channel messages as shared collaboration context.
     """
+
+    private static let workspaceChatRules = """
+    EXECUTION MODE: CHAT (workspace coding).
+    - Use native workspace Read, Write, Edit, Glob, Grep, and workspace-scoped
+      shell/test tools when useful. This is a capable coding mode, not a
+      read-only Q&A mode.
+    - No visible terminal is authorized. Do not call terminal-pane operations
+      such as infinitty_run, infinitty_send, infinitty_screen,
+      infinitty_history, infinitty_last_output, infinitty_exit_code,
+      infinitty_new_tab, infinitty_new_window, infinitty_split,
+      infinitty_focus, or infinitty_close.
+    - Do not open or manufacture a terminal. Answer and report coding results
+      in Chat. A legacy SEARCH: directive is allowed only for transports that
+      lack native file tools.
+    """
+
+    private static let visibleTerminalRules = """
+    EXECUTION MODE: TERMINAL (explicit visible-terminal access).
+    - A terminal is attached and the user explicitly enabled access.
+    - For requested commands, tests, interactive programs, screen inspection,
+      or shell work, use the infinitty terminal tools against the visible pane.
+      Prefer infinitty_run for finite commands and infinitty_send for
+      interactive or long-running programs.
+    - Native file read/search/edit tools remain available, but do not use a
+      hidden native shell for work that belongs in the visible terminal.
+    - Verify terminal actions from returned screen/output/exit state and report
+      errors plainly.
+    """
+
+    private static func systemPrompt(for profile: AgentExecutionProfile) -> String {
+        commonCodingPrompt + "\n\n" + (
+            profile == .visibleTerminal
+                ? visibleTerminalRules
+                : workspaceChatRules)
+    }
+
+    /// Compatibility/default prompt used by static helpers and transports
+    /// without assistant-owned mode state.
+    private static var systemPrompt: String {
+        systemPrompt(for: .workspaceChat)
+    }
 
     private func ask(
         _ request: String, model: String = "Auto · Best available",
@@ -2840,27 +3294,61 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         completion: BackendAskCompletion? = nil
     ) {
         var conversationID = conversationID
-        // A Chat/Browser tab is allowed to outlive its final terminal pane.
-        // File listings and Q&A still run in chat via workspace SEARCH — never
-        // force-open a terminal for that.
-        let activeSession = session
+        let profile = executionProfile
+        // Merely attaching a terminal never exposes its context or controls.
+        let activeSession = profile == .visibleTerminal ? session : nil
         activeSession?.petAnimator?.startThinking()
         let backend = resolveBackend(forSelectedTitle: model)
+        if profile == .visibleTerminal, backendRunner == nil {
+            switch backend {
+            case .claude:
+                break
+            case .none:
+                finish(outcome: .unconfigured, files: [], query: nil,
+                       completion: completion)
+                return
+            case .codex, .opencode, .hermes, .amp, .command, .openai, .foundation:
+                finish(
+                    outcome: .failure(
+                        "Terminal mode is unavailable for this provider because visible-terminal control cannot be enforced. Switch to Chat mode or select Claude."),
+                    files: [], query: nil, completion: completion)
+                return
+            }
+        }
         let provenance = Self.collaborationProvenance(for: backend)
-        collaborationIdentityPublisher?(provenance.provider, provenance.model)
+        if requestIdentity.agent == nil {
+            collaborationIdentityPublisher?(provenance.provider, provenance.model)
+        } else if requestIdentity.isFirstInGroup,
+                  let thread = threads.first(where: {
+                      $0.id == requestIdentity.threadId
+                  }) {
+            collaborationIdentityPublisher?(
+                "ensemble",
+                thread.ensembleAgents.map(\.modelTitle).joined(separator: ", "))
+        }
         // Keep the system prompt CONSTANT: the CLI bridges pin --system-prompt
         // at process launch, so folding effort in here forced a full cold
         // respawn on every effort change (and invalidated the prewarm). The
         // effort directive rides in the per-turn user message instead, so the
         // warm process is reused across Auto/Low/Medium/High.
-        let system = Self.systemPrompt
+        let system = Self.systemPrompt(for: profile)
         let effortNote = Self.effortDirective(effort)
         let runCwd = workspaceDirectoryForChat()
         let activeCollaborationContext = collaborationContextProvider?()
-        let sessionSignature = Self.backendSessionSignature(for: backend, cwd: runCwd)
+        let sessionSignature = Self.backendSessionSignature(
+            for: backend, cwd: runCwd, profile: profile)
         let previousSignature: String?
         let needsBackendBootstrap: Bool
-        if let idx = threadIndex(requestIdentity.threadId) {
+        if let idx = threadIndex(requestIdentity.threadId),
+           let agent = requestIdentity.agent {
+            let state = threads[idx].agentBackendStates[agent.id]
+                ?? ChatAgentBackendState()
+            previousSignature = state.signature
+            needsBackendBootstrap = state.needsBootstrap
+            threads[idx].agentBackendStates[agent.id] = ChatAgentBackendState(
+                signature: sessionSignature, needsBootstrap: false,
+                epoch: state.epoch)
+        } else if let idx = threadIndex(requestIdentity.threadId) {
             previousSignature = threads[idx].backendSessionSignature
             needsBackendBootstrap = threads[idx].needsBackendBootstrap
             threads[idx].backendSessionSignature = sessionSignature
@@ -2899,7 +3387,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             && (previousSignature == nil || statefulSessionChanged) {
             registerBackendConversation(
                 backend: backend, system: system, cwd: runCwd,
-                conversationID: conversationID)
+                profile: profile, conversationID: conversationID)
         }
         let requestWithHistory = explicitHistory.isEmpty
             ? request
@@ -2935,13 +3423,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 """
             } else {
                 context = """
-                cwd: \(runCwd)
-                last command: (no active terminal)
-                --- chat-only session ---
-                There is no attached terminal pane. Answer in chat. For project \
-                files use SEARCH: keywords or SEARCH: * — do not open a terminal, \
-                new tab, or shell just to list or find files. Do not claim \
-                terminal output. Browser tools remain available for page work.
+                workspace cwd: \(runCwd)
+                --- workspace Chat mode ---
+                No visible terminal access is authorized. Use the provider's \
+                native workspace file/edit/test tools. Do not call terminal-pane \
+                MCP operations or claim terminal state. Browser, surface, todo, \
+                and Channel collaboration tools remain available.
                 """
             }
             let requestItem = requestWithHistory
@@ -2965,6 +3452,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 user: initialPayload.user,
                 cwd: runCwd,
                 conversationID: conversationID,
+                profile: profile,
                 onPartial: onPartial, timeout: turnTimeout) { outcome in
                 if Self.isStateful(backend), case .failure = outcome {
                     self.markBackendBootstrapNeeded(after: requestIdentity)
@@ -3010,6 +3498,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                         user: followUpPayload.user,
                         cwd: runCwd,
                         conversationID: conversationID,
+                        profile: profile,
                         onPartial: onPartial, timeout: turnTimeout) { final in
                         if Self.isStateful(backend), case .failure = final {
                             self.markBackendBootstrapNeeded(after: requestIdentity)
@@ -3291,7 +3780,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Stable identity for the backend state that can retain this thread's
     /// prior turns. Secrets are deliberately excluded.
     private static func backendSessionSignature(
-        for backend: Backend, cwd: String
+        for backend: Backend,
+        cwd: String,
+        profile: AgentExecutionProfile
     ) -> String {
         let backendIdentity: String
         switch backend {
@@ -3314,7 +3805,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         case .foundation:
             backendIdentity = "foundation"
         }
-        return backendIdentity + "|cwd:" + cwd
+        return backendIdentity + "|cwd:" + cwd + "|profile:" + profile.rawValue
     }
 
     /// Outcome of an AI backend call. Distinguishes a genuinely unconfigured
@@ -3333,10 +3824,18 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     func prewarm() {
         let backend = Self.resolveBackend(config: config)
         guard Self.isStateful(backend) else { return }
+        let profile = executionProfile
+        let cwd = workspaceDirectoryForChat()
+        if let index = threadIndex(activeThreadId) {
+            threads[index].backendSessionSignature =
+                Self.backendSessionSignature(
+                    for: backend, cwd: cwd, profile: profile)
+        }
         registerBackendConversation(
             backend: backend,
-            system: Self.systemPrompt,
-            cwd: workspaceDirectoryForChat(),
+            system: Self.systemPrompt(for: profile),
+            cwd: cwd,
+            profile: profile,
             conversationID: backendConversationID(for: activeThreadId))
     }
 
@@ -3347,11 +3846,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         case .claude(let model):
             ClaudeBridge.shared.warmUp(
                 system: systemPrompt, model: model,
-                conversationID: conversationID)
+                conversationID: conversationID,
+                cwd: FileManager.default.currentDirectoryPath,
+                profile: .workspaceChat)
         case .codex(let model):
             CodexAppServer.shared.warmUp(
                 model: model ?? "gpt-5.4",
-                conversationID: conversationID)
+                conversationID: conversationID,
+                cwd: FileManager.default.currentDirectoryPath)
         case .opencode(let model):
             ACPBridge.opencode.warmUp(
                 model: model, conversationID: conversationID)
@@ -3508,6 +4010,18 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     static var maximumComposerInputBytesForTesting: Int { maxComposerBytes }
     static var maximumBackendUserBytesForTesting: Int { maxBackendUserBytes }
     static var systemPromptBytesForTesting: Int { systemPrompt.utf8.count }
+    static func systemPromptForTesting(
+        profile: AgentExecutionProfile
+    ) -> String {
+        systemPrompt(for: profile)
+    }
+    static func backendSessionSignatureForTesting(
+        backend: Backend,
+        cwd: String,
+        profile: AgentExecutionProfile
+    ) -> String {
+        backendSessionSignature(for: backend, cwd: cwd, profile: profile)
+    }
     static var maximumCombinedUserBytesForTesting: Int {
         max(maxBackendUserBytes - systemPrompt.utf8.count - 2, 0)
     }
@@ -3540,9 +4054,19 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             return activeBackendConversationID
                 ?? Self.backendConversationID(threadID: request.threadId, epoch: 0)
         }
-        threads[idx].backendEpoch &+= 1
-        let conversationID = Self.backendConversationID(
-            threadID: request.threadId, epoch: threads[idx].backendEpoch)
+        let conversationID: String
+        if let agent = request.agent {
+            var state = threads[idx].agentBackendStates[agent.id]
+                ?? ChatAgentBackendState()
+            state.epoch &+= 1
+            threads[idx].agentBackendStates[agent.id] = state
+            conversationID = AgentConversationIdentity.transportID(
+                threadID: request.threadId, agentID: agent.id, epoch: state.epoch)
+        } else {
+            threads[idx].backendEpoch &+= 1
+            conversationID = Self.backendConversationID(
+                threadID: request.threadId, epoch: threads[idx].backendEpoch)
+        }
         activeBackendConversationID = conversationID
         // Tool cards are scoped by the same epoch as the bridge. Switching the
         // subscription now rejects any already-queued events from the released
@@ -3580,6 +4104,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         backend: Backend,
         system: String,
         cwd: String,
+        profile: AgentExecutionProfile,
         conversationID: String
     ) {
         guard Self.isStateful(backend) else { return }
@@ -3592,11 +4117,16 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         guard backendRunner == nil else { return }
         switch backend {
         case .codex(let model):
-            CodexAppServer.shared.warmUp(
-                model: model ?? "gpt-5.4", conversationID: conversationID)
+            CodexAppServer.server(for: profile).warmUp(
+                model: model ?? "gpt-5.4",
+                conversationID: conversationID,
+                cwd: cwd)
         case .claude(let model):
             ClaudeBridge.shared.warmUp(
-                system: system, model: model, conversationID: conversationID)
+                system: system, model: model,
+                conversationID: conversationID,
+                cwd: cwd,
+                profile: profile)
         case .opencode(let model):
             ACPBridge.opencode.warmUp(
                 model: model, cwd: cwd, conversationID: conversationID)
@@ -3623,7 +4153,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                   let idx = self.threadIndex(request.threadId),
                   self.threads[idx].generation == request.generation
             else { return }
-            self.threads[idx].needsBackendBootstrap = true
+            if let agent = request.agent {
+                var state = self.threads[idx].agentBackendStates[agent.id]
+                    ?? ChatAgentBackendState()
+                state.needsBootstrap = true
+                self.threads[idx].agentBackendStates[agent.id] = state
+            } else {
+                self.threads[idx].needsBackendBootstrap = true
+            }
         }
         if Thread.isMainThread { mark() }
         else { DispatchQueue.main.async(execute: mark) }
@@ -3635,6 +4172,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         user: String,
         cwd: String,
         conversationID: String?,
+        profile: AgentExecutionProfile,
         onPartial: ((String) -> Void)?,
         timeout: TimeInterval?,
         done: @escaping (AIOutcome) -> Void
@@ -3647,6 +4185,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             Self.askAI(
                 backend: backend, system: system, user: user, cwd: cwd,
                 conversationID: conversationID,
+                profile: profile,
                 onPartial: onPartial, timeout: timeout, done: done)
         }
     }
@@ -3657,6 +4196,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         backend: Backend,
         system: String, user: String, cwd: String,
         conversationID: String? = nil,
+        profile: AgentExecutionProfile = .workspaceChat,
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -3690,11 +4230,11 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             askOpenAI(base: base, key: key, model: model, system: system, user: user, done: done)
         case .codex(let model):
             askCodex(model: model, cwd: cwd, system: system, user: user,
-                     conversationID: conversationID,
+                     conversationID: conversationID, profile: profile,
                      onPartial: onPartial, timeout: timeout, done: done)
         case .claude(let model):
-            askClaude(model: model, system: system, user: user,
-                      conversationID: conversationID,
+            askClaude(model: model, cwd: cwd, system: system, user: user,
+                      conversationID: conversationID, profile: profile,
                       onPartial: onPartial, timeout: timeout, done: done)
         case .opencode(let model):
             askACP(.opencode, model: model, cwd: cwd, system: system, user: user,
@@ -3725,6 +4265,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     static func cancelBackendConversation(_ conversationID: String) {
         CodexAppServer.shared.cancelConversation(conversationID)
+        CodexAppServer.visibleTerminalShared.cancelConversation(conversationID)
         ClaudeBridge.shared.cancelConversation(conversationID)
         ACPBridge.opencode.cancelConversation(conversationID)
         ACPBridge.hermes.cancelConversation(conversationID)
@@ -3733,6 +4274,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     static func releaseBackendConversation(_ conversationID: String) {
         CodexAppServer.shared.releaseConversation(conversationID)
+        CodexAppServer.visibleTerminalShared.releaseConversation(conversationID)
         ClaudeBridge.shared.releaseConversation(conversationID)
         ACPBridge.opencode.releaseConversation(conversationID)
         ACPBridge.hermes.releaseConversation(conversationID)
@@ -3750,6 +4292,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         model: String?, cwd: String,
         system: String, user: String,
         conversationID: String? = nil,
+        profile: AgentExecutionProfile = .workspaceChat,
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -3758,7 +4301,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             Task {
                 do {
-                    let reply = try await CodexAppServer.shared.turn(
+                    let reply = try await CodexAppServer.server(for: profile).turn(
                         prompt: prompt, cwd: cwd, model: model ?? "gpt-5.4",
                         timeout: timeout ?? defaultTurnTimeout,
                         conversationID: conversationID,
@@ -3776,8 +4319,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// shape as Codex; tools route through the injected infinitty-mcp config.
     private static func askClaude(
         model: String?,
+        cwd: String,
         system: String, user: String,
         conversationID: String? = nil,
+        profile: AgentExecutionProfile = .workspaceChat,
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -3789,6 +4334,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                         prompt: user, system: system, model: model,
                         timeout: timeout ?? defaultTurnTimeout,
                         conversationID: conversationID,
+                        cwd: cwd,
+                        profile: profile,
                         onPartial: onPartial)
                     done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))
                 } catch {
