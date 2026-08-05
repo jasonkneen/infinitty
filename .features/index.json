@@ -1,0 +1,2206 @@
+{
+  "meta": {
+    "version": 1,
+    "root": "/Users/jkneen/Documents/GitHub/titerm",
+    "scanned_at": "2026-08-05T05:44:58Z",
+    "source": "/Users/jkneen/Documents/GitHub/titerm"
+  },
+  "features": [
+    {
+      "name": "agents",
+      "description": "Built for agents",
+      "locators": [
+        {
+          "path": "README.md",
+          "kind": "file",
+          "note": "README section: Built for agents"
+        },
+        {
+          "path": "Sources/InfinittyKit/AgentBridgeSupport.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/AgentSessionNaming.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/AgentSurface.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/infinitty-agent",
+          "kind": "directory"
+        },
+        {
+          "path": "Sources/infinitty-agent/main.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "inferredTerminalAgent"
+        },
+        {
+          "path": "Tests/InfinittyKitTests/AgentBridgeTests.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Tests/InfinittyKitTests/AgentSessionNamingTests.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Tests/InfinittyKitTests/AgentSurfaceTests.swift",
+          "kind": "file"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-07-31-agent-channels-implementation.md",
+          "kind": "file"
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-31-agent-channels-design.md",
+          "kind": "file"
+        },
+        {
+          "path": "npm/bin/infinitty-agent.js",
+          "kind": "file"
+        },
+        {
+          "path": "shell-integration/infinitty-agent-context-hook.sh",
+          "kind": "file"
+        },
+        {
+          "path": "shell-integration/infinitty-agent-context-session-start.sh",
+          "kind": "file"
+        },
+        {
+          "path": "shell-integration/infinitty-agent-context-user-prompt-submit.sh",
+          "kind": "file"
+        },
+        {
+          "path": "shell-integration/infinitty-agent-run.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "amp",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/amp.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "app",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/App.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "appcontrolserver",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/AppControlServer.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "appcontrolservertests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/AppControlServerTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "appicon",
+      "locators": [
+        {
+          "path": "assets/AppIcon.icns",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "appinstanceregistry",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/AppInstanceRegistry.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "appinstanceregistrytests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/AppInstanceRegistryTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "apple",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/apple.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "assistanttoolevent",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/AssistantToolEvent.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "assistanttooleventbustests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/AssistantToolEventBusTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "authentication",
+      "description": "Authenticated cloud agents",
+      "locators": [
+        {
+          "path": "README.md",
+          "kind": "file",
+          "note": "README section: Authenticated cloud agents"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "billing",
+      "description": "Source checkout:",
+      "locators": [
+        {
+          "path": "README.md",
+          "kind": "file",
+          "note": "README section: Source checkout:"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "bridges",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ACPBridge.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/AmpBridge.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/ClaudeBridge.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/TerminalChannelBridge.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Tests/InfinittyKitTests/TerminalChannelBridgeTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "browserpane",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/BrowserPane.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "browserpanetests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/BrowserPaneTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "build",
+      "locators": [
+        {
+          "path": "surfaces/json-render-host/build.mjs",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "canvas",
+      "locators": [
+        {
+          "path": "docs/shadcnaikit-canvas-scope.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "channelpanel",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ChannelPanel.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "channelpaneltests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ChannelPanelTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "chatensemble",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ChatEnsemble.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "chatensembletests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ChatEnsembleTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "claude-sdk",
+      "locators": [
+        {
+          "path": ".claude",
+          "kind": "directory"
+        },
+        {
+          "path": ".claude/skills",
+          "kind": "directory"
+        },
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/anthropic.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": [
+        ".claude"
+      ]
+    },
+    {
+      "name": "cliexecutableresolver",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CLIExecutableResolver.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codediff",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CodeDiff.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codedifftests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/CodeDiffTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codegit",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CodeGit.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codegittests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/CodeGitTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codeicon",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CodeIcon.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codesegmentedbar",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CodeSegmentedBar.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codeview",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CodeView.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codeviewtests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/CodeViewTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "codexappserver",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CodexAppServer.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationaudit",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CollaborationAudit.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationaudittests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/CollaborationAuditTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationchannel",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CollaborationChannel.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationchanneltests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/CollaborationChannelTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationcloudruntime",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CollaborationCloudRuntime.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationcloudruntimetests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/CollaborationCloudRuntimeTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationcoordinator",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CollaborationCoordinator.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "collaborationcoordinatortests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/CollaborationCoordinatorTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "config",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Config.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "configtests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ConfigTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "controlserver",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ControlServer.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "cpty",
+      "locators": [
+        {
+          "path": "Sources/CPty",
+          "kind": "directory"
+        },
+        {
+          "path": "Sources/CPty/cpty.c",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/CPty/include/cpty.h",
+          "kind": "file"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "cursor",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/cursor.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "deepseek",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/deepseek.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "design-qa",
+      "locators": [
+        {
+          "path": "design-qa.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "designgallerywindow",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/DesignGalleryWindow.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "factory",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/factory.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "foregroundprocesstracker",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ForegroundProcessTracker.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "foregroundprocesstrackertests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ForegroundProcessTrackerTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "foundationhint",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/FoundationHint.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "fulldiskaccessassistant",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/FullDiskAccessAssistant.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "fulldiskaccessassistanttests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/FullDiskAccessAssistantTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "github-copilot",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/github-copilot.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "glyphatlas",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/GlyphAtlas.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "google",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/google.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "groq",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/groq.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "headlessapphost",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/HeadlessAppHost.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "headlessapphosttests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/HeadlessAppHostTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "headlesschatruntime",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/HeadlessChatRuntime.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "headlesschatruntimetests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/HeadlessChatRuntimeTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "hintengine",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/HintEngine.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "icon",
+      "locators": [
+        {
+          "path": "assets/icon.png",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "include",
+      "locators": [
+        {
+          "path": "Sources/CPty/include",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "infinitty",
+      "locators": [
+        {
+          "path": "Sources/infinitty",
+          "kind": "directory"
+        },
+        {
+          "path": "Sources/infinitty/main.swift",
+          "kind": "file"
+        },
+        {
+          "path": "npm/bin/infinitty.js",
+          "kind": "file"
+        },
+        {
+          "path": "npm/package.json",
+          "kind": "package"
+        },
+        {
+          "path": "scripts/Infinitty.entitlements",
+          "kind": "file"
+        },
+        {
+          "path": "shell-integration/infinitty.zsh",
+          "kind": "file"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "infinitty-control",
+      "locators": [
+        {
+          "path": ".claude/skills/infinitty-control",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        ".claude"
+      ]
+    },
+    {
+      "name": "infinitty-todos-hook",
+      "locators": [
+        {
+          "path": "shell-integration/infinitty-todos-hook.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "infinittykit",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "infinittykittests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Tests"
+      ]
+    },
+    {
+      "name": "install",
+      "locators": [
+        {
+          "path": "npm/install.js",
+          "kind": "file"
+        },
+        {
+          "path": "npm/install.js",
+          "kind": "symbol",
+          "symbol": "fetch"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "json-render-host",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Surfaces/json-render-host.html",
+          "kind": "file"
+        },
+        {
+          "path": "surfaces/json-render-host",
+          "kind": "directory"
+        },
+        {
+          "path": "surfaces/json-render-host/.gitignore",
+          "kind": "file"
+        },
+        {
+          "path": "surfaces/json-render-host/package.json",
+          "kind": "file"
+        },
+        {
+          "path": "surfaces/json-render-host/package.json",
+          "kind": "package"
+        },
+        {
+          "path": "surfaces/json-render-host/src",
+          "kind": "directory"
+        },
+        {
+          "path": "surfaces/json-render-host/src/main.jsx",
+          "kind": "file"
+        },
+        {
+          "path": "surfaces/json-render-host/src/main.jsx",
+          "kind": "symbol",
+          "symbol": "App"
+        },
+        {
+          "path": "surfaces/json-render-host/src/main.jsx",
+          "kind": "symbol",
+          "symbol": "Failure"
+        },
+        {
+          "path": "surfaces/json-render-host/src/main.jsx",
+          "kind": "symbol",
+          "symbol": "render"
+        }
+      ],
+      "tags": [
+        "surfaces"
+      ]
+    },
+    {
+      "name": "launch",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Launch.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "launchoptionstests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/LaunchOptionsTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "logos",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "make-app",
+      "locators": [
+        {
+          "path": "scripts/make-app.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "make-dmg",
+      "locators": [
+        {
+          "path": "scripts/make-dmg.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "make-icns",
+      "locators": [
+        {
+          "path": "scripts/make-icns.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "markdownrender",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/MarkdownRender.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "mask-icon",
+      "locators": [
+        {
+          "path": "scripts/mask-icon.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "mcp",
+      "locators": [
+        {
+          "path": "Sources/infinitty-mcp",
+          "kind": "directory"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "auditCall"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "bootstrapModelContext"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "bootstrapTerminalChannel"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "browserCall"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "channelCall"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "channelPanelCall"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "chatCall"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "infinittyPaneRequest"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "infinittyRequest"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "isToolError"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "managedTerminalRegistration"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "managedTerminalUnregistration"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "openAppSocket"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "openSocket"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "paneArg"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "paneChannelCall"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "reply"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "replyError"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "send"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "socketRequest"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "startEventSubscriber"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "terminalChannelInstructions"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "terminalEndpointOrdinal"
+        },
+        {
+          "path": "Sources/infinitty-mcp/main.swift",
+          "kind": "symbol",
+          "symbol": "toolIsAvailableForProfile"
+        },
+        {
+          "path": "npm/bin/infinitty-mcp.js",
+          "kind": "file"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "mcpconfiguration",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/MCPConfiguration.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "meta",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/meta.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "mistral",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/mistral.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "modeldiscovery",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ModelDiscovery.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "modeldiscoverytests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ModelDiscoveryTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "moonshotai",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/moonshotai.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "nativetabsupport",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/NativeTabSupport.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "navigation",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Navigation.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "navigationtests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/NavigationTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "notch",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Notch.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "notchpets",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "notchscannertests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/NotchScannerTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "notchtests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/NotchTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "npm",
+      "locators": [
+        {
+          "path": "npm",
+          "kind": "directory"
+        },
+        {
+          "path": "npm/README.md",
+          "kind": "file"
+        },
+        {
+          "path": "npm/bin",
+          "kind": "directory"
+        },
+        {
+          "path": "npm/package.json",
+          "kind": "file"
+        }
+      ],
+      "tags": [
+        "npm"
+      ]
+    },
+    {
+      "name": "ollama",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/ollama.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "openai",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/openai.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "opencode",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/opencode.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "panechrome",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/PaneChrome.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "panelifecycleledger",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/PaneLifecycleLedger.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "panelifecycleledgertests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/PaneLifecycleLedgerTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "panetodos",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/PaneTodos.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "panetodostests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/PaneTodosTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "performancebudgettests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/PerformanceBudgetTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "permissionassistant",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/PermissionAssistant.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/PermissionAssistant.swift",
+          "kind": "symbol",
+          "symbol": "PermissionAssistant"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Pet.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/Resources/Pets/infinitty/pet.json",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-bsod",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-bsod.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-codex",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-codex.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-dewey",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-dewey.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-fireball",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-fireball.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-null-signal",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-null-signal.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-rocky",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-rocky.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-seedy",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-seedy.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pet-stacky",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/NotchPets/pet-stacky.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "petassistant",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/PetAssistant.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "petassistanttests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/PetAssistantTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pets",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Pets",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "pettips",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/PetTips.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pettipstests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/PetTipsTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "plans",
+      "locators": [
+        {
+          "path": "docs/superpowers/plans",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "docs"
+      ]
+    },
+    {
+      "name": "processcwdtests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ProcessCwdTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "providerdiscovery",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ProviderDiscovery.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "providerdiscoverytests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ProviderDiscoveryTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "providerpermissionpolicy",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ProviderPermissionPolicy.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "providerpermissionpolicytests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ProviderPermissionPolicyTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "pty",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/PTY.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "ptyenvironmenttests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/PTYEnvironmentTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "quickterminal",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/QuickTerminal.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "quickterminaltests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/QuickTerminalTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "qwen",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/qwen.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "release",
+      "locators": [
+        {
+          "path": ".github/workflows/release.yml",
+          "kind": "file"
+        },
+        {
+          "path": "scripts/release.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "releasing",
+      "locators": [
+        {
+          "path": "RELEASING.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "renderer",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Renderer.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "report",
+      "locators": [
+        {
+          "path": "report.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "resourcebundle",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ResourceBundle.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "resources",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "review",
+      "locators": [
+        {
+          "path": "review.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "runcommandqueue",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/RunCommandQueue.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "runcommandqueuetests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/RunCommandQueueTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "screenrecordingpermissionassistant",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ScreenRecordingPermissionAssistant.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "screenrecordingpermissionassistanttests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ScreenRecordingPermissionAssistantTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "search",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/CodeSearch.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Tests/InfinittyKitTests/CodeSearchTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "session",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Session.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "settings",
+      "description": "interface-font-size = 15     # Chat + ShadKit UI; also available in Settings",
+      "locators": [
+        {
+          "path": ".claude/settings.local.json",
+          "kind": "file"
+        },
+        {
+          "path": "README.md",
+          "kind": "file",
+          "note": "README section: interface-font-size = 15     # Chat + ShadKit UI; also available in Settings"
+        },
+        {
+          "path": "Sources/InfinittyKit/Settings.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/ShadcnSettingsView.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "setup-signing-secrets",
+      "locators": [
+        {
+          "path": "scripts/setup-signing-secrets.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "shadcnassistanthost",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ShadcnAssistantHost.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "shadcnchattranscript",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/ShadcnChatTranscript.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "shadcnchattranscripttests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/ShadcnChatTranscriptTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "shaders",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Shaders.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "shell-integration",
+      "locators": [
+        {
+          "path": "shell-integration",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "shell-integration"
+      ]
+    },
+    {
+      "name": "ship-signed",
+      "locators": [
+        {
+          "path": "scripts/ship-signed.sh",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "skill",
+      "locators": [
+        {
+          "path": ".claude/skills/infinitty-control/SKILL.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "sources",
+      "locators": [
+        {
+          "path": "Sources",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources"
+      ]
+    },
+    {
+      "name": "specs",
+      "locators": [
+        {
+          "path": "docs/superpowers/specs",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "docs"
+      ]
+    },
+    {
+      "name": "spritesheet",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Pets/infinitty/spritesheet.webp",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "summary",
+      "locators": [
+        {
+          "path": "summary.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "superpowers",
+      "locators": [
+        {
+          "path": "docs/superpowers",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "docs"
+      ]
+    },
+    {
+      "name": "surfaces",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Surfaces",
+          "kind": "directory"
+        },
+        {
+          "path": "surfaces",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        "Sources",
+        "surfaces"
+      ]
+    },
+    {
+      "name": "tabiconaccessory",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/TabIconAccessory.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "tabrenamefield",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/TabRenameField.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Sources/InfinittyKit/TabRenameField.swift",
+          "kind": "symbol",
+          "symbol": "TabRenameTextView"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "template",
+      "locators": [
+        {
+          "path": "surfaces/json-render-host/template.html",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "terminal",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Terminal.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "terminalchannelcontext",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/TerminalChannelContext.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "terminalchannelpayload",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/TerminalChannelPayload.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "terminaltabstrip",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/TerminalTabStrip.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "terminaltests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/TerminalTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "terminalview",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/TerminalView.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "theme",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Theme.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "third-party-notices",
+      "locators": [
+        {
+          "path": "THIRD_PARTY_NOTICES.md",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "uisurfacetheme",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/UISurfaceTheme.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "uisurfacethemetests",
+      "locators": [
+        {
+          "path": "Tests/InfinittyKitTests/UISurfaceThemeTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "updater",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Updater.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "utilitypaneview",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/UtilityPaneView.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "vercel",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/vercel.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "windowchrome",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/WindowChrome.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "workflows",
+      "locators": [
+        {
+          "path": ".github/workflows",
+          "kind": "directory"
+        }
+      ],
+      "tags": [
+        ".github"
+      ]
+    },
+    {
+      "name": "workspaces",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/AgentWorkspaceProvisioner.swift",
+          "kind": "file"
+        },
+        {
+          "path": "Tests/InfinittyKitTests/AgentWorkspaceProvisionerTests.swift",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "xai",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/xai.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "name": "zai",
+      "locators": [
+        {
+          "path": "Sources/InfinittyKit/Resources/Logos/zai.svg",
+          "kind": "file"
+        }
+      ],
+      "tags": []
+    }
+  ]
+}

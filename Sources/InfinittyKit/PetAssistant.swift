@@ -84,6 +84,12 @@ struct ChatThread: Identifiable {
     /// Keyed transport lifecycle epoch. Unlike the UI request generation,
     /// this advances only when backend work/state is actually cancelled.
     var backendEpoch: Int
+    /// Most recently submitted composer effort for this thread. Prewarm must
+    /// use the same native process identity as the turn it is overlapping.
+    var lastSelectedEffort: String
+    /// Provider-reported usage and provider-designated reasoning summaries
+    /// survive thread switches without being confused with visible estimates.
+    var runTelemetry: AssistantRunTelemetrySnapshot
     /// Bumped when this thread is abandoned mid-flight so stale answers drop.
     var generation: Int
     /// Ordered ensemble roster and independent keyed state for each member.
@@ -100,6 +106,8 @@ struct ChatThread: Identifiable {
         backendSessionSignature: String? = nil,
         needsBackendBootstrap: Bool = false,
         backendEpoch: Int = 0,
+        lastSelectedEffort: String = "Auto",
+        runTelemetry: AssistantRunTelemetrySnapshot = AssistantRunTelemetrySnapshot(),
         generation: Int = 0,
         ensembleAgents: [ConfiguredChatAgent] = [],
         agentBackendStates: [String: ChatAgentBackendState] = [:]
@@ -113,6 +121,8 @@ struct ChatThread: Identifiable {
         self.backendSessionSignature = backendSessionSignature
         self.needsBackendBootstrap = needsBackendBootstrap
         self.backendEpoch = backendEpoch
+        self.lastSelectedEffort = lastSelectedEffort
+        self.runTelemetry = runTelemetry
         self.generation = generation
         self.ensembleAgents = ensembleAgents
         self.agentBackendStates = agentBackendStates
@@ -489,6 +499,7 @@ final class PetAssistantPanelView: NSView {
     var onTerminalAccessChange: ((Bool) -> Void)?
     var onAddAgent: ((String, String) -> Void)?
     var onToggleAgent: ((String) -> Void)?
+    var onStop: (() -> Void)?
     var onNewChat: (() -> Void)?
     var onSelectThread: ((String) -> Void)?
     var onClose: (() -> Void)?
@@ -973,6 +984,7 @@ final class PetAssistantPanelView: NSView {
         host.model.onToggleAgent = { [weak self] id in
             self?.onToggleAgent?(id)
         }
+        host.model.onStop = { [weak self] in self?.onStop?() }
 
         // Seed the three pickers from the live AppKit selection store.
         syncShadcnComposerState(into: host)
@@ -1031,6 +1043,10 @@ final class PetAssistantPanelView: NSView {
             guard let host else { return }
             MainActor.assumeIsolated { host.applyToolEvent(event) }
         }
+    }
+
+    func setRunTelemetry(_ telemetry: AssistantRunTelemetrySnapshot) {
+        shadcnPanel?.setRunTelemetry(telemetry)
     }
 
     private func headerConstraints() -> [NSLayoutConstraint] {
@@ -1846,6 +1862,36 @@ final class PetAssistantPanelView: NSView {
     var transcriptForTesting: String {
         lastMessages.map { "\($0.role.uppercased())\n\($0.text)" }.joined(separator: "\n\n")
     }
+    var shadcnStreamingAuthorForTesting: String? {
+        shadcnPanel?.model.streamingAuthor
+    }
+    var shadcnLastMessageAuthorForTesting: String? {
+        shadcnPanel?.model.messages.last?.author
+    }
+    var shadcnLastMessageIsSystemForTesting: Bool {
+        shadcnPanel?.model.messages.last?.role == .system
+    }
+    var shadcnRunPhaseForTesting: AssistantRunPhase? {
+        guard let shadcnPanel else { return nil }
+        return AssistantRunStatusSnapshot(
+            model: shadcnPanel.model,
+            runState: shadcnPanel.runState).phase
+    }
+    var shadcnUsageLabelForTesting: String? {
+        guard let shadcnPanel else { return nil }
+        return AssistantRunStatusSnapshot(
+            model: shadcnPanel.model,
+            runState: shadcnPanel.runState).usageLabel
+    }
+    var shadcnUsageCostLabelForTesting: String? {
+        guard let shadcnPanel else { return nil }
+        return AssistantRunStatusSnapshot(
+            model: shadcnPanel.model,
+            runState: shadcnPanel.runState).costLabel
+    }
+    var shadcnReasoningSummaryForTesting: String? {
+        shadcnPanel?.runState.reasoningSummary
+    }
     var showsEmptyStateForTesting: Bool { !emptyStateLabel.isHidden }
     var showsFilesButtonForTesting: Bool {
         shadcnPanel?.model.hasFiles ?? !showFilesButton.isHidden
@@ -1854,6 +1900,7 @@ final class PetAssistantPanelView: NSView {
         input.string = request
         submit()
     }
+    func stopForTesting() { shadcnPanel?.model.onStop?() }
     func newChatForTesting() { onNewChat?() }
     func showFilesForTesting() { onShowFiles?() }
 
@@ -1980,6 +2027,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Lower transport seam used by focused tests while retaining the real
     /// request/context/finish pipeline. Production calls `askAI` directly.
     private let backendRunner: BackendRunner?
+    /// Optional observation seam at the final provider dispatch boundary.
+    /// Production leaves this nil; focused tests use it to prove the native
+    /// effort value survived the composer and request lifecycle unchanged.
+    private let backendInvocationObserver: ((Backend, String) -> Void)?
     /// Schedules the transport-boundary work. Production uses the global
     /// user-initiated queue; tests can hold this boundary deterministically.
     private let backendWorkScheduler: BackendWorkScheduler?
@@ -2005,6 +2056,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private var requestInFlight = false
     private var activeRequestID: UUID?
     private var activeAgentID: String?
+    /// Provider/model identity resolved when the active request starts. This
+    /// keeps Auto provenance stable if Settings change before completion.
+    private var activeRunAuthor: String?
     /// Thread id of the turn currently streaming (if any).
     private var streamingThreadId: UUID?
     /// Generation-qualified keyed transport id for the active backend call.
@@ -2013,6 +2067,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Invalidation can therefore release all live epochs, not just the one
     /// currently streaming.
     private var registeredConversationIDs = Set<String>()
+    /// The exact keyed provider lifecycle feeding usage and safe summaries for
+    /// the active request. Rebinding cancels the old scope synchronously.
+    private var runEventSubscription: AssistantRunEventBus.Subscription?
     /// Recovery belongs to the thread it was imported into. A new thread must
     /// never inherit a previous session's transcript.
     private var recoveryContexts: [UUID: String] = [:]
@@ -2086,6 +2143,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         availableChoices: [AgentChoice]? = nil,
         requestRunner: RequestRunner? = nil,
         backendRunner: BackendRunner? = nil,
+        backendInvocationObserver: ((Backend, String) -> Void)? = nil,
         backendWorkScheduler: BackendWorkScheduler? = nil,
         backendStartBoundaryObserver: (() -> Void)? = nil,
         conversationRegistrar: ConversationRegistrar? = nil,
@@ -2096,6 +2154,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         self.seedsDefaultAgent = !injected
         self.requestRunner = requestRunner
         self.backendRunner = backendRunner
+        self.backendInvocationObserver = backendInvocationObserver
         self.backendWorkScheduler = backendWorkScheduler
         self.backendStartBoundaryObserver = backendStartBoundaryObserver
         self.conversationRegistrar = conversationRegistrar
@@ -2343,6 +2402,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             presentation: presentation, config: config,
             choices: availableChoices)
         panel.setToolEventScopeID(backendConversationID(for: activeThreadId))
+        panel.setRunTelemetry(
+            activeThread?.runTelemetry ?? AssistantRunTelemetrySnapshot())
         panel.setMessages(sidebarMessages)
         panel.setQueuedMessages(
             pendingRequests
@@ -2365,6 +2426,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         panel.onToggleAgent = { [weak self] id in
             self?.toggleAgent(id: id)
         }
+        panel.onStop = { [weak self] in self?.cancelActiveThreadWork() }
         panel.setTerminalAccess(
             available: terminalAvailable,
             enabled: effectiveTerminalAccessEnabled)
@@ -2438,13 +2500,23 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         ensembleTurnStates = ensembleTurnStates.filter { $0.value.threadId != id }
         let cancelledActiveRequest = streamingThreadId == id
         if hadPendingRequest || cancelledActiveRequest {
-            let oldConversationID = cancelledActiveRequest
-                ? (activeBackendConversationID ?? backendConversationID(for: id))
-                : backendConversationID(for: id)
+            let threadPrefix = id.uuidString
+            var oldConversationIDs = Set(
+                registeredConversationIDs.filter { $0.hasPrefix(threadPrefix) })
+            if cancelledActiveRequest,
+               let activeBackendConversationID,
+               activeBackendConversationID.hasPrefix(threadPrefix) {
+                oldConversationIDs.insert(activeBackendConversationID)
+            }
+            if oldConversationIDs.isEmpty {
+                oldConversationIDs.insert(backendConversationID(for: id))
+            }
             // Cancellation means the next turn must bootstrap visible history,
             // so retain no keyed transport state. Release also tombstones the
             // id, preventing already-queued bridge work from recreating it.
-            releaseRegisteredBackendConversation(oldConversationID)
+            for conversationID in oldConversationIDs {
+                releaseRegisteredBackendConversation(conversationID)
+            }
             if let idx = threadIndex(id) {
                 threads[idx].backendEpoch &+= 1
                 threads[idx].needsBackendBootstrap = true
@@ -2455,10 +2527,16 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             }
         }
         if cancelledActiveRequest {
+            if let index = threadIndex(id) {
+                threads[index].runTelemetry.finishRun()
+            }
+            runEventSubscription?.cancel()
+            runEventSubscription = nil
             streamingThreadId = nil
             activeBackendConversationID = nil
             activeRequestID = nil
             activeAgentID = nil
+            activeRunAuthor = nil
             requestInFlight = false
         }
         return cancelledActiveRequest
@@ -2563,6 +2641,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             ?? backendConversationID(for: activeThreadId)
         for panel in allVisiblePanels {
             panel.setToolEventScopeID(activeBackendID)
+            panel.setRunTelemetry(
+                activeThread?.runTelemetry ?? AssistantRunTelemetrySnapshot())
             panel.setMessages(sidebarMessages)
             panel.setQueuedMessages(activePending)
             panel.setHasFiles(!lastFiles.isEmpty)
@@ -2649,6 +2729,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             request.trimmingCharacters(in: .whitespacesAndNewlines),
             to: Self.maxComposerBytes)
         guard !request.isEmpty else { return }
+        if let index = threadIndex(activeThreadId) {
+            threads[index].lastSelectedEffort = effort
+        }
         if let command = ChatEnsemble.addAgentArgument(in: request) {
             switch command {
             case .failure(let error):
@@ -2809,8 +2892,10 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         requestInFlight = true
         activeRequestID = request.id
         activeAgentID = request.agent?.id
+        activeRunAuthor = resolvedRunAuthor(for: request)
         streamingThreadId = request.threadId
         activeBackendConversationID = conversationID
+        beginRunTelemetry(for: request, scopeID: conversationID)
         if request.isFirstInGroup {
             appendMessage(
                 AssistantChatMessage(role: "You", text: request.text),
@@ -2822,13 +2907,13 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         }
         updatePanels()
         for panel in allVisiblePanels {
-            panel.setStreamingAuthor(request.agent?.displayName)
+            panel.setStreamingAuthor(activeRunAuthor)
         }
         // Only the active thread shows the thinking chrome.
         if request.threadId == activeThreadId {
             setPanelsThinking(
                 true,
-                label: request.agent.map { "\($0.displayName) · thinking" }
+                label: activeRunAuthor.map { "\($0) · thinking" }
                     ?? (request.model.hasPrefix("Auto")
                         ? "Thinking" : "\(request.model) · thinking"))
         }
@@ -2867,6 +2952,70 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 requestIdentity: request,
                 completion: backendCompletion)
         }
+    }
+
+    private func resolvedRunAuthor(for request: PendingRequest) -> String? {
+        if let agent = request.agent, agent.provider != "auto" {
+            return agent.displayName
+        }
+        let provenance = Self.collaborationProvenance(
+            for: resolveBackend(forSelectedTitle: request.model))
+        guard let provider = provenance.provider else {
+            return request.agent?.displayName
+        }
+        let providerLabel: String
+        switch provider {
+        case "openai": providerLabel = "OpenAI"
+        case "opencode": providerLabel = "OpenCode"
+        case "apple-foundation-models": providerLabel = "Apple"
+        default: providerLabel = provider.capitalized
+        }
+        guard let model = provenance.model,
+              !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return providerLabel }
+        return "\(providerLabel) · \(model)"
+    }
+
+    private func beginRunTelemetry(
+        for request: PendingRequest,
+        scopeID: String
+    ) {
+        if let index = threadIndex(request.threadId) {
+            threads[index].runTelemetry.beginRun()
+        }
+        bindRunTelemetry(scopeID: scopeID, to: request)
+    }
+
+    private func bindRunTelemetry(
+        scopeID: String,
+        to request: PendingRequest
+    ) {
+        runEventSubscription?.cancel()
+        runEventSubscription = AssistantRunEventBus.subscribe(scopeID: scopeID) {
+            [weak self] event in
+            guard let self,
+                  !self.invalidated,
+                  self.requestInFlight,
+                  self.activeRequestID == request.id,
+                  self.streamingThreadId == request.threadId,
+                  self.activeBackendConversationID == scopeID,
+                  let index = self.threadIndex(request.threadId),
+                  self.threads[index].generation == request.generation
+            else { return }
+            self.threads[index].runTelemetry.apply(event)
+            if self.activeThreadId == request.threadId {
+                self.updatePanels()
+            }
+        }
+    }
+
+    private func finishRunTelemetry(for request: PendingRequest) {
+        if let index = threadIndex(request.threadId),
+           threads[index].generation == request.generation {
+            threads[index].runTelemetry.finishRun()
+        }
+        runEventSubscription?.cancel()
+        runEventSubscription = nil
     }
 
     private func statelessHistory(for threadId: UUID) -> String {
@@ -3023,8 +3172,11 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         // A cancelled request may finish after a new thread has already
         // started another turn. It must not clear that newer turn's state.
         guard activeRequestID == request.id else { return }
+        finishRunTelemetry(for: request)
+        let author = activeRunAuthor ?? request.agent?.displayName
         activeRequestID = nil
         activeAgentID = nil
+        activeRunAuthor = nil
         requestInFlight = false
         activeBackendConversationID = nil
         if streamingThreadId == request.threadId {
@@ -3052,10 +3204,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         } else {
             isSuccessfulAgentResponse = false
         }
-        let author = request.agent?.displayName
         appendMessage(
             AssistantChatMessage(
-                role: isSuccessfulAgentResponse ? "Assistant" : "System",
+                role: isSuccessfulAgentResponse ? "Assistant" : "Failure",
                 text: answer,
                 tokenCount: AssistantChatMessage.approximateTokenCount(for: answer),
                 author: author),
@@ -3104,6 +3255,23 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         updatePanels()
     }
 
+    /// Stop only the thread shown by the Chat surface. Other chats keep their
+    /// queued work and recovery state, and the next eligible request resumes
+    /// immediately when this thread owned the global request gate.
+    func cancelActiveThreadWork() {
+        guard !invalidated else { return }
+        let threadID = activeThreadId
+        bumpGeneration(of: threadID)
+        let cancelledActiveRequest = dropPending(for: threadID)
+        session?.petAnimator?.stopThinking()
+        setPanelsThinking(false)
+        setPanelsStreaming(nil)
+        updatePanels()
+        if cancelledActiveRequest {
+            processNextRequest()
+        }
+    }
+
     /// Stop this assistant's queued/active conversation work. Backends may
     /// still deliver a late transport callback, but request identity and
     /// generation guards make that callback inert.
@@ -3122,6 +3290,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 || streamingThreadId == thread.id
                 ? thread.id : nil
         })
+        if let streamingThreadId,
+           let index = threadIndex(streamingThreadId) {
+            threads[index].runTelemetry.finishRun()
+        }
+        runEventSubscription?.cancel()
+        runEventSubscription = nil
         for conversationID in conversationIDs {
             // This path marks affected threads bootstrap-needed below. Discard
             // and tombstone keyed state rather than retaining transport history
@@ -3143,6 +3317,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         ensembleTurnStates.removeAll()
         activeRequestID = nil
         activeAgentID = nil
+        activeRunAuthor = nil
         requestInFlight = false
         streamingThreadId = nil
         activeBackendConversationID = nil
@@ -3316,7 +3491,8 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             }
         }
         let provenance = Self.collaborationProvenance(for: backend)
-        if requestIdentity.agent == nil {
+        if requestIdentity.agent == nil
+            || requestIdentity.agent?.provider == "auto" {
             collaborationIdentityPublisher?(provenance.provider, provenance.model)
         } else if requestIdentity.isFirstInGroup,
                   let thread = threads.first(where: {
@@ -3326,17 +3502,15 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 "ensemble",
                 thread.ensembleAgents.map(\.modelTitle).joined(separator: ", "))
         }
-        // Keep the system prompt CONSTANT: the CLI bridges pin --system-prompt
-        // at process launch, so folding effort in here forced a full cold
-        // respawn on every effort change (and invalidated the prewarm). The
-        // effort directive rides in the per-turn user message instead, so the
-        // warm process is reused across Auto/Low/Medium/High.
+        // Keep the system prompt constant. The effort directive rides in the
+        // per-turn user message, while native-capable providers also receive
+        // the canonical picker value through their own transport control.
         let system = Self.systemPrompt(for: profile)
         let effortNote = Self.effortDirective(effort)
         let runCwd = workspaceDirectoryForChat()
         let activeCollaborationContext = collaborationContextProvider?()
         let sessionSignature = Self.backendSessionSignature(
-            for: backend, cwd: runCwd, profile: profile)
+            for: backend, effort: effort, cwd: runCwd, profile: profile)
         let previousSignature: String?
         let needsBackendBootstrap: Bool
         if let idx = threadIndex(requestIdentity.threadId),
@@ -3386,7 +3560,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         if Self.isStateful(backend)
             && (previousSignature == nil || statefulSessionChanged) {
             registerBackendConversation(
-                backend: backend, system: system, cwd: runCwd,
+                backend: backend, system: system, effort: effort, cwd: runCwd,
                 profile: profile, conversationID: conversationID)
         }
         let requestWithHistory = explicitHistory.isEmpty
@@ -3453,6 +3627,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 cwd: runCwd,
                 conversationID: conversationID,
                 profile: profile,
+                effort: effort,
                 onPartial: onPartial, timeout: turnTimeout) { outcome in
                 if Self.isStateful(backend), case .failure = outcome {
                     self.markBackendBootstrapNeeded(after: requestIdentity)
@@ -3499,6 +3674,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                         cwd: runCwd,
                         conversationID: conversationID,
                         profile: profile,
+                        effort: effort,
                         onPartial: onPartial, timeout: turnTimeout) { final in
                         if Self.isStateful(backend), case .failure = final {
                             self.markBackendBootstrapNeeded(after: requestIdentity)
@@ -3530,6 +3706,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             return "\n\nReasoning effort: MEDIUM. Balance speed and thoroughness."
         case "high":
             return "\n\nReasoning effort: HIGH. Think carefully and verify before acting."
+        case "xhigh":
+            return "\n\nReasoning effort: XHIGH. Think deeply, check assumptions, and verify the result."
+        case "max":
+            return "\n\nReasoning effort: MAX. Use maximum deliberate reasoning and verification."
+        case "ultra":
+            return "\n\nReasoning effort: ULTRA. Use the deepest available reasoning and verification."
         default:
             return ""
         }
@@ -3698,7 +3880,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// the active Channel block and newest request before admitting older
     /// terminal/history context. Combined-system bridges therefore cannot
     /// suffix-truncate the identity that tells an agent which room it is in.
-    private static func composedBackendUser(
+    static func composedBackendUser(
         for backend: Backend,
         system: String,
         baseContext: String,
@@ -3779,8 +3961,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
 
     /// Stable identity for the backend state that can retain this thread's
     /// prior turns. Secrets are deliberately excluded.
-    private static func backendSessionSignature(
+    static func backendSessionSignature(
         for backend: Backend,
+        effort: String = "Auto",
         cwd: String,
         profile: AgentExecutionProfile
     ) -> String {
@@ -3795,7 +3978,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         case .codex(let model):
             backendIdentity = "codex|\(model ?? "")"
         case .claude(let model):
-            backendIdentity = "claude|\(model ?? "")"
+            let nativeEffort = NativeReasoningEffort.claudeValue(effort)
+                ?? "provider-default"
+            backendIdentity = "claude|\(model ?? "")|effort:\(nativeEffort)"
         case .opencode(let model):
             backendIdentity = "opencode|\(model ?? "")"
         case .hermes(let model):
@@ -3826,14 +4011,23 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         guard Self.isStateful(backend) else { return }
         let profile = executionProfile
         let cwd = workspaceDirectoryForChat()
+        let effort = activeThread?.lastSelectedEffort ?? "Auto"
+        let signature = Self.backendSessionSignature(
+            for: backend, effort: effort, cwd: cwd, profile: profile)
         if let index = threadIndex(activeThreadId) {
-            threads[index].backendSessionSignature =
-                Self.backendSessionSignature(
-                    for: backend, cwd: cwd, profile: profile)
+            // Never prewarm a different provider/model lifecycle over a
+            // completed stateful thread. The next explicit turn owns that
+            // transition and its one-time visible-history bootstrap.
+            if let existing = threads[index].backendSessionSignature,
+               existing != signature {
+                return
+            }
+            threads[index].backendSessionSignature = signature
         }
         registerBackendConversation(
             backend: backend,
             system: Self.systemPrompt(for: profile),
+            effort: effort,
             cwd: cwd,
             profile: profile,
             conversationID: backendConversationID(for: activeThreadId))
@@ -4007,6 +4201,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     var threadCountForTesting: Int { threads.count }
     var threadIdsForTesting: [UUID] { threads.map(\.id) }
     var activeThreadTitleForTesting: String { activeThread?.title ?? "" }
+    var activeLastSelectedEffortForTesting: String {
+        activeThread?.lastSelectedEffort ?? "Auto"
+    }
+    var activeBackendSessionSignatureForTesting: String? {
+        activeThread?.backendSessionSignature
+    }
     static var maximumComposerInputBytesForTesting: Int { maxComposerBytes }
     static var maximumBackendUserBytesForTesting: Int { maxBackendUserBytes }
     static var systemPromptBytesForTesting: Int { systemPrompt.utf8.count }
@@ -4017,10 +4217,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
     static func backendSessionSignatureForTesting(
         backend: Backend,
+        effort: String = "Auto",
         cwd: String,
         profile: AgentExecutionProfile
     ) -> String {
-        backendSessionSignature(for: backend, cwd: cwd, profile: profile)
+        backendSessionSignature(
+            for: backend, effort: effort, cwd: cwd, profile: profile)
     }
     static var maximumCombinedUserBytesForTesting: Int {
         max(maxBackendUserBytes - systemPrompt.utf8.count - 2, 0)
@@ -4068,6 +4270,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 threadID: request.threadId, epoch: threads[idx].backendEpoch)
         }
         activeBackendConversationID = conversationID
+        bindRunTelemetry(scopeID: conversationID, to: request)
         // Tool cards are scoped by the same epoch as the bridge. Switching the
         // subscription now rejects any already-queued events from the released
         // lifecycle.
@@ -4103,6 +4306,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     private func registerBackendConversation(
         backend: Backend,
         system: String,
+        effort: String = "Auto",
         cwd: String,
         profile: AgentExecutionProfile,
         conversationID: String
@@ -4123,13 +4327,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 cwd: cwd)
         case .claude(let model):
             ClaudeBridge.shared.warmUp(
-                system: system, model: model,
+                system: system, model: model, effort: effort,
                 conversationID: conversationID,
                 cwd: cwd,
                 profile: profile)
         case .opencode(let model):
             ACPBridge.opencode.warmUp(
-                model: model, cwd: cwd, conversationID: conversationID)
+                model: model, effort: effort, cwd: cwd,
+                conversationID: conversationID)
         case .hermes(let model):
             ACPBridge.hermes.warmUp(
                 model: model, cwd: cwd, conversationID: conversationID)
@@ -4173,10 +4378,12 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         cwd: String,
         conversationID: String?,
         profile: AgentExecutionProfile,
+        effort: String,
         onPartial: ((String) -> Void)?,
         timeout: TimeInterval?,
         done: @escaping (AIOutcome) -> Void
     ) {
+        backendInvocationObserver?(backend, effort)
         if let backendRunner {
             backendRunner(
                 backend, system, user, cwd, conversationID,
@@ -4186,6 +4393,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 backend: backend, system: system, user: user, cwd: cwd,
                 conversationID: conversationID,
                 profile: profile,
+                effort: effort,
                 onPartial: onPartial, timeout: timeout, done: done)
         }
     }
@@ -4197,6 +4405,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         system: String, user: String, cwd: String,
         conversationID: String? = nil,
         profile: AgentExecutionProfile = .workspaceChat,
+        effort: String = "Auto",
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -4231,18 +4440,22 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         case .codex(let model):
             askCodex(model: model, cwd: cwd, system: system, user: user,
                      conversationID: conversationID, profile: profile,
+                     effort: effort,
                      onPartial: onPartial, timeout: timeout, done: done)
         case .claude(let model):
             askClaude(model: model, cwd: cwd, system: system, user: user,
                       conversationID: conversationID, profile: profile,
+                      effort: effort,
                       onPartial: onPartial, timeout: timeout, done: done)
         case .opencode(let model):
             askACP(.opencode, model: model, cwd: cwd, system: system, user: user,
                    conversationID: conversationID,
+                   effort: effort,
                    onPartial: onPartial, timeout: timeout, done: done)
         case .hermes(let model):
             askACP(.hermes, model: model, cwd: cwd, system: system, user: user,
                    conversationID: conversationID,
+                   effort: effort,
                    onPartial: onPartial, timeout: timeout, done: done)
         case .amp(let model):
             askAmp(model: model, system: system, user: user, cwd: cwd,
@@ -4284,15 +4497,18 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     /// Codex CLI via the persistent `codex app-server` bridge. One-time cold
     /// start, then warm turns. Tool calls run between Codex and infinitty-mcp.
     /// Default per-turn bridge timeout when `ai-turn-timeout` is unset.
-    /// Lower than the old hardcoded 130s so a genuinely stalled turn fails
-    /// fast instead of looking hung; users can raise it in config.
-    private static let defaultTurnTimeout: TimeInterval = 90
+    /// Long enough for an agentic review/build while still bounding a silent
+    /// provider. Claude treats this as inactivity and also has a 30-minute
+    /// absolute safety cap; users can raise/lower the idle budget in config.
+    private static let defaultTurnTimeout =
+        AssistantTurnTimeoutPolicy.defaultInactivitySeconds
 
     private static func askCodex(
         model: String?, cwd: String,
         system: String, user: String,
         conversationID: String? = nil,
         profile: AgentExecutionProfile = .workspaceChat,
+        effort: String = "Auto",
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -4303,13 +4519,14 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 do {
                     let reply = try await CodexAppServer.server(for: profile).turn(
                         prompt: prompt, cwd: cwd, model: model ?? "gpt-5.4",
+                        effort: NativeReasoningEffort.codexValue(effort),
                         timeout: timeout ?? defaultTurnTimeout,
                         conversationID: conversationID,
                         onPartial: onPartial)
                     done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))
                 } catch {
                     PetLog.log("codex failed: \(error.localizedDescription)")
-                    done(.failure("Codex: \(error.localizedDescription)"))
+                    done(.failure(providerFailureText("Codex", error: error)))
                 }
             }
         }
@@ -4323,6 +4540,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         system: String, user: String,
         conversationID: String? = nil,
         profile: AgentExecutionProfile = .workspaceChat,
+        effort: String = "Auto",
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -4331,7 +4549,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             Task {
                 do {
                     let reply = try await ClaudeBridge.shared.turn(
-                        prompt: user, system: system, model: model,
+                        prompt: user, system: system, model: model, effort: effort,
                         timeout: timeout ?? defaultTurnTimeout,
                         conversationID: conversationID,
                         cwd: cwd,
@@ -4340,7 +4558,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                     done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))
                 } catch {
                     PetLog.log("claude failed: \(error.localizedDescription)")
-                    done(.failure("Claude: \(error.localizedDescription)"))
+                    done(.failure(providerFailureText("Claude", error: error)))
                 }
             }
         }
@@ -4354,6 +4572,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         model: String?, cwd: String,
         system: String, user: String,
         conversationID: String? = nil,
+        effort: String = "Auto",
         onPartial: ((String) -> Void)? = nil,
         timeout: TimeInterval? = nil,
         done: @escaping (AIOutcome) -> Void
@@ -4363,17 +4582,34 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             Task {
                 do {
                     let reply = try await bridge.turn(
-                        prompt: user, system: system, model: model, cwd: cwd,
+                        prompt: user, system: system, model: model,
+                        effort: effort, cwd: cwd,
                         timeout: timeout ?? defaultTurnTimeout,
                         conversationID: conversationID,
                         onPartial: onPartial)
                     done(.text(reply.trimmingCharacters(in: .whitespacesAndNewlines)))
                 } catch {
                     PetLog.log("\(provider.rawValue) failed: \(error.localizedDescription)")
-                    done(.failure("\(provider.displayName): \(error.localizedDescription)"))
+                    done(.failure(providerFailureText(
+                        provider.displayName, error: error)))
                 }
             }
         }
+    }
+
+    private static func providerFailureText(
+        _ provider: String,
+        error: Error
+    ) -> String {
+        let detail = error.localizedDescription
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = detail.lowercased()
+        let providerPrefix = provider.lowercased()
+        if lowercased.hasPrefix(providerPrefix + ":")
+            || lowercased.hasPrefix(providerPrefix + " ") {
+            return detail
+        }
+        return "\(provider): \(detail)"
     }
 
     /// Amp one-shot through its supported non-interactive execute contract.

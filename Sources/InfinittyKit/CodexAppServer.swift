@@ -46,6 +46,9 @@ final class CodexAppServer: @unchecked Sendable {
     private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
     /// Active turn reducers. Keyed by turn id; one per in-flight `turn/start`.
     private var activeTurns: [String: TurnReducer] = [:]
+    /// Locally cancelled/timed-out turns must not be re-buffered if the
+    /// app-server sends late notifications before acknowledging interruption.
+    private var discardedTurnIDs = Set<String>()
     /// Notifications can share a pipe read with the `turn/start` response.
     /// Buffer them until the async caller has installed its reducer.
     private var earlyTurnMessages: [String: [[String: Any]]] = [:]
@@ -78,8 +81,6 @@ final class CodexAppServer: @unchecked Sendable {
     /// Whether the JSON-RPC initialize handshake has completed.
     private var hasInitialized = false
 
-    private static let requestTimeoutSeconds: TimeInterval = 130
-
     var isRunning: Bool { queue.sync { process?.isRunning == true } }
 
     init(
@@ -103,7 +104,8 @@ final class CodexAppServer: @unchecked Sendable {
         cwd: String,
         model: String,
         effort: String = "medium",
-        timeout: TimeInterval = CodexAppServer.requestTimeoutSeconds,
+        timeout: TimeInterval =
+            AssistantTurnTimeoutPolicy.defaultInactivitySeconds,
         conversationID: String? = nil,
         onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
@@ -205,6 +207,7 @@ final class CodexAppServer: @unchecked Sendable {
                 reducer.fail(CancellationError())
             }
             activeTurns.removeAll()
+            discardedTurnIDs.removeAll()
             earlyTurnMessages.removeAll()
             pendingIdleThreadIDs.removeAll()
         }
@@ -292,6 +295,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "Codex app-server exited mid-turn."))
                     }
                     self.activeTurns.removeAll()
+                    self.discardedTurnIDs.removeAll()
                     self.earlyTurnMessages.removeAll()
                     self.pendingIdleThreadIDs.removeAll()
                 }
@@ -425,30 +429,78 @@ final class CodexAppServer: @unchecked Sendable {
                     case .failure(let err):  cont.resume(throwing: err)
                     }
                 }
-                let deadline = DispatchTime.now() + timeout
-                self.queue.asyncAfter(deadline: deadline) {
-                    guard !reducer.isFinished else { return }
-                    // If we never got a clean completion signal (Codex
-                    // 0.144 sometimes doesn't broadcast one), return
-                    // whatever text the deltas accumulated — better
-                    // than throwing, since Codex did finish replying.
-                    let partial = reducer.snapshot()
-                    if partial.isEmpty {
-                        reducer.fail(CodexBridgeError.turnTimeout)
-                    } else {
-                        reducer.finish(partial)
-                    }
-                }
+                self.scheduleInactivityTimeout(
+                    reducer: reducer, timeout: max(timeout, 0.001))
             }
         } onCancel: {
             self.queue.async {
                 if let r = self.activeTurns[turnID] {
                     r.fail(CancellationError())
                     self.activeTurns.removeValue(forKey: turnID)
+                    self.discardLateNotifications(for: turnID)
                     self.interruptTurn(threadID: r.threadID, turnID: turnID)
                 }
             }
         }
+    }
+
+    /// Treat the configured turn timeout as an inactivity budget. Agentic
+    /// Codex runs may legitimately exceed it while continuing to emit tool,
+    /// usage, summary, or answer events. A separate absolute cap prevents an
+    /// endlessly active provider from owning the conversation forever.
+    private func scheduleInactivityTimeout(
+        reducer: TurnReducer,
+        timeout: TimeInterval
+    ) {
+        let activity = reducer.activitySnapshot()
+        let elapsed = activity.now - activity.startedAt
+        let firstDelay = min(timeout, max(
+            AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+                - elapsed,
+            0.001))
+        queue.asyncAfter(deadline: .now() + firstDelay) { [weak self] in
+            self?.enforceInactivityTimeout(reducer: reducer, timeout: timeout)
+        }
+    }
+
+    private func enforceInactivityTimeout(
+        reducer: TurnReducer,
+        timeout: TimeInterval
+    ) {
+        guard activeTurns[reducer.turnID] === reducer, !reducer.isFinished else {
+            return
+        }
+        let activity = reducer.activitySnapshot()
+        let idleFor = activity.now - activity.lastActivityAt
+        let elapsed = activity.now - activity.startedAt
+        let reachedSafetyLimit = elapsed
+            >= AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+        if !reachedSafetyLimit, idleFor < timeout {
+            let delay = min(
+                max(timeout - idleFor, 0.001),
+                max(
+                    AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+                        - elapsed,
+                    0.001))
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.enforceInactivityTimeout(
+                    reducer: reducer, timeout: timeout)
+            }
+            return
+        }
+
+        activeTurns.removeValue(forKey: reducer.turnID)
+        discardLateNotifications(for: reducer.turnID)
+        for context in conversations.values
+        where context.token == reducer.conversationToken {
+            // The interrupted thread may have provider-side state that never
+            // reached a terminal event. Force the next turn onto a fresh one.
+            context.threadID = nil
+        }
+        reducer.fail(reachedSafetyLimit
+            ? CodexBridgeError.maximumDurationExceeded
+            : CodexBridgeError.turnTimeout)
+        interruptTurn(threadID: reducer.threadID, turnID: reducer.turnID)
     }
 
     /// Per-RPC deadline. The initialize / newThread / startTurn handshake RPCs
@@ -571,12 +623,49 @@ final class CodexAppServer: @unchecked Sendable {
         // Notification: dispatch by method.
         guard let method = msg["method"] as? String else { return }
         let params = (msg["params"] as? [String: Any]) ?? [:]
-        if let turnID = Self.notificationTurnID(method: method, params: params),
-           activeTurns[turnID] == nil {
-            earlyTurnMessages[turnID, default: []].append(msg)
-            return
+        if let turnID = Self.notificationTurnID(method: method, params: params) {
+            if discardedTurnIDs.contains(turnID) {
+                if method == "turn/completed" || method == "turn/aborted"
+                    || method == "turn/failed" {
+                    discardedTurnIDs.remove(turnID)
+                }
+                return
+            }
+            guard let reducer = activeTurns[turnID] else {
+                earlyTurnMessages[turnID, default: []].append(msg)
+                return
+            }
+            reducer.recordActivity()
         }
         switch method {
+        case "thread/tokenUsage/updated":
+            guard let usage = Self.runUsage(from: params) else { break }
+            AssistantRunEventBus.publish(
+                AssistantRunEvent(
+                    provenance: .providerReported,
+                    update: .usage(usage),
+                    scopeID: scopeIDForNotification(params)))
+        case "item/reasoning/summaryTextDelta":
+            // This method is explicitly provider-designated summary text.
+            // The similarly named `item/reasoning/textDelta` is private raw
+            // reasoning and is intentionally ignored below.
+            guard let delta = params["delta"] as? String, !delta.isEmpty else {
+                break
+            }
+            AssistantRunEventBus.publish(
+                AssistantRunEvent(
+                    provenance: .providerReported,
+                    update: .reasoningSummary(
+                        AssistantRunEvent.ReasoningSummary(
+                            state: .delta,
+                            text: delta,
+                            itemID: params["itemId"] as? String,
+                            summaryIndex: Self.integer(params["summaryIndex"]))),
+                    scopeID: scopeIDForNotification(params)))
+        case "item/reasoning/textDelta":
+            // Never surface raw model reasoning. Only the provider's explicit
+            // summary channel above is suitable for user-visible telemetry.
+            break
         case "item/agentMessage/delta":
             // 0.144 params: {threadId, turnId, itemId, delta}.
             let turnID = (params["turnId"] as? String) ?? (params["turn_id"] as? String)
@@ -623,6 +712,27 @@ final class CodexAppServer: @unchecked Sendable {
                         state: failed ? .failed : .completed,
                         output: item["text"] as? String,
                         scopeID: scopeID))
+            }
+            // A completed reasoning item carries an authoritative array of
+            // provider-created summaries. Its `content` field is raw
+            // reasoning and must never enter this event stream.
+            if let item = params["item"] as? [String: Any],
+               (item["type"] as? String) == "reasoning",
+               let summaryParts = item["summary"] as? [String] {
+                let summary = summaryParts
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n\n")
+                if !summary.isEmpty {
+                    AssistantRunEventBus.publish(
+                        AssistantRunEvent(
+                            provenance: .providerReported,
+                            update: .reasoningSummary(
+                                AssistantRunEvent.ReasoningSummary(
+                                    state: .completed,
+                                    text: summary,
+                                    itemID: item["id"] as? String)),
+                            scopeID: scopeIDForNotification(params)))
+                }
             }
             // 0.144 delivers the agent reply as a completed `agentMessage`
             // item carrying the FULL text. If that item never streamed
@@ -709,17 +819,26 @@ final class CodexAppServer: @unchecked Sendable {
     private static func notificationTurnID(
         method: String, params: [String: Any]
     ) -> String? {
+        if let direct = (params["turnId"] as? String)
+            ?? (params["turn_id"] as? String) {
+            return direct
+        }
         switch method {
-        case "item/agentMessage/delta", "item/started", "item/updated",
-             "item/completed", "error":
-            return (params["turnId"] as? String) ?? (params["turn_id"] as? String)
         case "turn/completed", "turn/aborted", "turn/failed":
             let turn = params["turn"] as? [String: Any]
-            return (turn?["id"] as? String)
-                ?? (params["turnId"] as? String)
-                ?? (params["turn_id"] as? String)
+            return turn?["id"] as? String
         default:
             return nil
+        }
+    }
+
+    private func discardLateNotifications(for turnID: String) {
+        discardedTurnIDs.insert(turnID)
+        earlyTurnMessages.removeValue(forKey: turnID)
+        // Provider acknowledgement normally removes this immediately. The
+        // fallback keeps the tombstone set bounded if no terminal event comes.
+        queue.asyncAfter(deadline: .now() + 60) { [weak self] in
+            self?.discardedTurnIDs.remove(turnID)
         }
     }
 
@@ -727,6 +846,53 @@ final class CodexAppServer: @unchecked Sendable {
         guard let turnID = (params["turnId"] as? String)
                 ?? (params["turn_id"] as? String) else { return nil }
         return activeTurns[turnID]?.scopeID
+    }
+
+    private static func runUsage(
+        from params: [String: Any]
+    ) -> AssistantRunEvent.Usage? {
+        guard let usage = params["tokenUsage"] as? [String: Any] else {
+            return nil
+        }
+        let last = tokenCounts(usage["last"] as? [String: Any])
+        let cumulative = tokenCounts(usage["total"] as? [String: Any])
+        let contextWindow = integer(usage["modelContextWindow"])
+        guard last != nil || cumulative != nil || contextWindow != nil else {
+            return nil
+        }
+        return AssistantRunEvent.Usage(
+            lastTokens: last,
+            cumulativeTokens: cumulative,
+            // Codex reports the window but not true current occupancy. Its
+            // cumulative total is not a safe substitute after compaction.
+            contextUsedTokens: nil,
+            contextWindowTokens: contextWindow,
+            cost: nil)
+    }
+
+    private static func tokenCounts(
+        _ usage: [String: Any]?
+    ) -> AssistantRunEvent.TokenCounts? {
+        guard let usage else { return nil }
+        let counts = AssistantRunEvent.TokenCounts(
+            input: integer(usage["inputTokens"]),
+            cachedInput: integer(usage["cachedInputTokens"]),
+            cacheWriteInput: integer(usage["cacheWriteInputTokens"]),
+            output: integer(usage["outputTokens"]),
+            reasoningOutput: integer(usage["reasoningOutputTokens"]),
+            total: integer(usage["totalTokens"]))
+        guard counts.input != nil || counts.cachedInput != nil
+                || counts.cacheWriteInput != nil || counts.output != nil
+                || counts.reasoningOutput != nil || counts.total != nil else {
+            return nil
+        }
+        return counts
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let number = value as? NSNumber { return number.intValue }
+        return nil
     }
 
     private func registerConversationContext(
@@ -795,6 +961,7 @@ final class CodexAppServer: @unchecked Sendable {
             for reducer in matches {
                 reducer.fail(CancellationError())
                 activeTurns.removeValue(forKey: reducer.turnID)
+                discardLateNotifications(for: reducer.turnID)
             }
             return matches.map { ($0.threadID, $0.turnID) }
         }
@@ -830,6 +997,8 @@ private final class TurnReducer: @unchecked Sendable {
     private var onPartial: ((String) -> Void)?
     private var lastPartialAt: Double = 0
     private var completionResult: Result<String, Error>?
+    private let startedAt = ProcessInfo.processInfo.systemUptime
+    private var lastActivityAt = ProcessInfo.processInfo.systemUptime
     private let lock = NSLock()
 
     init(
@@ -847,6 +1016,21 @@ private final class TurnReducer: @unchecked Sendable {
     }
 
     var isFinished: Bool { lock.withLock { completionResult != nil } }
+
+    func recordActivity() {
+        lock.withLock {
+            guard completionResult == nil else { return }
+            lastActivityAt = ProcessInfo.processInfo.systemUptime
+        }
+    }
+
+    func activitySnapshot() -> (
+        startedAt: Double, lastActivityAt: Double, now: Double
+    ) {
+        lock.withLock {
+            (startedAt, lastActivityAt, ProcessInfo.processInfo.systemUptime)
+        }
+    }
 
     func append(_ chunk: String, itemID: String? = nil) {
         lock.withLock {
@@ -928,13 +1112,16 @@ enum CodexBridgeError: LocalizedError {
     case protocolViolation(String)
     case rpcError(String)
     case turnTimeout
+    case maximumDurationExceeded
 
     var errorDescription: String? {
         switch self {
         case .processUnavailable(let m), .protocolViolation(let m), .rpcError(let m):
             return m
         case .turnTimeout:
-            return "Codex did not respond within the turn timeout."
+            return "Codex was inactive for the configured turn timeout."
+        case .maximumDurationExceeded:
+            return "Codex reached the 30-minute turn safety limit."
         }
     }
 }

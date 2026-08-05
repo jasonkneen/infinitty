@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Best-effort bridge for the Sourcegraph Amp CLI.
 ///
@@ -13,8 +14,6 @@ final class AmpBridge: @unchecked Sendable {
     private let processLock = NSLock()
     private var processes: [String: Process] = [:]
     private var conversationGenerations: [String: UInt64] = [:]
-    private static let turnTimeoutSeconds: TimeInterval = 90
-
     init(executableURL: URL? = nil) {
         self.executableURLOverride = executableURL
     }
@@ -25,7 +24,8 @@ final class AmpBridge: @unchecked Sendable {
         model: String? = nil,
         cwd: String? = nil,
         conversationID: String? = nil,
-        timeout: TimeInterval = AmpBridge.turnTimeoutSeconds,
+        timeout: TimeInterval =
+            AssistantTurnTimeoutPolicy.defaultInactivitySeconds,
         onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
         let conversationGeneration: UInt64?
@@ -91,6 +91,16 @@ final class AmpBridge: @unchecked Sendable {
                 stderr.fileHandleForReading.readabilityHandler = { handle in
                     if handle.availableData.isEmpty { handle.readabilityHandler = nil }
                 }
+                let collector = AmpTurnOutputCollector(onPartial: onPartial)
+                stdout.fileHandleForReading.readabilityHandler = { handle in
+                    let chunk = handle.availableData
+                    if chunk.isEmpty {
+                        handle.readabilityHandler = nil
+                        collector.markEOF()
+                    } else {
+                        collector.append(chunk)
+                    }
+                }
 
                 PetLog.log("AmpBridge.spawn (--execute --stream-json)")
                 do {
@@ -120,22 +130,54 @@ final class AmpBridge: @unchecked Sendable {
                     }
                 }
 
-                // Watchdog: never hang. Terminate at the deadline — that
-                // closes stdout, so the blocking read below returns and we
-                // resume with a bounded provider-execution error.
-                let watchdog = DispatchWorkItem {
-                    if process.isRunning {
-                        PetLog.log("AmpBridge.timeout after \(Int(timeout))s — terminating")
-                        process.terminate()
+                // Stream events update an inactivity clock. Agentic turns may
+                // legitimately run longer than the configured budget while
+                // still producing work; silence remains bounded, and a 30m
+                // absolute cap protects the process lane.
+                let inactivityBudget = max(timeout, 0.001)
+                let startedAt = ProcessInfo.processInfo.systemUptime
+                var timeoutError: AmpBridgeError?
+                while process.isRunning {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let idleFor = now - collector.lastActivityUptime
+                    let elapsed = now - startedAt
+                    if elapsed
+                        >= AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds {
+                        timeoutError = .maximumDurationExceeded
+                        break
                     }
+                    if idleFor >= inactivityBudget {
+                        timeoutError = .turnTimeout
+                        break
+                    }
+                    let wait = min(
+                        min(
+                            max(inactivityBudget - idleFor, 0.001),
+                            max(
+                                AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+                                    - elapsed,
+                                0.001)),
+                        0.25)
+                    collector.waitForActivity(timeout: wait)
                 }
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-
-                // Deterministic: read to EOF (child exit / watchdog close the
-                // pipe), then inspect the exit status. No handler race.
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
+                var forceKill: DispatchWorkItem?
+                if let timeoutError, process.isRunning {
+                    PetLog.log(
+                        "AmpBridge.\(timeoutError.logLabel) — terminating")
+                    process.terminate()
+                    let kill = DispatchWorkItem {
+                        if process.isRunning {
+                            _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                        }
+                    }
+                    forceKill = kill
+                    DispatchQueue.global().asyncAfter(
+                        deadline: .now() + 2, execute: kill)
+                }
                 process.waitUntilExit()
-                watchdog.cancel()
+                forceKill?.cancel()
+                collector.waitForEOF(timeout: 0.5)
+                stdout.fileHandleForReading.readabilityHandler = nil
                 if let conversationID, let conversationGeneration {
                     self.finishConversation(
                         conversationID,
@@ -144,14 +186,15 @@ final class AmpBridge: @unchecked Sendable {
                 }
                 stderr.fileHandleForReading.readabilityHandler = nil
 
+                let data = collector.data
                 let raw = String(data: data, encoding: .utf8) ?? ""
                 let text = (AmpBridge.textFromStreamJSON(raw)
                     ?? AmpBridge.stripANSI(raw))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if process.terminationStatus == 0, !text.isEmpty {
-                    if let onPartial {
-                        DispatchQueue.main.async { onPartial(text) }
-                    }
+                if let timeoutError {
+                    cont.resume(throwing: timeoutError)
+                } else if process.terminationStatus == 0, !text.isEmpty {
+                    collector.emitFinal(text)
                     cont.resume(returning: text)
                 } else {
                     cont.resume(throwing: AmpBridgeError.executionFailed(
@@ -219,9 +262,111 @@ final class AmpBridge: @unchecked Sendable {
     }
 }
 
+/// Thread-safe stdout accumulator for one Amp process. It recognizes complete
+/// stream-json records for live answer updates, while every stdout chunk still
+/// counts as provider activity even when it contains a private/non-text event.
+private final class AmpTurnOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private let activity = DispatchSemaphore(value: 0)
+    private let onPartial: ((String) -> Void)?
+    private var buffer = Data()
+    private var latestVisibleText = ""
+    private var lastPartialAt: Double = 0
+    private var reachedEOF = false
+    private var activityUptime = ProcessInfo.processInfo.systemUptime
+
+    init(onPartial: ((String) -> Void)?) {
+        self.onPartial = onPartial
+    }
+
+    var lastActivityUptime: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return activityUptime
+    }
+
+    var data: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer
+    }
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        buffer.append(chunk)
+        activityUptime = ProcessInfo.processInfo.systemUptime
+        let snapshot = buffer
+        lock.unlock()
+        activity.signal()
+
+        guard let raw = String(data: snapshot, encoding: .utf8) else { return }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let looksLikeJSON = trimmed.first == "{"
+        let visible = AmpBridge.textFromStreamJSON(raw)
+            ?? (looksLikeJSON ? nil : AmpBridge.stripANSI(raw))
+        if let visible {
+            emitIfChanged(visible.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    func markEOF() {
+        lock.lock()
+        reachedEOF = true
+        lock.unlock()
+        activity.signal()
+    }
+
+    func waitForActivity(timeout: TimeInterval) {
+        _ = activity.wait(timeout: .now() + timeout)
+    }
+
+    func waitForEOF(timeout: TimeInterval) {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while true {
+            lock.lock()
+            let done = reachedEOF
+            lock.unlock()
+            if done { return }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            if remaining <= 0 { return }
+            _ = activity.wait(timeout: .now() + min(remaining, 0.05))
+        }
+    }
+
+    func emitFinal(_ text: String) {
+        emitIfChanged(text, throttled: false)
+    }
+
+    private func emitIfChanged(_ text: String, throttled: Bool = true) {
+        guard !text.isEmpty, let onPartial else { return }
+        lock.lock()
+        let now = ProcessInfo.processInfo.systemUptime
+        let canEmit = text != latestVisibleText
+            && (!throttled || now - lastPartialAt > 0.1)
+        if canEmit {
+            latestVisibleText = text
+            lastPartialAt = now
+        }
+        lock.unlock()
+        if canEmit {
+            DispatchQueue.main.async { onPartial(text) }
+        }
+    }
+}
+
 enum AmpBridgeError: LocalizedError {
     case processUnavailable(String)
     case executionFailed(status: Int32)
+    case turnTimeout
+    case maximumDurationExceeded
+
+    var logLabel: String {
+        switch self {
+        case .turnTimeout: return "inactivity-timeout"
+        case .maximumDurationExceeded: return "maximum-duration"
+        default: return "failure"
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -229,6 +374,10 @@ enum AmpBridgeError: LocalizedError {
             return m
         case .executionFailed(let status):
             return "Amp provider execution failed with status \(status)."
+        case .turnTimeout:
+            return "Amp was inactive for the configured turn timeout."
+        case .maximumDurationExceeded:
+            return "Amp reached the 30-minute turn safety limit."
         }
     }
 }

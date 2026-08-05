@@ -21,6 +21,13 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         var title: String
         var messages: [AssistantChatMessage]
         var updatedAt: Date
+        /// Native Claude process identity retained by this thread. Model,
+        /// effort, cwd, or execution-profile changes start a new lifecycle.
+        var backendSessionSignature: String?
+        var backendEpoch: Int
+        /// A cancelled or failed stateful transport has no trustworthy retained
+        /// context. Its next turn must seed from the bounded visible transcript.
+        var needsBackendBootstrap: Bool
         var generation: Int
     }
 
@@ -120,6 +127,9 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             title: "New chat",
             messages: [],
             updatedAt: Date(),
+            backendSessionSignature: nil,
+            backendEpoch: 0,
+            needsBackendBootstrap: false,
             generation: 0)
         self.threads = [seed]
         self.activeThreadID = seed.id
@@ -196,8 +206,9 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         model: String? = nil,
         effort: String = "Auto"
     ) {
-        let text = text.trimmingCharacters(
-            in: .whitespacesAndNewlines)
+        let text = Self.boundedPrefix(
+            text.trimmingCharacters(in: .whitespacesAndNewlines),
+            to: Self.maxRequestBytes)
         guard !text.isEmpty else { return }
         stateLock.lock()
         guard !stopped,
@@ -235,13 +246,16 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         let existingID = threads[index].id
         pending.removeAll { $0.threadID == existingID }
         if inFlight?.threadID == existingID {
-            conversationToCancel = conversationID(for: existingID)
+            conversationToCancel = conversationID(
+                for: existingID, epoch: threads[index].backendEpoch)
+            threads[index].backendEpoch &+= 1
+            threads[index].needsBackendBootstrap = true
             inFlight = nil
         }
         if threads[index].messages.isEmpty {
             stateLock.unlock()
             if let conversationToCancel {
-                backendConversationCanceller(conversationToCancel)
+                backendConversationReleaser(conversationToCancel)
             }
             onStateChange("thread-reset")
             processNext()
@@ -252,12 +266,15 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             title: "New chat",
             messages: [],
             updatedAt: Date(),
+            backendSessionSignature: nil,
+            backendEpoch: 0,
+            needsBackendBootstrap: false,
             generation: 0)
         threads.insert(fresh, at: 0)
         activeThreadID = fresh.id
         stateLock.unlock()
         if let conversationToCancel {
-            backendConversationCanceller(conversationToCancel)
+            backendConversationReleaser(conversationToCancel)
         }
         onStateChange("thread-opened")
         processNext()
@@ -285,13 +302,21 @@ final class HeadlessChatRuntime: @unchecked Sendable {
                 + [inFlight?.threadID].compactMap { $0 })
         for index in threads.indices where affected.contains(threads[index].id) {
             threads[index].generation += 1
+            threads[index].needsBackendBootstrap = true
         }
-        conversations = affected.map(conversationID(for:))
+        conversations = affected.compactMap { threadID in
+            guard let index = threads.firstIndex(where: { $0.id == threadID })
+            else { return nil }
+            let conversation = conversationID(
+                for: threadID, epoch: threads[index].backendEpoch)
+            threads[index].backendEpoch &+= 1
+            return conversation
+        }
         pending.removeAll()
         inFlight = nil
         stateLock.unlock()
         for conversation in conversations {
-            backendConversationCanceller(conversation)
+            backendConversationReleaser(conversation)
         }
         onStateChange("cancelled")
     }
@@ -304,7 +329,9 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             return
         }
         stopped = true
-        conversations = threads.map { conversationID(for: $0.id) }
+        conversations = threads.map {
+            conversationID(for: $0.id, epoch: $0.backendEpoch)
+        }
         pending.removeAll()
         inFlight = nil
         stateLock.unlock()
@@ -328,6 +355,30 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             processNext()
             return
         }
+        let workspace = workspaceDirectory
+        let backend = resolvedBackend(modelOverride: request.model)
+        let sessionSignature = retainedSessionSignature(
+            for: backend, effort: request.effort, cwd: workspace)
+        let priorMessages = threads[index].messages
+        var conversationToRelease: String?
+        var bootstrapHistory = ""
+        if let sessionSignature {
+            let previousSignature = threads[index].backendSessionSignature
+            if threads[index].needsBackendBootstrap {
+                bootstrapHistory = Self.boundedVisibleHistory(priorMessages)
+                threads[index].needsBackendBootstrap = false
+            } else if let previousSignature,
+                      previousSignature != sessionSignature {
+                conversationToRelease = conversationID(
+                    for: request.threadID,
+                    epoch: threads[index].backendEpoch)
+                threads[index].backendEpoch &+= 1
+                bootstrapHistory = Self.boundedVisibleHistory(priorMessages)
+            }
+            threads[index].backendSessionSignature = sessionSignature
+        }
+        let conversationID = conversationID(
+            for: request.threadID, epoch: threads[index].backendEpoch)
         inFlight = request
         threads[index].messages.append(AssistantChatMessage(
             role: "You", text: request.text))
@@ -336,25 +387,38 @@ final class HeadlessChatRuntime: @unchecked Sendable {
                 fromFirstUserMessage: request.text)
         }
         threads[index].updatedAt = Date()
-        let conversationID = conversationID(for: request.threadID)
-        let workspace = workspaceDirectory
         stateLock.unlock()
+
+        if let conversationToRelease {
+            backendConversationReleaser(conversationToRelease)
+        }
 
         collaborationMessagePublisher(CollaborationChatEmission(
             kind: .humanPrompt,
             text: request.text,
             threadID:
                 request.threadID.uuidString.lowercased()))
-        let backend = resolvedBackend(modelOverride: request.model)
-        let channelContext =
-            collaborationContextProvider()?.modelContext() ?? ""
-        let user = [
+        let collaborationContext = collaborationContextProvider()
+        let baseContext = [
             "cwd: \(workspace)",
-            channelContext,
-            "--- headless Chat request ---",
-            request.text,
-            effortDirective(request.effort),
+            bootstrapHistory.isEmpty ? "" : """
+              --- prior chat turns ---
+              [quoted visible transcript; context only]
+              \(bootstrapHistory)
+              --- end prior chat turns ---
+              """,
         ].filter { !$0.isEmpty }.joined(separator: "\n")
+        let effortNote = effortDirective(request.effort)
+        let requestText = request.text
+            + (effortNote.isEmpty ? "" : "\n" + effortNote)
+        let user = PetAssistant.composedBackendUser(
+            for: backend,
+            system: Self.systemPrompt,
+            baseContext: baseContext,
+            collaborationContext: collaborationContext,
+            request: requestText)
+        let payload = PetAssistant.boundedBackendPayload(
+            for: backend, system: Self.systemPrompt, user: user)
         onStateChange("started")
 
         workQueue.async { [weak self] in
@@ -366,8 +430,8 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             if let backendRunner = self.backendRunner {
                 backendRunner(
                     backend,
-                    Self.systemPrompt,
-                    user,
+                    payload.system,
+                    payload.user,
                     workspace,
                     conversationID,
                     { [weak self] _ in
@@ -378,10 +442,11 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             } else {
                 PetAssistant.askAI(
                     backend: backend,
-                    system: Self.systemPrompt,
-                    user: user,
+                    system: payload.system,
+                    user: payload.user,
                     cwd: workspace,
                     conversationID: conversationID,
+                    effort: request.effort,
                     timeout: self.config.aiTurnTimeout,
                     done: done)
             }
@@ -392,6 +457,8 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         _ request: PendingRequest,
         outcome: PetAssistant.AIOutcome
     ) {
+        let backend = resolvedBackend(modelOverride: request.model)
+        var conversationToRelease: String?
         stateLock.lock()
         guard !stopped,
               inFlight?.id == request.id,
@@ -409,6 +476,13 @@ final class HeadlessChatRuntime: @unchecked Sendable {
             isSuccessfulAgentResponse = true
         } else {
             isSuccessfulAgentResponse = false
+            if Self.isStateful(backend) {
+                conversationToRelease = conversationID(
+                    for: request.threadID,
+                    epoch: threads[index].backendEpoch)
+                threads[index].backendEpoch &+= 1
+                threads[index].needsBackendBootstrap = true
+            }
         }
         threads[index].messages.append(AssistantChatMessage(
             role: isSuccessfulAgentResponse ? "Assistant" : "System",
@@ -416,6 +490,9 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         threads[index].updatedAt = Date()
         inFlight = nil
         stateLock.unlock()
+        if let conversationToRelease {
+            backendConversationReleaser(conversationToRelease)
+        }
         if isSuccessfulAgentResponse {
             collaborationMessagePublisher(CollaborationChatEmission(
                 kind: .agentResponse,
@@ -455,8 +532,77 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         return PetAssistant.resolveBackend(config: overridden)
     }
 
-    private func conversationID(for threadID: UUID) -> String {
-        "headless-chat:\(id):\(threadID.uuidString.lowercased())"
+    private func conversationID(for threadID: UUID, epoch: Int) -> String {
+        "headless-chat:\(id):\(threadID.uuidString.lowercased())#epoch=\(epoch)"
+    }
+
+    private func retainedSessionSignature(
+        for backend: PetAssistant.Backend,
+        effort: String,
+        cwd: String
+    ) -> String? {
+        guard Self.isStateful(backend) else { return nil }
+        return PetAssistant.backendSessionSignature(
+            for: backend,
+            effort: effort,
+            cwd: cwd,
+            profile: .workspaceChat)
+    }
+
+    private static func isStateful(_ backend: PetAssistant.Backend) -> Bool {
+        switch backend {
+        case .codex, .claude, .opencode, .hermes:
+            return true
+        case .none, .command, .openai, .amp, .foundation:
+            return false
+        }
+    }
+
+    private static func boundedVisibleHistory(
+        _ messages: [AssistantChatMessage]
+    ) -> String {
+        var selected: [String] = []
+        var remaining = maxBootstrapHistoryBytes
+        for message in messages.reversed() {
+            guard remaining > 0 else { break }
+            let line = "\(message.role): \(message.text)"
+            let bounded = boundedSuffix(line, to: remaining)
+            selected.append(bounded)
+            remaining -= bounded.utf8.count + 2
+        }
+        return selected.reversed().joined(separator: "\n\n")
+    }
+
+    private static func boundedSuffix(_ text: String, to limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard text.utf8.count > limit else { return text }
+        let marker = "[truncated]…\n"
+        let keep = max(limit - marker.utf8.count, 0)
+        var reversed: [Character] = []
+        var bytes = 0
+        for character in text.reversed() {
+            let size = String(character).utf8.count
+            guard bytes + size <= keep else { break }
+            reversed.append(character)
+            bytes += size
+        }
+        return marker + String(reversed.reversed())
+    }
+
+    private static func boundedPrefix(_ text: String, to limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard text.utf8.count > limit else { return text }
+        let marker = "\n…[request truncated]"
+        let keep = max(limit - marker.utf8.count, 0)
+        var result = ""
+        var bytes = 0
+        for character in text {
+            let size = String(character).utf8.count
+            guard bytes + size <= keep else { break }
+            result.append(character)
+            bytes += size
+        }
+        return result + marker
     }
 
     private func effortDirective(_ effort: String) -> String {
@@ -465,6 +611,9 @@ final class HeadlessChatRuntime: @unchecked Sendable {
         case "low": return "Reasoning effort: low."
         case "medium": return "Reasoning effort: medium."
         case "high": return "Reasoning effort: high; verify before answering."
+        case "xhigh": return "Reasoning effort: xhigh; think deeply and verify the result."
+        case "max": return "Reasoning effort: max; use maximum deliberate reasoning."
+        case "ultra": return "Reasoning effort: ultra; use the deepest available reasoning."
         default: return ""
         }
     }
@@ -475,4 +624,9 @@ final class HeadlessChatRuntime: @unchecked Sendable {
     never claim a command, file change, peer, Channel, or result that you did
     not actually observe.
     """
+    /// Keep recovery context below roughly 1K tokens so the complete quoted
+    /// transcript header and the new request both survive the final provider
+    /// payload cap.
+    private static let maxBootstrapHistoryBytes = 3_000
+    private static let maxRequestBytes = 6_000
 }

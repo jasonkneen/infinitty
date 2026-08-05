@@ -30,7 +30,13 @@ final class ClaudeBridge: @unchecked Sendable {
     private let executableURLOverride: URL?
     private let mcpExecutableURLOverride: URL?
     private let eventScopeID: String?
-    /// Claude pins `--session-id`, model, and system prompt at process launch.
+    /// Deterministic regression seam for the narrow interval after process
+    /// configuration and before the turn continuation is registered.
+    private let turnProcessEnsuredForTesting: (() -> Void)?
+    /// Invalidates asynchronous warm-up tasks that have not acquired the turn
+    /// gate yet. This prevents `warmUp(); stop()` from resurrecting a process.
+    private var warmUpGeneration: UInt64 = 0
+    /// Claude pins `--session-id`, model, effort, and system prompt at process launch.
     /// Keyed conversations therefore get independent child bridges/processes;
     /// the unkeyed path continues to use this bridge's original process.
     private var conversationBridges: [String: ClaudeBridge] = [:]
@@ -38,6 +44,10 @@ final class ClaudeBridge: @unchecked Sendable {
     /// child. Only a later explicit warm-up registration clears the marker.
     private var tombstonedConversationIDs = Set<String>()
     private var process: Process?
+    /// Invalidates stdout chunks already queued by a retired child. Clearing a
+    /// readability handler cannot retract a callback that has already copied
+    /// bytes, so every delivery must also prove it belongs to the live process.
+    private var processGeneration: UInt64 = 0
     private var stdinHandle: FileHandle?
     private var stdoutHandle: FileHandle?
     private var stderrHandle: FileHandle?
@@ -56,6 +66,9 @@ final class ClaudeBridge: @unchecked Sendable {
     /// Model the live process was spawned with. A different requested
     /// model forces a respawn (the CLI pins `--model` at launch).
     private var currentModel: String?
+    /// Canonical native `--effort` value for the live process. Nil means the
+    /// flag was omitted so Claude applies its own default.
+    private var currentEffort: String?
     private var currentSystemPrompt: String?
     private var currentWorkingDirectory: String?
     private var currentProfile: AgentExecutionProfile?
@@ -73,10 +86,12 @@ final class ClaudeBridge: @unchecked Sendable {
     private var lastPartialAt: Double = 0
     /// Uptime when the current turn's message was written — for phase timing.
     private var turnStartUptime: Double = 0
+    /// Uptime of the latest provider event that proves the turn is progressing.
+    /// The configured timeout is an inactivity budget, not a wall-clock cap:
+    /// agentic turns may legitimately spend minutes reading and using tools.
+    private var lastTurnActivityUptime: Double = 0
     private var sawFirstTextThisTurn = false
     private var stdoutBuffer = Data()
-
-    private static let requestTimeoutSeconds: TimeInterval = 130
 
     var isRunning: Bool {
         let state = queue.sync {
@@ -88,11 +103,13 @@ final class ClaudeBridge: @unchecked Sendable {
     init(
         executableURL: URL? = nil,
         mcpExecutableURL: URL? = nil,
-        eventScopeID: String? = nil
+        eventScopeID: String? = nil,
+        turnProcessEnsuredForTesting: (() -> Void)? = nil
     ) {
         self.executableURLOverride = executableURL
         self.mcpExecutableURLOverride = mcpExecutableURL
         self.eventScopeID = eventScopeID
+        self.turnProcessEnsuredForTesting = turnProcessEnsuredForTesting
     }
 
     // MARK: - Public API
@@ -105,33 +122,58 @@ final class ClaudeBridge: @unchecked Sendable {
     func warmUp(
         system: String,
         model: String? = nil,
+        effort: String = "Auto",
         conversationID: String? = nil,
         cwd: String? = nil,
         profile: AgentExecutionProfile = .workspaceChat
     ) {
         if let conversationID {
             registerConversationBridge(for: conversationID).warmUpLocally(
-                system: system, model: model, cwd: cwd, profile: profile)
+                system: system, model: model, effort: effort, cwd: cwd,
+                profile: profile)
             return
         }
-        warmUpLocally(system: system, model: model, cwd: cwd, profile: profile)
+        warmUpLocally(
+            system: system, model: model, effort: effort, cwd: cwd,
+            profile: profile)
     }
 
     private func warmUpLocally(
         system: String,
         model: String?,
+        effort: String,
         cwd: String?,
         profile: AgentExecutionProfile
     ) {
-        guard queue.sync(execute: { !isReleased }) else { return }
-        try? ensureProcess(
-            system: system, model: model, cwd: cwd, profile: profile)
+        let generation = queue.sync { () -> UInt64? in
+            guard !isReleased else { return nil }
+            warmUpGeneration &+= 1
+            return warmUpGeneration
+        }
+        guard let generation else { return }
+        // Warm-up must share the same FIFO gate as real turns. Otherwise it
+        // can replace the process after a turn has configured it but before
+        // that turn registers its continuation on the bridge queue.
+        Task { [weak self] in
+            guard let self else { return }
+            await self.turnGate.acquire()
+            if self.queue.sync(execute: {
+                !self.isReleased && self.warmUpGeneration == generation
+            }) {
+                try? self.ensureProcess(
+                    system: system, model: model, effort: effort, cwd: cwd,
+                    profile: profile)
+            }
+            await self.turnGate.release()
+        }
     }
 
     /// Run a single, blocking turn against the warm bridge. Lazy-sprawls
     /// (sic). Returns the assistant's final `result` text.
     func turn(prompt: String, system: String, model: String? = nil,
-              timeout: TimeInterval = requestTimeoutSeconds,
+              effort: String = "Auto",
+              timeout: TimeInterval =
+                AssistantTurnTimeoutPolicy.defaultInactivitySeconds,
               conversationID: String? = nil,
               cwd: String? = nil,
               profile: AgentExecutionProfile = .workspaceChat,
@@ -143,6 +185,7 @@ final class ClaudeBridge: @unchecked Sendable {
                 prompt: prompt,
                 system: system,
                 model: model,
+                effort: effort,
                 cwd: cwd,
                 profile: profile,
                 timeout: timeout,
@@ -152,6 +195,7 @@ final class ClaudeBridge: @unchecked Sendable {
             prompt: prompt,
             system: system,
             model: model,
+            effort: effort,
             cwd: cwd,
             profile: profile,
             timeout: timeout,
@@ -162,17 +206,22 @@ final class ClaudeBridge: @unchecked Sendable {
         prompt: String,
         system: String,
         model: String?,
+        effort: String,
         cwd: String?,
         profile: AgentExecutionProfile,
         timeout: TimeInterval,
         onPartial: ((String) -> Void)?
     ) async throws -> String {
+        // A real turn supersedes any queued speculative warm-up. If warm-up
+        // already owns the gate it finishes first; otherwise it becomes inert.
+        queue.sync { warmUpGeneration &+= 1 }
         await turnGate.acquire()
         do {
             try Task.checkCancellation()
             try ensureLocallyActive()
             let result = try await performTurn(
-                prompt: prompt, system: system, model: model, cwd: cwd,
+                prompt: prompt, system: system, model: model, effort: effort,
+                cwd: cwd,
                 profile: profile, timeout: timeout, onPartial: onPartial)
             await turnGate.release()
             return result
@@ -201,12 +250,15 @@ final class ClaudeBridge: @unchecked Sendable {
     }
 
     private func performTurn(
-        prompt: String, system: String, model: String?, cwd: String?,
+        prompt: String, system: String, model: String?, effort: String,
+        cwd: String?,
         profile: AgentExecutionProfile, timeout: TimeInterval,
         onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
         try ensureProcess(
-            system: system, model: model, cwd: cwd, profile: profile)
+            system: system, model: model, effort: effort, cwd: cwd,
+            profile: profile)
+        turnProcessEnsuredForTesting?()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
                 let turnID = UUID().uuidString
@@ -221,25 +273,15 @@ final class ClaudeBridge: @unchecked Sendable {
                     PetLog.log("ClaudeBridge.turn start turn=\(turnID.prefix(8)) warm=\(warm)")
                     self.currentTurnID = turnID
                     self.turnStartUptime = ProcessInfo.processInfo.systemUptime
+                    self.lastTurnActivityUptime = self.turnStartUptime
                     self.sawFirstTextThisTurn = false
                     self.assistantAccumulator = ""
                     self.onPartial = onPartial
                     self.lastPartialAt = 0
                     self.pending[turnID] = cont
                     self.writeUserMessage(turnID: turnID, text: prompt)
-                }
-                queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-                    guard let self, let pending = self.pending.removeValue(forKey: turnID) else {
-                        return
-                    }
-                    if self.currentTurnID == turnID { self.currentTurnID = nil }
-                    PetLog.log("ClaudeBridge.timeout after \(Int(timeout))s turn=\(turnID.prefix(8))")
-                    // Kill the child: it is still computing this turn, and Claude's
-                    // result envelopes carry no client turn id, so a late result
-                    // would be delivered as the NEXT turn's answer. Discard the
-                    // process so the next turn starts clean.
-                    self.teardownLocked()
-                    pending.resume(throwing: ClaudeBridgeError.turnTimeout)
+                    self.scheduleInactivityTimeout(
+                        turnID: turnID, timeout: timeout)
                 }
             }
         }, onCancel: { [weak self] in
@@ -256,6 +298,60 @@ final class ClaudeBridge: @unchecked Sendable {
         })
     }
 
+    /// Re-check at the end of each inactivity window. Meaningful provider
+    /// activity moves the deadline forward; a silent child is still torn down
+    /// so its uncorrelated late result cannot resolve a later turn.
+    private func scheduleInactivityTimeout(
+        turnID: String,
+        timeout: TimeInterval
+    ) {
+        let budget = max(timeout, 0.001)
+        let firstCheck = min(
+            budget, AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds)
+        queue.asyncAfter(deadline: .now() + firstCheck) { [weak self] in
+            self?.enforceInactivityTimeout(turnID: turnID, timeout: budget)
+        }
+    }
+
+    private func enforceInactivityTimeout(
+        turnID: String,
+        timeout: TimeInterval
+    ) {
+        guard let pending = pending[turnID] else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let idleFor = now - lastTurnActivityUptime
+        let elapsed = now - turnStartUptime
+        let reachedSafetyLimit = elapsed
+            >= AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+        if !reachedSafetyLimit, idleFor < timeout {
+            let delay = min(
+                max(timeout - idleFor, 0.001),
+                max(
+                    AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+                        - elapsed,
+                    0.001))
+            queue.asyncAfter(
+                deadline: .now() + delay
+            ) { [weak self] in
+                self?.enforceInactivityTimeout(
+                    turnID: turnID, timeout: timeout)
+            }
+            return
+        }
+        self.pending.removeValue(forKey: turnID)
+        if currentTurnID == turnID { currentTurnID = nil }
+        PetLog.log(String(
+            format: "ClaudeBridge.%@ idle=%.1fs elapsed=%.1fs turn=%@",
+            reachedSafetyLimit ? "maximum-duration" : "inactivity-timeout",
+            idleFor, elapsed, String(turnID.prefix(8))))
+        // Claude result envelopes carry no client turn id. Discard the child
+        // so a late result cannot be mistaken for the next turn's answer.
+        teardownLocked()
+        pending.resume(throwing: reachedSafetyLimit
+            ? ClaudeBridgeError.maximumDurationExceeded
+            : ClaudeBridgeError.turnTimeout)
+    }
+
     func stop() {
         let children = queue.sync { () -> [ClaudeBridge] in
             let values = Array(conversationBridges.values)
@@ -267,12 +363,16 @@ final class ClaudeBridge: @unchecked Sendable {
     }
 
     private func stopLocally() {
-        queue.sync { teardownLocked() }
+        queue.sync {
+            warmUpGeneration &+= 1
+            teardownLocked()
+        }
     }
 
     private func releaseLocally() {
         queue.sync {
             isReleased = true
+            warmUpGeneration &+= 1
             teardownLocked()
         }
     }
@@ -285,6 +385,7 @@ final class ClaudeBridge: @unchecked Sendable {
 
     /// Must be called on `queue`.
     private func teardownLocked() {
+        processGeneration &+= 1
         if !pending.isEmpty {
             PetLog.log("ClaudeBridge.teardown WITH \(pending.count) pending turn(s) — will cancel them")
         }
@@ -297,6 +398,7 @@ final class ClaudeBridge: @unchecked Sendable {
         if process?.isRunning == true { process?.terminate() }
         process = nil
         currentModel = nil
+        currentEffort = nil
         currentSystemPrompt = nil
         currentWorkingDirectory = nil
         currentProfile = nil
@@ -360,18 +462,21 @@ final class ClaudeBridge: @unchecked Sendable {
     private func ensureProcess(
         system: String,
         model: String?,
+        effort: String,
         cwd: String?,
         profile: AgentExecutionProfile
     ) throws {
         try queue.sync {
             if isReleased { throw CancellationError() }
             let resolvedModel = model ?? Self.defaultModel
+            let resolvedEffort = NativeReasoningEffort.claudeValue(effort)
             let resolvedCWD = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
             let workingDirectory = resolvedCWD?.isEmpty == false
                 ? resolvedCWD!
                 : FileManager.default.currentDirectoryPath
             if process?.isRunning == true {
                 if currentModel == resolvedModel,
+                   currentEffort == resolvedEffort,
                    currentSystemPrompt == system,
                    currentWorkingDirectory == workingDirectory,
                    currentProfile == profile { return }
@@ -423,6 +528,9 @@ final class ClaudeBridge: @unchecked Sendable {
                 // execution profile. INFINITTY_AI_ALLOW_SHELL=1 retains the
                 // legacy escape hatch that skips these native-tool filters.
             ]
+            if let resolvedEffort {
+                args += ["--effort", resolvedEffort]
+            }
             if ProcessInfo.processInfo.environment["INFINITTY_AI_ALLOW_SHELL"] != "1" {
                 switch profile {
                 case .workspaceChat:
@@ -477,11 +585,13 @@ final class ClaudeBridge: @unchecked Sendable {
             p.terminationHandler = { [weak self] proc in
                 self?.queue.async {
                     guard let self, self.process === proc else { return }
+                    self.processGeneration &+= 1
                     PetLog.log("ClaudeBridge.childExit status=\(proc.terminationStatus) pending=\(self.pending.count)")
                     self.stdoutHandle?.readabilityHandler = nil
                     self.stderrHandle?.readabilityHandler = nil
                     self.process = nil
                     self.currentModel = nil
+                    self.currentEffort = nil
                     self.currentSystemPrompt = nil
                     self.currentWorkingDirectory = nil
                     self.currentProfile = nil
@@ -496,7 +606,9 @@ final class ClaudeBridge: @unchecked Sendable {
             }
             try p.run()
             self.process = p
+            let generation = self.processGeneration
             self.currentModel = resolvedModel
+            self.currentEffort = resolvedEffort
             self.currentSystemPrompt = system
             self.currentWorkingDirectory = workingDirectory
             self.currentProfile = profile
@@ -510,7 +622,14 @@ final class ClaudeBridge: @unchecked Sendable {
                     return
                 }
                 self?.queue.async { [weak self] in
-                    self?.consumeStdout(data)
+                    guard let self,
+                          self.processGeneration == generation
+                    else {
+                        PetLog.log(
+                            "ClaudeBridge.drop stale stdout generation=\(generation)")
+                        return
+                    }
+                    self.consumeStdout(data)
                 }
             }
             // Drain stderr (--verbose chatter, hook noise). An undrained
@@ -559,6 +678,10 @@ final class ClaudeBridge: @unchecked Sendable {
 
     private func handleEvent(_ event: [String: Any]) {
         let type = event["type"] as? String ?? ""
+        if currentTurnID != nil,
+           type == "assistant" || type == "user" || type == "system" {
+            lastTurnActivityUptime = ProcessInfo.processInfo.systemUptime
+        }
         switch type {
         case "assistant":
             if let message = event["message"] as? [String: Any],
@@ -683,12 +806,15 @@ enum ClaudeBridgeError: LocalizedError {
     case processUnavailable(String)
     case rpcError(String)
     case turnTimeout
+    case maximumDurationExceeded
 
     var errorDescription: String? {
         switch self {
         case .processUnavailable(let m), .rpcError(let m): return m
         case .turnTimeout:
-            return "Claude did not respond within the turn timeout."
+            return "Claude was inactive for the configured turn timeout."
+        case .maximumDurationExceeded:
+            return "Claude reached the 30-minute turn safety limit."
         }
     }
 }

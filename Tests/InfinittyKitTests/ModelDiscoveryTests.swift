@@ -185,6 +185,23 @@ final class ModelDiscoveryTests: XCTestCase {
         XCTAssertFalse(models.isEmpty)
         XCTAssertTrue(models.contains { $0.id == "claude-fable-5" })
         XCTAssertEqual(models.filter(\.isDefault).count, 1)
+        XCTAssertTrue(models.allSatisfy {
+            $0.efforts == ["low", "medium", "high", "xhigh", "max"]
+        })
+    }
+
+    func testNativeEffortNormalizationUsesProviderSafeDefaults() {
+        XCTAssertEqual(NativeReasoningEffort.codexValue(" Max "), "max")
+        XCTAssertEqual(NativeReasoningEffort.codexValue("XHIGH"), "xhigh")
+        XCTAssertEqual(NativeReasoningEffort.codexValue("Ultra"), "ultra")
+        XCTAssertEqual(NativeReasoningEffort.codexValue("Auto"), "medium")
+        XCTAssertEqual(NativeReasoningEffort.codexValue("unexpected"), "medium")
+
+        XCTAssertEqual(NativeReasoningEffort.claudeValue("XHIGH"), "xhigh")
+        XCTAssertEqual(NativeReasoningEffort.claudeValue("Max"), "max")
+        XCTAssertNil(NativeReasoningEffort.claudeValue("Auto"))
+        XCTAssertNil(NativeReasoningEffort.claudeValue("None"))
+        XCTAssertNil(NativeReasoningEffort.claudeValue("Ultra"))
     }
 
     func testProviderScopedModelLabelsDropRedundantProviderNames() {
@@ -245,18 +262,20 @@ final class ModelDiscoveryTests: XCTestCase {
     // MARK: - Cache
 
     func testCacheRoundTripsAndSurvivesAReload() throws {
-        ModelCatalogCache.clearForTesting()
-        defer { ModelCatalogCache.clearForTesting() }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("infinitty-model-cache-\(UUID().uuidString)")
+        let cacheURL = directory.appendingPathComponent("model-catalog.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
 
         let models = [
             DiscoveredModel(id: "gpt-5.6-sol", name: "GPT-5.6-Sol", description: "d",
                             isDefault: true, efforts: ["low", "high"],
                             defaultEffort: "low", group: nil),
         ]
-        ModelCatalogCache.store(models, for: .codex)
+        ModelCatalogCache.store(models, for: .codex, at: cacheURL)
 
-        XCTAssertEqual(ModelCatalogCache.load(for: .codex), models)
-        XCTAssertNil(ModelCatalogCache.load(for: .hermes),
+        XCTAssertEqual(ModelCatalogCache.load(for: .codex, from: cacheURL), models)
+        XCTAssertNil(ModelCatalogCache.load(for: .hermes, from: cacheURL),
                      "an unwritten provider must read back as absent, not empty")
     }
 }

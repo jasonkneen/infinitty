@@ -99,6 +99,105 @@ for line in sys.stdin:
         XCTAssertNotEqual(chat["session"] as? String, terminal["session"] as? String)
     }
 
+    func testClaudeBridgePassesNativeEffortAndRespawnsOnlyWhenItChanges() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+for line in sys.stdin:
+    event = json.loads(line)
+    sys.stdout.write(json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": json.dumps({
+            "args": sys.argv[1:],
+            "session": event["session_id"],
+        }),
+    }) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = ClaudeBridge(executableURL: executable)
+        defer { bridge.stop() }
+
+        func result(_ effort: String) async throws -> [String: Any] {
+            let text = try await bridge.turn(
+                prompt: effort, system: "test", model: "test-model",
+                effort: effort, timeout: 2)
+            return try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(text.utf8))
+                    as? [String: Any])
+        }
+
+        let firstLow = try await result("Low")
+        let secondLow = try await result("low")
+        let max = try await result("Max")
+        let auto = try await result("Auto")
+        let none = try await result("None")
+
+        func args(_ result: [String: Any]) throws -> [String] {
+            try XCTUnwrap(result["args"] as? [String])
+        }
+        XCTAssertEqual(try value(after: "--effort", in: args(firstLow)), "low")
+        XCTAssertEqual(firstLow["session"] as? String, secondLow["session"] as? String)
+        XCTAssertEqual(try value(after: "--effort", in: args(max)), "max")
+        XCTAssertNotEqual(max["session"] as? String, secondLow["session"] as? String)
+        XCTAssertFalse(try args(auto).contains("--effort"))
+        XCTAssertNotEqual(auto["session"] as? String, max["session"] as? String)
+        XCTAssertFalse(try args(none).contains("--effort"))
+        XCTAssertEqual(none["session"] as? String, auto["session"] as? String,
+                       "Auto and None share the same provider-default process identity")
+    }
+
+    func testClaudeWarmUpCannotReconfigureBetweenTurnSetupAndRegistration() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+for line in sys.stdin:
+    event = json.loads(line)
+    sys.stdout.write(json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": json.dumps({
+            "args": sys.argv[1:],
+            "session": event["session_id"],
+        }),
+    }) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let processEnsured = expectation(description: "turn process ensured")
+        let allowRegistration = DispatchSemaphore(value: 0)
+        let bridge = ClaudeBridge(
+            executableURL: executable,
+            turnProcessEnsuredForTesting: {
+                processEnsured.fulfill()
+                _ = allowRegistration.wait(timeout: .now() + 3)
+            })
+        defer { bridge.stop() }
+
+        let turn = Task {
+            try await bridge.turn(
+                prompt: "real turn", system: "test", model: "test-model",
+                effort: "High", timeout: 2)
+        }
+        await fulfillment(of: [processEnsured], timeout: 2)
+
+        bridge.warmUp(
+            system: "test", model: "test-model", effort: "Auto")
+        allowRegistration.signal()
+
+        let result = try await turn.value
+        let decoded = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.utf8))
+                as? [String: Any])
+        let arguments = try XCTUnwrap(decoded["args"] as? [String])
+        XCTAssertEqual(value(after: "--effort", in: arguments), "high")
+    }
+
     func testCodexUsesDistinctProcessPoolsForWorkspaceAndTerminalProfiles() {
         XCTAssertFalse(CodexAppServer.shared === CodexAppServer.visibleTerminalShared)
         XCTAssertEqual(CodexAppServer.shared.profile, .workspaceChat)
@@ -287,7 +386,7 @@ for line in sys.stdin:
         XCTAssertEqual(reply, "OK")
     }
 
-    func testCodexBridgeReturnsAccumulatedTextAtTimeoutWithoutCrashing() async throws {
+    func testCodexBridgeTreatsSilenceAfterPartialTextAsIncompleteTimeout() async throws {
         let executable = try makePythonExecutable(#"""
 import json
 import sys
@@ -319,11 +418,177 @@ for line in sys.stdin:
         let bridge = CodexAppServer(executableURL: executable)
         defer { bridge.stop() }
 
+        do {
+            _ = try await bridge.turn(
+                prompt: "hello", cwd: FileManager.default.currentDirectoryPath,
+                model: "test-model", timeout: 0.1)
+            XCTFail("an unterminated partial answer must not be reported as success")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Codex was inactive for the configured turn timeout.")
+        }
+    }
+
+    func testCodexTimeoutRetiresThreadAndRejectsLateTurnOutput() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+import threading
+import time
+
+write_lock = threading.Lock()
+thread_number = 0
+turn_number = 0
+
+def send(value):
+    with write_lock:
+        sys.stdout.write(json.dumps(value) + "\n")
+        sys.stdout.flush()
+
+def late_first_turn(thread_id, turn_id):
+    time.sleep(1.8)
+    send({
+        "method": "item/agentMessage/delta",
+        "params": {"threadId": thread_id, "turnId": turn_id,
+                   "itemId": "old-message", "delta": "|late-old"},
+    })
+    send({
+        "method": "turn/completed",
+        "params": {"threadId": thread_id,
+                   "turn": {"id": turn_id, "status": "completed"}},
+    })
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        result = {"userAgent": "fake-codex"}
+    elif method == "thread/start":
+        thread_number += 1
+        result = {"thread": {"id": "thread-" + str(thread_number)}}
+    elif method == "turn/start":
+        turn_number += 1
+        turn_id = "turn-" + str(turn_number)
+        thread_id = request["params"]["threadId"]
+        send({"id": request["id"], "result": {"turn": {"id": turn_id}}})
+        if turn_number == 1:
+            send({
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": thread_id, "turnId": turn_id,
+                           "itemId": "old-message", "delta": "partial-old"},
+            })
+            threading.Thread(
+                target=late_first_turn,
+                args=(thread_id, turn_id),
+                daemon=True).start()
+        else:
+            time.sleep(2.0)
+            send({
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": thread_id, "turnId": turn_id,
+                           "itemId": "fresh-message",
+                           "delta": "fresh|" + thread_id},
+            })
+            send({
+                "method": "turn/completed",
+                "params": {"threadId": thread_id,
+                           "turn": {"id": turn_id, "status": "completed"}},
+            })
+        continue
+    else:
+        result = {}
+    send({"id": request["id"], "result": result})
+"""#)
+        defer {
+            try? FileManager.default.removeItem(
+                at: executable.deletingLastPathComponent())
+        }
+
+        let bridge = CodexAppServer(executableURL: executable)
+        defer { bridge.stop() }
+
+        do {
+            _ = try await bridge.turn(
+                prompt: "first", cwd: FileManager.default.currentDirectoryPath,
+                model: "test-model", timeout: 1)
+            XCTFail("the incomplete first Codex turn must time out")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Codex was inactive for the configured turn timeout.")
+        }
+
+        let reply = try await bridge.turn(
+            prompt: "second", cwd: FileManager.default.currentDirectoryPath,
+            model: "test-model", timeout: 3)
+
+        XCTAssertEqual(reply, "fresh|thread-2")
+        XCTAssertFalse(reply.contains("partial-old"))
+        XCTAssertFalse(reply.contains("late-old"))
+    }
+
+    func testCodexProviderActivityExtendsTurnPastWallClockTimeout() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+import time
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        result = {"userAgent": "fake-codex"}
+    elif method == "thread/start":
+        result = {"thread": {"id": "thread-active"}}
+    elif method == "turn/start":
+        turn_id = "turn-active"
+        result = {"turn": {"id": turn_id}}
+        sys.stdout.write(json.dumps({"id": request["id"], "result": result}) + "\n")
+        sys.stdout.flush()
+        time.sleep(0.4)
+        sys.stdout.write(json.dumps({
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "thread-active", "turnId": turn_id,
+                       "itemId": "message-1", "delta": "A"},
+        }) + "\n")
+        sys.stdout.flush()
+        time.sleep(0.4)
+        sys.stdout.write(json.dumps({
+            "method": "item/reasoning/textDelta",
+            "params": {"threadId": "thread-active", "turnId": turn_id,
+                       "itemId": "reasoning-1", "delta": "PRIVATE"},
+        }) + "\n")
+        sys.stdout.flush()
+        time.sleep(0.4)
+        sys.stdout.write(json.dumps({
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "thread-active", "turnId": turn_id,
+                       "itemId": "message-1", "delta": "B"},
+        }) + "\n")
+        sys.stdout.write(json.dumps({
+            "method": "turn/completed",
+            "params": {"threadId": "thread-active",
+                       "turn": {"id": turn_id, "status": "completed"}},
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"id": request["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = CodexAppServer(executableURL: executable)
+        defer { bridge.stop() }
+
         let reply = try await bridge.turn(
             prompt: "hello", cwd: FileManager.default.currentDirectoryPath,
-            model: "test-model", timeout: 0.1)
+            model: "test-model", timeout: 1.0)
 
-        XCTAssertEqual(reply, "partial")
+        XCTAssertEqual(reply, "AB")
+        XCTAssertFalse(reply.contains("PRIVATE"))
     }
 
     func testCodexBridgeIsolatesReusesAndReleasesConversationThreads() async throws {
@@ -599,6 +864,289 @@ for line in sys.stdin:
         await fulfillment(of: [partialExp], timeout: 3)
     }
 
+    func testACPBridgeNeverExposesThoughtChunksAsAnswer() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    rid = req.get("id")
+    if method == "session/new":
+        result = {"sessionId": "s1"}
+    elif method == "session/prompt":
+        for kind, text in [
+            ("agent_thought_chunk", "PRIVATE-REASONING-MUST-NOT-LEAK"),
+            ("agent_message_chunk", "Visible answer"),
+        ]:
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0", "method": "session/update",
+                "params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": kind,
+                    "content": {"type": "text", "text": text}}},
+            }) + "\n")
+        sys.stdout.flush()
+        result = {"stopReason": "end_turn"}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = ACPBridge(provider: .hermes, executableURL: executable)
+        defer { bridge.stop() }
+
+        let partialExp = expectation(description: "visible partial streamed")
+        var partials: [String] = []
+        let reply = try await bridge.turn(
+            prompt: "hi", timeout: 2,
+            onPartial: {
+                partials.append($0)
+                partialExp.fulfill()
+            })
+
+        XCTAssertEqual(reply, "Visible answer")
+        await fulfillment(of: [partialExp], timeout: 2)
+        XCTAssertFalse(partials.joined().contains("PRIVATE-REASONING-MUST-NOT-LEAK"))
+    }
+
+    func testACPProviderActivityExtendsTurnPastWallClockTimeout() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+import time
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    rid = req.get("id")
+    if method == "session/new":
+        result = {"sessionId": "s-active"}
+    elif method == "session/prompt":
+        time.sleep(0.4)
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s-active", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "tool-1",
+                "title": "scan", "status": "in_progress"}},
+        }) + "\n")
+        sys.stdout.flush()
+        time.sleep(0.4)
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s-active", "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "PRIVATE"}}},
+        }) + "\n")
+        sys.stdout.flush()
+        time.sleep(0.4)
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s-active", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Visible"}}},
+        }) + "\n")
+        sys.stdout.flush()
+        result = {"stopReason": "end_turn"}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = ACPBridge(provider: .hermes, executableURL: executable)
+        defer { bridge.stop() }
+
+        let reply = try await bridge.turn(prompt: "hi", timeout: 1.0)
+
+        XCTAssertEqual(reply, "Visible")
+        XCTAssertFalse(reply.contains("PRIVATE"))
+    }
+
+    func testACPSilenceAfterPartialTextFailsAndRetiresProcess() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import os
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
+session_id = "session-" + str(os.getpid())
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    rid = req.get("id")
+    if method == "session/new":
+        result = {"sessionId": session_id}
+    elif method == "session/prompt":
+        prompt = req["params"]["prompt"][0]["text"]
+        if "hi" in prompt:
+            text = "incomplete:" + str(os.getpid())
+            delay = 1.8
+            suffix = "late-old"
+        else:
+            text = ""
+            delay = 2.0
+            suffix = "fresh:" + str(os.getpid())
+        if text:
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0", "method": "session/update",
+                "params": {"sessionId": session_id, "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text}}},
+            }) + "\n")
+            sys.stdout.flush()
+        time.sleep(delay)
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": session_id, "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": suffix}}},
+        }) + "\n")
+        sys.stdout.flush()
+        result = {"stopReason": "end_turn"}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = ACPBridge(provider: .hermes, executableURL: executable)
+        defer { bridge.stop() }
+        let firstPartial = AgentBridgeStringValue()
+        let partialReceived = expectation(description: "first ACP process identified")
+
+        do {
+            _ = try await bridge.turn(
+                prompt: "hi", timeout: 1,
+                onPartial: { text in
+                    firstPartial.set(text)
+                    partialReceived.fulfill()
+                })
+            XCTFail("an unterminated partial answer must not be reported as success")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Hermes was inactive for the configured turn timeout.")
+        }
+        await fulfillment(of: [partialReceived], timeout: 2)
+
+        let reply = try await bridge.turn(prompt: "retry", timeout: 3)
+        XCTAssertTrue(reply.hasPrefix("fresh:"), reply)
+        XCTAssertFalse(reply.contains("incomplete"))
+        XCTAssertFalse(reply.contains("late-old"))
+        XCTAssertNotEqual(
+            firstPartial.value.split(separator: ":").last.map(String.init),
+            reply.split(separator: ":").last.map(String.init),
+            "the retry must use a replacement ACP process")
+    }
+
+    func testOpenCodeACPUsesAdvertisedEffortConfigOption() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+efforts = []
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    rid = req.get("id")
+    if method == "session/new":
+        result = {
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "effort",
+                "currentValue": "low",
+                "options": [
+                    {"value": "low", "name": "Low"},
+                    {"value": "high", "name": "High"},
+                ],
+            }],
+        }
+    elif method == "session/set_config_option":
+        if req["params"].get("configId") == "effort":
+            efforts.append(req["params"].get("value"))
+        result = {}
+    elif method == "session/prompt":
+        text = json.dumps(efforts)
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s1", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}}},
+        }) + "\n")
+        sys.stdout.flush()
+        result = {"stopReason": "end_turn"}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = ACPBridge(provider: .opencode, executableURL: executable)
+        defer { bridge.stop() }
+
+        let high = try await bridge.turn(prompt: "hi", effort: "High", timeout: 2)
+        let auto = try await bridge.turn(prompt: "again", effort: "Auto", timeout: 2)
+
+        XCTAssertEqual(try JSONDecoder().decode([String].self, from: Data(high.utf8)), ["high"])
+        XCTAssertEqual(
+            try JSONDecoder().decode([String].self, from: Data(auto.utf8)),
+            ["high", "low"],
+            "Auto restores OpenCode's advertised provider default")
+    }
+
+    func testHermesACPNeverReceivesOpenCodeEffortConfigRPC() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+methods = []
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    methods.append(method)
+    rid = req.get("id")
+    if method == "session/new":
+        result = {
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "effort", "currentValue": "low",
+                "options": [{"value": "low"}, {"value": "max"}],
+            }],
+        }
+    elif method == "session/prompt":
+        text = json.dumps(methods)
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s1", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}}},
+        }) + "\n")
+        sys.stdout.flush()
+        result = {"stopReason": "end_turn"}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let bridge = ACPBridge(provider: .hermes, executableURL: executable)
+        defer { bridge.stop() }
+
+        let text = try await bridge.turn(prompt: "hi", effort: "Max", timeout: 2)
+        let methods = try JSONDecoder().decode([String].self, from: Data(text.utf8))
+        XCTAssertFalse(methods.contains("session/set_config_option"))
+    }
+
     /// Regression for the "responses hang" bug: an error response must
     /// fast-fail the turn instead of riding the full timeout.
     func testACPBridgeFastFailsOnRPCErrorInsteadOfTimeout() async throws {
@@ -794,6 +1342,68 @@ sys.exit(1)
         XCTAssertLessThan(Date().timeIntervalSince(start), 4)
     }
 
+    func testAmpProviderActivityExtendsTurnPastWallClockTimeout() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+import time
+
+time.sleep(0.4)
+sys.stdout.write(json.dumps({
+    "type": "assistant",
+    "message": {"content": [{"type": "text", "text": "A"}]},
+}) + "\n")
+sys.stdout.flush()
+time.sleep(0.4)
+sys.stdout.write(json.dumps({"type": "system", "subtype": "progress"}) + "\n")
+sys.stdout.flush()
+time.sleep(0.4)
+sys.stdout.write(json.dumps({
+    "type": "assistant",
+    "message": {"content": [{"type": "text", "text": "B"}]},
+}) + "\n")
+sys.stdout.write(json.dumps({"type": "result", "result": "AB"}) + "\n")
+sys.stdout.flush()
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let bridge = AmpBridge(executableURL: executable)
+        let partial = expectation(description: "Amp streamed a visible partial")
+        partial.assertForOverFulfill = false
+
+        let reply = try await bridge.turn(
+            prompt: "hello", timeout: 1.0,
+            onPartial: { _ in partial.fulfill() })
+
+        XCTAssertEqual(reply, "AB")
+        await fulfillment(of: [partial], timeout: 2)
+    }
+
+    func testAmpSilenceAfterPartialTextFailsAsIncompleteTimeout() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+import time
+
+sys.stdout.write(json.dumps({
+    "type": "assistant",
+    "message": {"content": [{"type": "text", "text": "incomplete"}]},
+}) + "\n")
+sys.stdout.flush()
+time.sleep(30)
+"""#)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let bridge = AmpBridge(executableURL: executable)
+
+        do {
+            _ = try await bridge.turn(prompt: "hello", timeout: 0.4)
+            XCTFail("an unterminated partial answer must not be reported as success")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Amp was inactive for the configured turn timeout.")
+        }
+    }
+
     func testAmpBridgeCancelsOnlyTheTargetedConversation() async throws {
         let executable = try makePythonExecutable(#"""
 import os
@@ -863,5 +1473,29 @@ sys.stdout.flush()
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: executable.path)
         return executable
+    }
+
+    private func value(after flag: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: flag),
+              arguments.indices.contains(index + 1)
+        else { return nil }
+        return arguments[index + 1]
+    }
+}
+
+private final class AgentBridgeStringValue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = ""
+
+    var value: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func set(_ value: String) {
+        lock.lock()
+        stored = value
+        lock.unlock()
     }
 }

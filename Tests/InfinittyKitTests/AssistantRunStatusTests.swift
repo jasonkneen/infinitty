@@ -1,0 +1,217 @@
+import AIElementsUI
+import XCTest
+@testable import InfinittyKit
+
+@MainActor
+final class AssistantRunStatusTests: XCTestCase {
+    func testReportsModeModelEffortAndHonestVisibleTokenEstimate() {
+        let model = AIAssistantPanelModel()
+        model.terminalAvailable = true
+        model.terminalAccessEnabled = true
+        model.model = "gpt-5.6-luna"
+        model.effort = "Max"
+        model.messages = [
+            UIMessage(role: .user, text: "12345678"),
+            UIMessage(role: .assistant, text: "1234"),
+        ]
+
+        let status = AssistantRunStatusSnapshot(model: model)
+
+        XCTAssertEqual(status.modeLabel, "TERMINAL")
+        XCTAssertEqual(status.modelLabel, "gpt-5.6-luna")
+        XCTAssertEqual(status.effortLabel, "Max")
+        XCTAssertEqual(status.visibleEffortLabel, "Effort Max")
+        XCTAssertEqual(status.estimatedVisibleTokens, 3)
+        XCTAssertEqual(status.visibleTokenLabel, "~3 visible tokens")
+        XCTAssertTrue(status.accessibilityValue.contains("approximately 3"))
+    }
+
+    func testAutoSelectionShowsResolvedProviderProvenance() {
+        let model = AIAssistantPanelModel()
+        model.model = "Auto"
+        model.effort = "Auto"
+        model.streamingAuthor = "Claude"
+
+        XCTAssertEqual(
+            AssistantRunStatusSnapshot(model: model).modelLabel,
+            "Auto → Claude")
+
+        model.streamingAuthor = nil
+        model.messages = [
+            UIMessage(role: .assistant, text: "Timed out", author: "Claude"),
+        ]
+        XCTAssertEqual(
+            AssistantRunStatusSnapshot(model: model).modelLabel,
+            "Auto → Claude",
+            "resolved identity remains visible after the run finishes")
+    }
+
+    func testLifecyclePrecedenceIsExplicit() {
+        let model = AIAssistantPanelModel()
+        XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .ready)
+
+        model.queued = ["next"]
+        XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .queued)
+
+        model.isThinking = true
+        XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .thinking)
+
+        model.streamingText = "answer"
+        XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .responding)
+
+        model.applyTool(id: "tool", name: "search", state: .inputAvailable)
+        var status = AssistantRunStatusSnapshot(model: model)
+        XCTAssertEqual(status.phase, .usingTool)
+        XCTAssertEqual(status.activityLabel, "USING search")
+
+        model.applyTool(id: "tool", name: "search", state: .approvalRequested)
+        status = AssistantRunStatusSnapshot(model: model)
+        XCTAssertEqual(status.phase, .awaitingApproval)
+        XCTAssertEqual(status.activityLabel, "APPROVE search")
+
+        model.applyTool(id: "tool", name: "search", state: .outputError)
+        model.streamingText = nil
+        model.isThinking = false
+        status = AssistantRunStatusSnapshot(model: model)
+        XCTAssertEqual(status.phase, .toolFailed)
+        XCTAssertEqual(status.activityLabel, "FAILED search")
+
+        model.applyTool(id: "tool", name: "search", state: .outputAvailable)
+        XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .queued)
+        model.queued = []
+        XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .ready)
+    }
+
+    func testIncludesToolPayloadsAndAgentCounts() {
+        let model = AIAssistantPanelModel()
+        model.applyTool(
+            id: "tool", name: "read", state: .outputAvailable,
+            input: "1234", output: "12345678")
+        model.roster = [
+            AIAssistantRosterEntry(id: "a", name: "A", detail: "one"),
+            AIAssistantRosterEntry(id: "b", name: "B", detail: "two"),
+            AIAssistantRosterEntry(id: "c", name: "C", detail: "three", isEnabled: false),
+        ]
+
+        let status = AssistantRunStatusSnapshot(model: model)
+        XCTAssertEqual(status.estimatedVisibleTokens, 3)
+        XCTAssertEqual(status.enabledAgentCount, 2)
+        XCTAssertTrue(status.accessibilityValue.contains("2 agents"))
+    }
+
+    func testEarlierFailureDoesNotHideActionableWork() {
+        let model = AIAssistantPanelModel()
+        model.applyTool(id: "failed", name: "read", state: .outputError)
+        model.applyTool(id: "running", name: "build", state: .inputAvailable)
+
+        var status = AssistantRunStatusSnapshot(model: model)
+        XCTAssertEqual(status.phase, .usingTool)
+        XCTAssertEqual(status.activityLabel, "USING build")
+
+        model.applyTool(id: "approval", name: "write", state: .approvalRequested)
+        status = AssistantRunStatusSnapshot(model: model)
+        XCTAssertEqual(status.phase, .awaitingApproval)
+        XCTAssertEqual(status.activityLabel, "APPROVE write")
+    }
+
+    func testDenialIsNotReportedAsFailure() {
+        let model = AIAssistantPanelModel()
+        model.applyTool(id: "tool", name: "write", state: .outputDenied)
+
+        let status = AssistantRunStatusSnapshot(model: model)
+        XCTAssertEqual(status.phase, .toolDenied)
+        XCTAssertEqual(status.activityLabel, "DENIED write")
+    }
+
+    func testRuntimeFailureDoesNotMasqueradeAsReady() {
+        let model = AIAssistantPanelModel()
+        let runState = AssistantRunPresentationState()
+        runState.lastRunFailed = true
+
+        var status = AssistantRunStatusSnapshot(
+            model: model, runState: runState)
+        XCTAssertEqual(status.phase, .runFailed)
+        XCTAssertEqual(status.activityLabel, "RUN FAILED")
+
+        model.queued = ["retry"]
+        status = AssistantRunStatusSnapshot(
+            model: model, runState: runState)
+        XCTAssertEqual(status.phase, .queued)
+    }
+
+    func testProviderUsageReplacesEstimateWithoutInventingContextOccupancy() {
+        let model = AIAssistantPanelModel()
+        model.messages = [UIMessage(role: .user, text: "12345678")]
+        let runState = AssistantRunPresentationState()
+        var telemetry = AssistantRunTelemetrySnapshot()
+        telemetry.beginRun()
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .usage(AssistantRunEvent.Usage(
+                lastTokens: AssistantRunEvent.TokenCounts(
+                    input: 101, output: 29, total: 157),
+                cumulativeTokens: AssistantRunEvent.TokenCounts(total: 583),
+                contextWindowTokens: 200_000))))
+        runState.setTelemetry(telemetry)
+
+        var status = AssistantRunStatusSnapshot(
+            model: model, runState: runState)
+        XCTAssertEqual(status.estimatedVisibleTokens, 2)
+        XCTAssertEqual(status.usageLabel, "157 turn tokens")
+        XCTAssertTrue(status.usageHelp.contains("latest turn"))
+        XCTAssertFalse(status.usageLabel.contains("context"))
+        XCTAssertTrue(status.accessibilityValue.contains("provider reported"))
+
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .usage(AssistantRunEvent.Usage(
+                contextUsedTokens: 321,
+                contextWindowTokens: 8_192,
+                cost: AssistantRunEvent.Cost(
+                    amount: Decimal(string: "0.0125")!, currency: "eur")))))
+        runState.setTelemetry(telemetry)
+        status = AssistantRunStatusSnapshot(model: model, runState: runState)
+
+        XCTAssertEqual(status.usageLabel, "321 / 8.2K context")
+        XCTAssertEqual(status.costLabel, "EUR 0.0125")
+        XCTAssertTrue(status.usageHelp.contains("321 of 8192"))
+    }
+
+    func testSafeReasoningSummaryFoldIsBoundedAndCompletionIsAuthoritative() {
+        var telemetry = AssistantRunTelemetrySnapshot()
+        telemetry.beginRun()
+        let serial = telemetry.runSerial
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .reasoningSummary(.init(
+                state: .delta, text: "Inspecting ",
+                itemID: "reasoning-1", summaryIndex: 0))))
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .reasoningSummary(.init(
+                state: .delta, text: "the failure",
+                itemID: "reasoning-1", summaryIndex: 0))))
+
+        XCTAssertEqual(telemetry.reasoningSummary, "Inspecting the failure")
+        XCTAssertTrue(telemetry.reasoningIsStreaming)
+
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .reasoningSummary(.init(
+                state: .completed, text: "Verified timeout root cause",
+                itemID: "reasoning-1"))))
+        XCTAssertEqual(telemetry.reasoningSummary, "Verified timeout root cause")
+        XCTAssertFalse(telemetry.reasoningIsStreaming)
+
+        telemetry.beginRun()
+        XCTAssertEqual(telemetry.runSerial, serial + 1)
+        XCTAssertNil(telemetry.reasoningSummary)
+        telemetry.apply(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .reasoningSummary(.init(
+                state: .completed, text: String(repeating: "x", count: 20_000)))))
+        XCTAssertLessThanOrEqual(
+            telemetry.reasoningSummary?.utf8.count ?? .max, 12_000)
+        XCTAssertTrue(telemetry.reasoningSummary?.contains("summary truncated") == true)
+    }
+}

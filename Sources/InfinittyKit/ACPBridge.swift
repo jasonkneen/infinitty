@@ -39,6 +39,10 @@ final class ACPBridge: @unchecked Sendable {
     /// child. Only a later explicit warm-up registration clears the marker.
     private var tombstonedConversationIDs = Set<String>()
     private var process: Process?
+    /// Retired ACP children can have a stdout callback already enqueued when
+    /// their handler is cleared. Generation-qualify delivery so those bytes
+    /// cannot enter a replacement session's accumulator.
+    private var processGeneration: UInt64 = 0
     private var stdinHandle: FileHandle?
     private var stdoutHandle: FileHandle?
     private var stderrHandle: FileHandle?
@@ -50,6 +54,9 @@ final class ACPBridge: @unchecked Sendable {
     private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
     private var sessionID: String?
     private var currentModel: String?
+    /// OpenCode's active session-wide effort config value. Hermes does not
+    /// expose this option and must never receive the corresponding RPC.
+    private var currentEffort: String?
     /// The cwd the live session was opened against. A different cwd forces a
     /// new session.
     private var currentCWD: String?
@@ -62,8 +69,13 @@ final class ACPBridge: @unchecked Sendable {
     private var turnAccumulator = ""
     private var onPartial: ((String) -> Void)?
     private var lastPartialAt: Double = 0
+    /// ACP streams progress as uncorrelated session notifications while one
+    /// prompt RPC is active. These fields turn its timeout into an inactivity
+    /// budget without exposing private thought chunks.
+    private var currentPromptRequestID: Int?
+    private var turnStartUptime: Double = 0
+    private var lastTurnActivityUptime: Double = 0
 
-    private static let turnTimeoutSeconds: TimeInterval = 90
     private static let rpcTimeoutSeconds: TimeInterval = 30
     /// `session/new` scans the workspace, so it scales with the directory it's
     /// pointed at: ~4s in a small tree, ~30s at `$HOME`. It needs its own
@@ -133,25 +145,27 @@ final class ACPBridge: @unchecked Sendable {
 
     func warmUp(
         model: String? = nil,
+        effort: String = "Auto",
         cwd: String = ACPBridge.neutralWorkspace,
         conversationID: String? = nil
     ) {
         if let conversationID {
             registerConversationBridge(for: conversationID).warmUpLocally(
-                model: model, cwd: cwd)
+                model: model, effort: effort, cwd: cwd)
             return
         }
-        warmUpLocally(model: model, cwd: cwd)
+        warmUpLocally(model: model, effort: effort, cwd: cwd)
     }
 
-    private func warmUpLocally(model: String?, cwd: String) {
+    private func warmUpLocally(model: String?, effort: String, cwd: String) {
         Task { [weak self] in
             guard let self else { return }
             await self.turnGate.acquire()
             do {
                 try self.ensureLocallyActive()
                 try self.ensureProcess()
-                _ = try await self.ensureSession(model: model, cwd: cwd)
+                _ = try await self.ensureSession(
+                    model: model, effort: effort, cwd: cwd)
             } catch {
                 // Warm-up is deliberately best effort.
             }
@@ -177,7 +191,8 @@ final class ACPBridge: @unchecked Sendable {
         await turnGate.acquire()
         defer { Task { await turnGate.release() } }
         try ensureProcess()
-        _ = try await ensureSession(model: nil, cwd: Self.neutralWorkspace)
+        _ = try await ensureSession(
+            model: nil, effort: "Auto", cwd: Self.neutralWorkspace)
         return queue.sync { sessionSurface }
     }
 
@@ -187,8 +202,10 @@ final class ACPBridge: @unchecked Sendable {
         prompt: String,
         system: String = "",
         model: String? = nil,
+        effort: String = "Auto",
         cwd: String = ACPBridge.neutralWorkspace,
-        timeout: TimeInterval = ACPBridge.turnTimeoutSeconds,
+        timeout: TimeInterval =
+            AssistantTurnTimeoutPolicy.defaultInactivitySeconds,
         conversationID: String? = nil,
         onPartial: ((String) -> Void)? = nil
     ) async throws -> String {
@@ -199,6 +216,7 @@ final class ACPBridge: @unchecked Sendable {
                 prompt: prompt,
                 system: system,
                 model: model,
+                effort: effort,
                 cwd: cwd,
                 timeout: timeout,
                 onPartial: onPartial)
@@ -207,6 +225,7 @@ final class ACPBridge: @unchecked Sendable {
             prompt: prompt,
             system: system,
             model: model,
+            effort: effort,
             cwd: cwd,
             timeout: timeout,
             onPartial: onPartial)
@@ -216,6 +235,7 @@ final class ACPBridge: @unchecked Sendable {
         prompt: String,
         system: String,
         model: String?,
+        effort: String,
         cwd: String,
         timeout: TimeInterval,
         onPartial: ((String) -> Void)?
@@ -225,7 +245,8 @@ final class ACPBridge: @unchecked Sendable {
             try Task.checkCancellation()
             try ensureLocallyActive()
             try ensureProcess()
-            let sessionID = try await ensureSession(model: model, cwd: cwd)
+            let sessionID = try await ensureSession(
+                model: model, effort: effort, cwd: cwd)
             let fullPrompt = system.isEmpty ? prompt : system + "\n\n" + prompt
             queue.sync {
                 self.turnAccumulator = ""
@@ -350,6 +371,7 @@ final class ACPBridge: @unchecked Sendable {
     }
 
     private func teardownLocked() {
+        processGeneration &+= 1
         stdoutHandle?.readabilityHandler = nil
         stderrHandle?.readabilityHandler = nil
         try? stdinHandle?.close()
@@ -360,11 +382,15 @@ final class ACPBridge: @unchecked Sendable {
         process = nil
         sessionID = nil
         currentModel = nil
+        currentEffort = nil
         currentCWD = nil
         sessionSurface = [:]
         turnAccumulator = ""
         onPartial = nil
         lastPartialAt = 0
+        currentPromptRequestID = nil
+        turnStartUptime = 0
+        lastTurnActivityUptime = 0
         stdoutBuffer.removeAll()
         for (_, c) in pending { c.resume(throwing: CancellationError()) }
         pending.removeAll()
@@ -397,12 +423,14 @@ final class ACPBridge: @unchecked Sendable {
             p.terminationHandler = { [weak self] proc in
                 self?.queue.async {
                     guard let self, self.process === proc else { return }
+                    self.processGeneration &+= 1
                     PetLog.log("ACPBridge(\(self.provider.rawValue)).childExit status=\(proc.terminationStatus)")
                     self.stdoutHandle?.readabilityHandler = nil
                     self.stderrHandle?.readabilityHandler = nil
                     self.process = nil
                     self.sessionID = nil
                     self.currentModel = nil
+                    self.currentEffort = nil
                     self.sessionSurface = [:]
                     for (_, continuation) in self.pending {
                         continuation.resume(throwing: ACPBridgeError.processUnavailable(
@@ -413,13 +441,19 @@ final class ACPBridge: @unchecked Sendable {
             }
             try p.run()
             self.process = p
+            let generation = self.processGeneration
             self.stdinHandle = stdin.fileHandleForWriting
             self.stdoutHandle = stdout.fileHandleForReading
             self.stderrHandle = stderr.fileHandleForReading
             stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 if data.isEmpty { handle.readabilityHandler = nil; return }
-                self?.queue.async { self?.consumeStdout(data) }
+                self?.queue.async {
+                    guard let self,
+                          self.processGeneration == generation
+                    else { return }
+                    self.consumeStdout(data)
+                }
             }
             // Drain stderr (logs). An undrained pipe wedges the child.
             stderr.fileHandleForReading.readabilityHandler = { handle in
@@ -429,15 +463,20 @@ final class ACPBridge: @unchecked Sendable {
         }
     }
 
-    private func ensureSession(model: String?, cwd: String) async throws -> String {
+    private func ensureSession(
+        model: String?,
+        effort: String,
+        cwd: String
+    ) async throws -> String {
         // A cwd change invalidates the session: the agent scoped its workspace
         // at session/new and can't be re-pointed afterwards.
         if queue.sync(execute: { currentCWD }) != cwd {
-            queue.sync { sessionID = nil; currentModel = nil; sessionSurface = [:] }
-        }
-        if let sessionID = queue.sync(execute: { sessionID }),
-           model == currentModel || (model?.isEmpty ?? true) {
-            return sessionID
+            queue.sync {
+                sessionID = nil
+                currentModel = nil
+                currentEffort = nil
+                sessionSurface = [:]
+            }
         }
         if queue.sync(execute: { sessionID }) == nil {
             _ = try await sendRequest(
@@ -464,10 +503,14 @@ final class ACPBridge: @unchecked Sendable {
                 sessionID = id
                 sessionSurface = newResponse
                 currentCWD = cwd
+                currentEffort = Self.currentConfigValue(
+                    named: "effort", in: newResponse)
             }
         }
         // Best-effort per-session model selection.
-        if let model, !model.isEmpty, let sid = queue.sync(execute: { sessionID }) {
+        if let model, !model.isEmpty,
+           model != queue.sync(execute: { currentModel }),
+           let sid = queue.sync(execute: { sessionID }) {
             do {
                 switch modelSelection {
                 case .configOption:
@@ -486,10 +529,69 @@ final class ACPBridge: @unchecked Sendable {
                 PetLog.log("ACPBridge(\(provider.rawValue)).setModel failed (using default): \(error.localizedDescription)")
             }
         }
+        // OpenCode advertises effort as a session config option. Apply the
+        // selected value only when the live session says it is supported;
+        // unsupported/Auto values safely restore its advertised default.
+        // Hermes has no such option and must not receive this method.
+        if provider == .opencode,
+           let sid = queue.sync(execute: { sessionID }),
+           let resolvedEffort = resolvedOpenCodeEffort(effort),
+           resolvedEffort != queue.sync(execute: { currentEffort }) {
+            do {
+                _ = try await sendRequest(
+                    method: "session/set_config_option",
+                    params: [
+                        "sessionId": sid,
+                        "configId": "effort",
+                        "value": resolvedEffort,
+                    ],
+                    requiresInitialization: false)
+                queue.sync { currentEffort = resolvedEffort }
+            } catch {
+                PetLog.log(
+                    "ACPBridge(opencode).setEffort failed (using provider default): "
+                        + error.localizedDescription)
+            }
+        }
         guard let sid = queue.sync(execute: { sessionID }) else {
             throw ACPBridgeError.protocolViolation("no session id")
         }
         return sid
+    }
+
+    private func resolvedOpenCodeEffort(_ requested: String) -> String? {
+        let surface = queue.sync { sessionSurface }
+        guard let option = Self.configOption(named: "effort", in: surface),
+              let entries = option["options"] as? [[String: Any]]
+        else { return nil }
+        let values = entries.compactMap { $0["value"] as? String }
+        let requestedValue = NativeReasoningEffort.concreteValue(requested)
+        if let match = values.first(where: {
+            $0.caseInsensitiveCompare(requestedValue ?? "") == .orderedSame
+        }) {
+            return match
+        }
+        guard let providerDefault = option["currentValue"] as? String else {
+            return nil
+        }
+        return values.first(where: {
+            $0.caseInsensitiveCompare(providerDefault) == .orderedSame
+        })
+    }
+
+    private static func configOption(
+        named id: String,
+        in surface: [String: Any]
+    ) -> [String: Any]? {
+        (surface["configOptions"] as? [[String: Any]])?
+            .first { ($0["id"] as? String) == id }
+    }
+
+    private static func currentConfigValue(
+        named id: String,
+        in surface: [String: Any]
+    ) -> String? {
+        configOption(named: id, in: surface)?["currentValue"] as? String
     }
 
     // MARK: - JSON-RPC
@@ -518,16 +620,85 @@ final class ACPBridge: @unchecked Sendable {
                     continuation.resume(throwing: CancellationError()); return
                 }
                 self.pending[requestID] = continuation
+                if method == "session/prompt" {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    self.currentPromptRequestID = requestID
+                    self.turnStartUptime = now
+                    self.lastTurnActivityUptime = now
+                }
                 try? self.stdinHandle?.write(contentsOf: line)
                 try? self.stdinHandle?.write(contentsOf: Data([0x0A]))
-                self.queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-                    guard let self,
-                          let cont = self.pending.removeValue(forKey: requestID) else { return }
-                    cont.resume(throwing: ACPBridgeError.timeout(
-                        "\(self.provider.displayName) did not answer \(method) within \(Int(timeout))s."))
+                if method == "session/prompt" {
+                    self.schedulePromptInactivityTimeout(
+                        requestID: requestID,
+                        timeout: max(timeout, 0.001))
+                } else {
+                    self.queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                        guard let self,
+                              let cont = self.pending.removeValue(forKey: requestID)
+                        else { return }
+                        cont.resume(throwing: ACPBridgeError.timeout(
+                            "\(self.provider.displayName) did not answer \(method) within \(Int(timeout))s."))
+                    }
                 }
             }
         }
+    }
+
+    private func schedulePromptInactivityTimeout(
+        requestID: Int,
+        timeout: TimeInterval
+    ) {
+        let elapsed = ProcessInfo.processInfo.systemUptime - turnStartUptime
+        let delay = min(
+            timeout,
+            max(
+                AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+                    - elapsed,
+                0.001))
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.enforcePromptInactivityTimeout(
+                requestID: requestID, timeout: timeout)
+        }
+    }
+
+    private func enforcePromptInactivityTimeout(
+        requestID: Int,
+        timeout: TimeInterval
+    ) {
+        guard currentPromptRequestID == requestID,
+              let continuation = pending[requestID]
+        else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let idleFor = now - lastTurnActivityUptime
+        let elapsed = now - turnStartUptime
+        let reachedSafetyLimit = elapsed
+            >= AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+        if !reachedSafetyLimit, idleFor < timeout {
+            let delay = min(
+                max(timeout - idleFor, 0.001),
+                max(
+                    AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+                        - elapsed,
+                    0.001))
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.enforcePromptInactivityTimeout(
+                    requestID: requestID, timeout: timeout)
+            }
+            return
+        }
+
+        pending.removeValue(forKey: requestID)
+        currentPromptRequestID = nil
+        // ACP update notifications do not carry our request id. Retire this
+        // process so a late chunk cannot enter the next prompt's accumulator.
+        teardownLocked()
+        let message = reachedSafetyLimit
+            ? "\(provider.displayName) reached the 30-minute turn safety limit."
+            : "\(provider.displayName) was inactive for the configured turn timeout."
+        continuation.resume(throwing: reachedSafetyLimit
+            ? ACPBridgeError.maximumDurationExceeded(message)
+            : ACPBridgeError.timeout(message))
     }
 
     private func consumeStdout(_ chunk: Data) {
@@ -545,6 +716,9 @@ final class ACPBridge: @unchecked Sendable {
     private func handleMessage(_ msg: [String: Any]) {
         // Response to a request we sent (has an id).
         if let id = msg["id"] as? Int, let cont = pending.removeValue(forKey: id) {
+            if currentPromptRequestID == id {
+                currentPromptRequestID = nil
+            }
             if let error = msg["error"] as? [String: Any] {
                 let message = (error["message"] as? String) ?? "ACP error."
                 cont.resume(throwing: ACPBridgeError.rpcError(message))
@@ -558,6 +732,9 @@ final class ACPBridge: @unchecked Sendable {
               let params = msg["params"] as? [String: Any],
               let update = params["update"] as? [String: Any] else { return }
         let kind = update["sessionUpdate"] as? String ?? ""
+        if currentPromptRequestID != nil {
+            lastTurnActivityUptime = ProcessInfo.processInfo.systemUptime
+        }
 
         // ACP reports tool calls as their own update kinds. Surfacing them
         // gives opencode and hermes the same tool cards Claude gets.
@@ -595,13 +772,68 @@ final class ACPBridge: @unchecked Sendable {
             return
         }
 
-        guard kind == "agent_message_chunk" || kind == "agent_thought_chunk" else { return }
+        // ACP's stable usage update reports true context occupancy/capacity
+        // plus an optional provider-priced monetary amount. It does not
+        // report last-turn or cumulative token breakdowns, so those stay nil.
+        if kind == "usage_update" {
+            guard let usage = Self.runUsage(from: update) else { return }
+            AssistantRunEventBus.publish(
+                AssistantRunEvent(
+                    provenance: .providerReported,
+                    update: .usage(usage),
+                    scopeID: eventScopeID))
+            return
+        }
+
+        // ACP thought chunks are private provider reasoning, not guaranteed
+        // user-safe summaries. Only explicit agent messages enter the answer.
+        guard kind == "agent_message_chunk" else { return }
         if let content = update["content"] as? [String: Any],
            (content["type"] as? String) == "text",
            let text = content["text"] as? String, !text.isEmpty {
             turnAccumulator += text
             emitPartialThrottled()
         }
+    }
+
+    private static func runUsage(
+        from update: [String: Any]
+    ) -> AssistantRunEvent.Usage? {
+        let used = integer(update["used"])
+        let size = integer(update["size"])
+        var cost: AssistantRunEvent.Cost?
+        if let rawCost = update["cost"] as? [String: Any],
+           let amount = decimal(rawCost["amount"]),
+           let currency = rawCost["currency"] as? String,
+           !currency.isEmpty {
+            cost = AssistantRunEvent.Cost(
+                amount: amount,
+                currency: currency)
+        }
+        guard used != nil || size != nil || cost != nil else { return nil }
+        return AssistantRunEvent.Usage(
+            lastTokens: nil,
+            cumulativeTokens: nil,
+            contextUsedTokens: used,
+            contextWindowTokens: size,
+            cost: cost)
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        guard let number = value as? NSNumber else { return nil }
+        let double = number.doubleValue
+        guard double.isFinite, double.rounded() == double,
+              double >= Double(Int.min), double <= Double(Int.max) else {
+            return nil
+        }
+        return Int(double)
+    }
+
+    private static func decimal(_ value: Any?) -> Decimal? {
+        guard let number = value as? NSNumber else { return nil }
+        let text = number.description(withLocale: Locale(identifier: "en_US_POSIX"))
+        return Decimal(string: text, locale: Locale(identifier: "en_US_POSIX"))
     }
 
     /// Throttle live partial callbacks to ~10/s so the UI isn't flooded.
@@ -619,12 +851,14 @@ enum ACPBridgeError: LocalizedError {
     case protocolViolation(String)
     case rpcError(String)
     case timeout(String)
+    case maximumDurationExceeded(String)
     case emptyResponse(String)
 
     var errorDescription: String? {
         switch self {
         case .processUnavailable(let m), .protocolViolation(let m),
-             .rpcError(let m), .timeout(let m):
+             .rpcError(let m), .timeout(let m),
+             .maximumDurationExceeded(let m):
             return m
         case .emptyResponse(let provider):
             return "\(provider) returned an empty response."

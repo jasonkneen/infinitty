@@ -78,9 +78,9 @@ struct AppConfig {
     var opencodeModel: String?
     var hermesModel: String?
     var ampModel: String?
-    /// Per-turn bridge timeout in seconds. Falls back to the bridges'
-    /// default (90s) when nil. Raised/lowered to taste; a stalled turn
-    /// fails fast at this bound instead of looking hung.
+    /// Per-turn inactivity timeout in seconds. Falls back to the bridges'
+    /// default (300s) when nil. Productive provider/tool events extend a turn;
+    /// a silent child still fails at this bound instead of looking hung.
     var aiTurnTimeout: Double?
     /// Recently typed custom model ids (most-recent first), shown at the
     /// top of the model picker. Persisted so gateway/preview models

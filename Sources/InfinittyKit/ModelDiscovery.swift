@@ -1,5 +1,43 @@
 import Foundation
 
+/// Canonical reasoning-effort values shared by the picker and native
+/// provider transports. UI labels are title-cased, while every provider wire
+/// surface expects lowercase identifiers.
+enum NativeReasoningEffort {
+    static let claudeSupportedValues = ["low", "medium", "high", "xhigh", "max"]
+    static let codexSafeDefault = "medium"
+
+    /// Normalizes a concrete effort selection. `Auto` and unknown values are
+    /// deliberately nil so each provider can apply its own safe default.
+    static func concreteValue(_ rawValue: String) -> String? {
+        let value = rawValue.trimmingCharacters(
+            in: .whitespacesAndNewlines).lowercased()
+        switch value {
+        case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+            return value
+        default:
+            return nil
+        }
+    }
+
+    /// Codex app-server requires an effort on `turn/start`. Preserve its
+    /// previous safe/default behavior for Auto or an unrecognized picker
+    /// value, while forwarding every known native level in canonical form.
+    static func codexValue(_ rawValue: String) -> String {
+        concreteValue(rawValue) ?? codexSafeDefault
+    }
+
+    /// Claude's locally installed CLI accepts exactly these five values.
+    /// Auto/None/unsupported values omit `--effort`; their prompt directive
+    /// still reaches the turn text.
+    static func claudeValue(_ rawValue: String) -> String? {
+        guard let value = concreteValue(rawValue),
+              claudeSupportedValues.contains(value)
+        else { return nil }
+        return value
+    }
+}
+
 /// One selectable model in the composer's MODEL chip.
 ///
 /// `id` is what gets routed to the CLI; `name` is what the user reads. The two
@@ -214,17 +252,24 @@ actor ModelDiscovery {
     static func staticModels(
         for kind: PetAssistant.AgentChoice.Kind
     ) -> [DiscoveredModel] {
-        func model(_ id: String, _ name: String, isDefault: Bool = false) -> DiscoveredModel {
+        func model(
+            _ id: String,
+            _ name: String,
+            isDefault: Bool = false,
+            efforts: [String] = []
+        ) -> DiscoveredModel {
             DiscoveredModel(id: id, name: name, description: nil, isDefault: isDefault,
-                            efforts: [], defaultEffort: nil, group: nil)
+                            efforts: efforts, defaultEffort: nil, group: nil)
         }
         switch kind {
         case .claude:
+            let efforts = NativeReasoningEffort.claudeSupportedValues
             return [
-                model("claude-fable-5", "Claude Fable 5", isDefault: true),
-                model("claude-opus-4-8", "Claude Opus 4.8"),
-                model("claude-sonnet-5", "Claude Sonnet 5"),
-                model("claude-haiku-4-5", "Claude Haiku 4.5"),
+                model("claude-fable-5", "Claude Fable 5", isDefault: true,
+                      efforts: efforts),
+                model("claude-opus-4-8", "Claude Opus 4.8", efforts: efforts),
+                model("claude-sonnet-5", "Claude Sonnet 5", efforts: efforts),
+                model("claude-haiku-4-5", "Claude Haiku 4.5", efforts: efforts),
             ]
         case .codex:
             return [
@@ -279,7 +324,13 @@ actor ModelDiscovery {
 /// `RecentCustomModels`: this is derived data and must never clobber the user's
 /// hand-edited config.
 enum ModelCatalogCache {
-    private static var fileURL: URL? {
+    private static func resolvedFileURL(_ overrideURL: URL? = nil) -> URL? {
+        if let overrideURL {
+            try? FileManager.default.createDirectory(
+                at: overrideURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            return overrideURL
+        }
         guard let base = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
         let dir = base.appendingPathComponent("infinitty", isDirectory: true)
@@ -287,14 +338,23 @@ enum ModelCatalogCache {
         return dir.appendingPathComponent("model-catalog.json")
     }
 
-    static func load(for kind: PetAssistant.AgentChoice.Kind) -> [DiscoveredModel]? {
-        guard let entries = loadAll()[kind.configuredProviderKey] else { return nil }
+    static func load(
+        for kind: PetAssistant.AgentChoice.Kind,
+        from overrideURL: URL? = nil
+    ) -> [DiscoveredModel]? {
+        guard let url = resolvedFileURL(overrideURL),
+              let entries = loadAll(from: url)[kind.configuredProviderKey]
+        else { return nil }
         return entries.map(decode)
     }
 
-    static func store(_ models: [DiscoveredModel], for kind: PetAssistant.AgentChoice.Kind) {
-        guard let url = fileURL else { return }
-        var all = loadAll()
+    static func store(
+        _ models: [DiscoveredModel],
+        for kind: PetAssistant.AgentChoice.Kind,
+        at overrideURL: URL? = nil
+    ) {
+        guard let url = resolvedFileURL(overrideURL) else { return }
+        var all = loadAll(from: url)
         all[kind.configuredProviderKey] = models.map(encode)
         guard let data = try? JSONSerialization.data(
             withJSONObject: all, options: [.prettyPrinted, .sortedKeys]) else { return }
@@ -302,14 +362,13 @@ enum ModelCatalogCache {
     }
 
     /// Test seam: forget every cached provider list.
-    static func clearForTesting() {
-        guard let url = fileURL else { return }
+    static func clearForTesting(at overrideURL: URL? = nil) {
+        guard let url = resolvedFileURL(overrideURL) else { return }
         try? FileManager.default.removeItem(at: url)
     }
 
-    private static func loadAll() -> [String: [[String: Any]]] {
-        guard let url = fileURL,
-              let data = try? Data(contentsOf: url),
+    private static func loadAll(from url: URL) -> [String: [[String: Any]]] {
+        guard let data = try? Data(contentsOf: url),
               let parsed = try? JSONSerialization.jsonObject(with: data)
                 as? [String: [[String: Any]]]
         else { return [:] }

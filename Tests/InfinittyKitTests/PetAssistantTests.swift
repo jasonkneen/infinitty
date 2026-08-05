@@ -298,6 +298,15 @@ final class PetAssistantTests: XCTestCase {
             backend: .codex(model: "gpt-test"), cwd: "/tmp/work",
             profile: .visibleTerminal)
         XCTAssertNotEqual(chatSignature, terminalSignature)
+
+        let claudeLow = PetAssistant.backendSessionSignatureForTesting(
+            backend: .claude(model: "claude-test"), effort: "Low",
+            cwd: "/tmp/work", profile: .workspaceChat)
+        let claudeMax = PetAssistant.backendSessionSignatureForTesting(
+            backend: .claude(model: "claude-test"), effort: "Max",
+            cwd: "/tmp/work", profile: .workspaceChat)
+        XCTAssertNotEqual(claudeLow, claudeMax,
+                          "a native Claude effort change starts a fresh CLI session")
     }
 
     func testStatefulModeToggleReleasesAndBootstrapsNewProfileLifecycle() {
@@ -563,7 +572,7 @@ final class PetAssistantTests: XCTestCase {
 
         let messages =
             assistant.controlState().threads.first?.messages
-        XCTAssertEqual(messages?.map(\.role), ["You", "System"])
+        XCTAssertEqual(messages?.map(\.role), ["You", "Failure"])
         XCTAssertEqual(
             messages?.last?.text,
             "remote authentication failed")
@@ -695,6 +704,74 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
     }
 
+    func testComposerPropagatesExtendedEffortIntoTheBackendTurn() {
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex,
+            modelID: "gpt-test",
+            displayName: "Codex · GPT Test",
+            symbolName: "o.circle",
+            supportedEfforts: ["low", "xhigh", "max", "ultra"])
+        let started = expectation(description: "backend received effort directive")
+        var backendUser = ""
+        var dispatchedEffort = ""
+        var dispatchedBackend: PetAssistant.Backend?
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            availableChoices: [.auto, codex],
+            backendRunner: { _, _, user, _, _, _, _, done in
+                backendUser = user
+                started.fulfill()
+                done(.text("ok"))
+            },
+            backendInvocationObserver: { backend, effort in
+                dispatchedBackend = backend
+                dispatchedEffort = effort
+            },
+            backendWorkScheduler: { $0() })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        XCTAssertTrue(panel.selectEffort(named: "Max"))
+        panel.submitForTesting("solve this")
+
+        wait(for: [started], timeout: 2)
+        XCTAssertTrue(backendUser.contains("Reasoning effort: MAX."))
+        XCTAssertEqual(dispatchedBackend, .codex(model: "gpt-test"))
+        XCTAssertEqual(dispatchedEffort, "Max")
+    }
+
+    func testPrewarmPreservesTheActiveThreadsLastClaudeEffort() {
+        var config = AppConfig()
+        config.aiProvider = "claude"
+        config.claudeModel = "claude-test"
+        let claude = PetAssistant.AgentChoice(
+            kind: .claude,
+            modelID: "claude-test",
+            displayName: "Claude Test",
+            symbolName: "a.circle",
+            supportedEfforts: ["low", "high", "max"])
+        var scheduled: [() -> Void] = []
+        let assistant = PetAssistant(
+            config: config,
+            availableChoices: [.auto, claude],
+            backendRunner: { _, _, _, _, _, _, _, _ in },
+            backendWorkScheduler: { scheduled.append($0) })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.selectModelForTesting(1)
+        XCTAssertTrue(panel.selectEffort(named: "Max"))
+        panel.submitForTesting("hold this turn at the transport boundary")
+        XCTAssertEqual(scheduled.count, 1)
+        XCTAssertEqual(assistant.activeLastSelectedEffortForTesting, "Max")
+        let turnSignature = assistant.activeBackendSessionSignatureForTesting
+        XCTAssertTrue(turnSignature?.contains("effort:max") == true)
+
+        assistant.prewarm()
+
+        XCTAssertEqual(assistant.activeBackendSessionSignatureForTesting, turnSignature)
+        XCTAssertEqual(assistant.activeLastSelectedEffortForTesting, "Max")
+    }
+
     func testComposerControlsSitBelowInputAndQueuedTurnsSitAboveIt() {
         ShadcnChatFeature.overrideForTesting = false
         defer { ShadcnChatFeature.overrideForTesting = nil }
@@ -744,6 +821,215 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(panel.queuedMessagesForTesting, [])
         XCTAssertTrue(panel.transcriptForTesting.hasSuffix("ASSISTANT\nthird answer"))
         XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+    }
+
+    func testVisibleShadKitStopCancelsActiveAndQueuedWork() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        var completions: [PetAssistant.AskCompletion] = []
+        let assistant = PetAssistant(
+            config: AppConfig(),
+            requestRunner: { _, _, _, completion in
+                completions.append(completion)
+            })
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("active")
+        panel.submitForTesting("queued")
+        XCTAssertTrue(assistant.controlState().requestInFlight)
+        XCTAssertEqual(panel.queuedMessagesForTesting, ["queued"])
+        XCTAssertTrue(panel.isShowingTypingIndicatorForTesting)
+
+        panel.stopForTesting()
+
+        XCTAssertFalse(assistant.controlState().requestInFlight)
+        XCTAssertTrue(panel.queuedMessagesForTesting.isEmpty)
+        XCTAssertFalse(panel.isShowingTypingIndicatorForTesting)
+
+        completions[0]("late answer", [], nil)
+        XCTAssertFalse(panel.transcriptForTesting.contains("late answer"))
+    }
+
+    func testVisibleShadKitStopOnlyCancelsTheSelectedThread() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let codex = PetAssistant.AgentChoice(
+            kind: .codex, modelID: "gpt-stop-test",
+            displayName: "Codex stop test", symbolName: "o.circle")
+        var started: [String] = []
+        var completions: [String: (PetAssistant.AIOutcome) -> Void] = [:]
+        var conversationIDs: [String: String] = [:]
+        var registrations: [String] = []
+        var releases: [String] = []
+        let seedFinished = expectation(description: "thread A seed completed")
+        let queuedFinished = expectation(description: "thread A queue completed")
+        let assistant = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, codex],
+            backendRunner: { backend, _, user, _, conversationID, _, _, done in
+                XCTAssertEqual(backend, .codex(model: "gpt-stop-test"))
+                let label = [
+                    "thread A seed", "thread B active", "thread A queued",
+                ].first(where: { user.contains($0) }) ?? user
+                started.append(label)
+                completions[label] = done
+                conversationIDs[label] = conversationID ?? ""
+            },
+            backendWorkScheduler: { $0() },
+            conversationRegistrar: { backend, _, _, conversationID in
+                XCTAssertEqual(backend, .codex(model: "gpt-stop-test"))
+                registrations.append(conversationID)
+            },
+            conversationReleaser: { releases.append($0) })
+        assistant.onPetMessage = { text in
+            if text == "thread A answer" { seedFinished.fulfill() }
+            if text == "queued A answer" { queuedFinished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+        panel.selectModelForTesting(1)
+
+        panel.submitForTesting("thread A seed")
+        completions["thread A seed"]?(.text("thread A answer"))
+        wait(for: [seedFinished], timeout: 2)
+        let threadA = assistant.threadIdsForTesting[0]
+        let idA = conversationIDs["thread A seed"]
+
+        panel.newChatForTesting()
+        let threadB = assistant.threadIdsForTesting[0]
+        panel.submitForTesting("thread B active")
+        let idB = conversationIDs["thread B active"]
+        assistant.selectThreadForTesting(threadA)
+        panel.submitForTesting("thread A queued")
+
+        assistant.selectThreadForTesting(threadB)
+        panel.stopForTesting()
+
+        XCTAssertEqual(
+            started,
+            ["thread A seed", "thread B active", "thread A queued"],
+            "stopping B must preserve and immediately resume A's queued turn")
+        XCTAssertEqual(conversationIDs["thread A queued"], idA)
+        XCTAssertEqual(registrations, [idA, idB].compactMap { $0 })
+        XCTAssertEqual(releases, [idB].compactMap { $0 })
+        XCTAssertFalse(releases.contains(idA ?? ""))
+
+        completions["thread B active"]?(.text("stale B answer"))
+        completions["thread A queued"]?(.text("queued A answer"))
+        wait(for: [queuedFinished], timeout: 2)
+
+        assistant.selectThreadForTesting(threadA)
+        XCTAssertTrue(panel.transcriptForTesting.contains("queued A answer"))
+        XCTAssertFalse(panel.transcriptForTesting.contains("stale B answer"))
+    }
+
+    func testAutoRunShowsResolvedProviderAndRetainsFailureState() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        var config = AppConfig()
+        config.aiProvider = "claude"
+        config.claudeModel = "claude-test"
+        var done: ((PetAssistant.AIOutcome) -> Void)?
+        let assistant = PetAssistant(
+            config: config,
+            availableChoices: [.auto],
+            backendRunner: { backend, _, _, _, _, _, _, completion in
+                XCTAssertEqual(backend, .claude(model: "claude-test"))
+                done = completion
+            },
+            backendWorkScheduler: { $0() })
+        let finished = expectation(description: "failure rendered")
+        assistant.onPetMessage = { text in
+            if text.contains("configured turn timeout") {
+                finished.fulfill()
+            }
+        }
+        let panel = assistant.makeSidebarPanelView()
+
+        panel.submitForTesting("review everything")
+
+        XCTAssertEqual(
+            panel.shadcnStreamingAuthorForTesting,
+            "Claude · claude-test")
+        done?(.failure("Claude was inactive for the configured turn timeout."))
+        wait(for: [finished], timeout: 2)
+
+        XCTAssertEqual(
+            panel.shadcnLastMessageAuthorForTesting,
+            "Claude · claude-test")
+        XCTAssertTrue(panel.shadcnLastMessageIsSystemForTesting)
+        XCTAssertEqual(panel.shadcnRunPhaseForTesting, .runFailed)
+    }
+
+    func testRunTelemetryIsScopedRetainedAndRejectsLateEvents() throws {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        var config = AppConfig()
+        config.aiProvider = "claude"
+        config.claudeModel = "claude-test"
+        var scopeID: String?
+        var done: ((PetAssistant.AIOutcome) -> Void)?
+        let assistant = PetAssistant(
+            config: config,
+            availableChoices: [.auto],
+            backendRunner: { _, _, _, _, conversationID, _, _, completion in
+                scopeID = conversationID
+                done = completion
+            },
+            backendWorkScheduler: { $0() })
+        let finished = expectation(description: "telemetry run completed")
+        assistant.onPetMessage = { text in
+            if text == "done" { finished.fulfill() }
+        }
+        let panel = assistant.makeSidebarPanelView()
+        let originalThread = try XCTUnwrap(assistant.threadIdsForTesting.first)
+
+        panel.submitForTesting("inspect telemetry")
+        let activeScope = try XCTUnwrap(scopeID)
+        AssistantRunEventBus.publish(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .usage(AssistantRunEvent.Usage(
+                contextUsedTokens: 512,
+                contextWindowTokens: 16_384,
+                cost: AssistantRunEvent.Cost(
+                    amount: Decimal(string: "0.01")!, currency: "USD"))),
+            scopeID: activeScope))
+        AssistantRunEventBus.publish(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .reasoningSummary(.init(
+                state: .completed,
+                text: "Checked the provider-designated summary only")),
+            scopeID: activeScope))
+
+        XCTAssertEqual(panel.shadcnUsageLabelForTesting, "512 / 16.4K context")
+        XCTAssertEqual(panel.shadcnUsageCostLabelForTesting, "USD 0.01")
+        XCTAssertEqual(
+            panel.shadcnReasoningSummaryForTesting,
+            "Checked the provider-designated summary only")
+
+        AssistantRunEventBus.publish(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .usage(AssistantRunEvent.Usage(contextUsedTokens: 999)),
+            scopeID: "wrong-scope"))
+        XCTAssertEqual(panel.shadcnUsageLabelForTesting, "512 / 16.4K context")
+
+        done?(.text("done"))
+        wait(for: [finished], timeout: 2)
+        AssistantRunEventBus.publish(AssistantRunEvent(
+            provenance: .providerReported,
+            update: .usage(AssistantRunEvent.Usage(contextUsedTokens: 999)),
+            scopeID: activeScope))
+        XCTAssertEqual(panel.shadcnUsageLabelForTesting, "512 / 16.4K context")
+
+        assistant.startNewChat()
+        XCTAssertEqual(panel.shadcnUsageLabelForTesting, "~0 visible tokens")
+        assistant.selectThreadForTesting(originalThread)
+        XCTAssertEqual(panel.shadcnUsageLabelForTesting, "512 / 16.4K context")
+        XCTAssertEqual(
+            panel.shadcnReasoningSummaryForTesting,
+            "Checked the provider-designated summary only")
     }
 
     func testRecoveredSessionImportsTurnsAndPrefixesFirstRequest() throws {
