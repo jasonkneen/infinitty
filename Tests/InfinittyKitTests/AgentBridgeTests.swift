@@ -1425,6 +1425,104 @@ for line in sys.stdin:
         await fulfillment(of: [eventReceived], timeout: 2)
     }
 
+    func testACPApprovalRequestIDCollisionRoutesThroughScopedBroker() async throws {
+        let executable = try makePythonExecutable(#"""
+import json
+import sys
+
+pending = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    rid = req.get("id")
+    if method == "session/new":
+        result = {"sessionId": "s-approval"}
+    elif method == "session/prompt":
+        pending = rid
+        # Deliberately collide with the still-pending session/prompt id.
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "s-approval",
+                "toolCall": {
+                    "toolCallId": "tool-approval",
+                    "kind": "execute",
+                    "title": "Run focused tests",
+                    "rawInput": {"command": "swift test --filter ACP"},
+                },
+                "options": [
+                    {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "always", "name": "Allow always", "kind": "allow_always"},
+                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        }) + "\n")
+        sys.stdout.flush()
+        continue
+    elif method is None and pending is not None and rid == pending:
+        outcome = req["result"]["outcome"]
+        text = outcome["outcome"] + "|" + outcome.get("optionId", "")
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": "s-approval", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}}},
+        }) + "\n")
+        sys.stdout.write(json.dumps({
+            "jsonrpc": "2.0", "id": pending,
+            "result": {"stopReason": "end_turn"},
+        }) + "\n")
+        sys.stdout.flush()
+        pending = None
+        continue
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({
+        "jsonrpc": "2.0", "id": rid, "result": result,
+    }) + "\n")
+    sys.stdout.flush()
+"""#)
+        defer {
+            try? FileManager.default.removeItem(
+                at: executable.deletingLastPathComponent())
+        }
+
+        let scope = "acp-approval-\(UUID().uuidString)"
+        let promptShown = expectation(description: "ACP approval shown")
+        let subscription = AssistantApprovalEventBus.subscribe(scopeID: scope) {
+            event in
+            guard event.state == .requested else { return }
+            XCTAssertEqual(event.request.provider, "Hermes")
+            XCTAssertEqual(event.request.kind, .commandExecution)
+            XCTAssertTrue(
+                event.request.input?.contains("swift test --filter ACP") == true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                XCTAssertTrue(AssistantApprovalBroker.shared.resolve(
+                    id: event.request.id,
+                    scopeID: scope,
+                    decision: .allowSession))
+            }
+            promptShown.fulfill()
+        }
+        defer {
+            subscription.cancel()
+            AssistantApprovalBroker.shared.cancel(scopeID: scope)
+        }
+        let bridge = ACPBridge(provider: .hermes, executableURL: executable)
+        defer { bridge.stop() }
+
+        let text = try await bridge.turn(
+            prompt: "run tests",
+            timeout: 0.1,
+            conversationID: scope)
+
+        await fulfillment(of: [promptShown], timeout: 2)
+        XCTAssertEqual(text, "selected|always")
+    }
+
     func testAmpBridgeReturnsProviderOutput() async throws {
         let executable = try makePythonExecutable(#"""
 import os

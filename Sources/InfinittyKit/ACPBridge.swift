@@ -372,6 +372,9 @@ final class ACPBridge: @unchecked Sendable {
 
     private func teardownLocked() {
         processGeneration &+= 1
+        if let eventScopeID {
+            AssistantApprovalBroker.shared.cancel(scopeID: eventScopeID)
+        }
         stdoutHandle?.readabilityHandler = nil
         stderrHandle?.readabilityHandler = nil
         try? stdinHandle?.close()
@@ -432,6 +435,10 @@ final class ACPBridge: @unchecked Sendable {
                     self.currentModel = nil
                     self.currentEffort = nil
                     self.sessionSurface = [:]
+                    self.currentPromptRequestID = nil
+                    if let scopeID = self.eventScopeID {
+                        AssistantApprovalBroker.shared.cancel(scopeID: scopeID)
+                    }
                     for (_, continuation) in self.pending {
                         continuation.resume(throwing: ACPBridgeError.processUnavailable(
                             "\(self.provider.displayName) bridge exited (\(proc.terminationStatus))."))
@@ -674,6 +681,14 @@ final class ACPBridge: @unchecked Sendable {
         let elapsed = now - turnStartUptime
         let reachedSafetyLimit = elapsed
             >= AssistantTurnTimeoutPolicy.maximumTurnDurationSeconds
+        if !reachedSafetyLimit,
+           AssistantApprovalBroker.shared.hasPending(scopeID: eventScopeID) {
+            queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.enforcePromptInactivityTimeout(
+                    requestID: requestID, timeout: timeout)
+            }
+            return
+        }
         if !reachedSafetyLimit, idleFor < timeout {
             let delay = min(
                 max(timeout - idleFor, 0.001),
@@ -714,6 +729,18 @@ final class ACPBridge: @unchecked Sendable {
     }
 
     private func handleMessage(_ msg: [String: Any]) {
+        // Agent-to-client requests also carry ids. Route them before matching
+        // client request continuations because JSON-RPC ids are independently
+        // allocated in each direction and can legitimately collide.
+        if let method = msg["method"] as? String,
+           let id = ServerRequestID(message: msg) {
+            handleServerRequest(
+                id: id,
+                method: method,
+                params: (msg["params"] as? [String: Any]) ?? [:])
+            return
+        }
+
         // Response to a request we sent (has an id).
         if let id = msg["id"] as? Int, let cont = pending.removeValue(forKey: id) {
             if currentPromptRequestID == id {
@@ -793,6 +820,108 @@ final class ACPBridge: @unchecked Sendable {
            let text = content["text"] as? String, !text.isEmpty {
             turnAccumulator += text
             emitPartialThrottled()
+        }
+    }
+
+    private func handleServerRequest(
+        id: ServerRequestID,
+        method: String,
+        params: [String: Any]
+    ) {
+        guard method == ACPApprovalAdapter.method else {
+            writeRPCError(
+                id: id,
+                code: -32601,
+                message: "Infinitty does not support ACP client request \(method).")
+            return
+        }
+        guard let scopeID = eventScopeID,
+              let requestSessionID = params["sessionId"] as? String,
+              requestSessionID == sessionID,
+              let request = ACPApprovalAdapter.request(
+                params: params,
+                scopeID: scopeID,
+                provider: provider.displayName)
+        else {
+            writeRPCResult(
+                id: id,
+                result: ACPApprovalAdapter.response(
+                    params: params, decision: .cancel))
+            return
+        }
+
+        let generation = processGeneration
+        if currentPromptRequestID != nil {
+            lastTurnActivityUptime = ProcessInfo.processInfo.systemUptime
+        }
+        AssistantApprovalBroker.shared.request(request) { [weak self] decision in
+            self?.queue.async { [weak self] in
+                guard let self,
+                      self.processGeneration == generation,
+                      self.process?.isRunning == true
+                else { return }
+                if self.currentPromptRequestID != nil {
+                    self.lastTurnActivityUptime = ProcessInfo.processInfo.systemUptime
+                }
+                self.writeRPCResult(
+                    id: id,
+                    result: ACPApprovalAdapter.response(
+                        params: params, decision: decision))
+            }
+        }
+    }
+
+    private func writeRPCResult(
+        id: ServerRequestID,
+        result: [String: Any]
+    ) {
+        writeRPCObject([
+            "jsonrpc": "2.0",
+            "id": id.jsonValue,
+            "result": result,
+        ])
+    }
+
+    private func writeRPCError(
+        id: ServerRequestID,
+        code: Int,
+        message: String
+    ) {
+        writeRPCObject([
+            "jsonrpc": "2.0",
+            "id": id.jsonValue,
+            "error": ["code": code, "message": message],
+        ])
+    }
+
+    private func writeRPCObject(_ object: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys, .withoutEscapingSlashes])
+        else { return }
+        try? stdinHandle?.write(contentsOf: data)
+        try? stdinHandle?.write(contentsOf: Data([0x0A]))
+    }
+
+    /// ACP request ids may be integers, strings, or null. Preserve the exact
+    /// JSON-compatible value in the response rather than assuming the integer
+    /// ids Infinitty itself allocates for client-to-agent requests.
+    private struct ServerRequestID {
+        let jsonValue: Any
+
+        init?(message: [String: Any]) {
+            guard message.keys.contains("id") else { return nil }
+            let raw = message["id"]
+            if raw is NSNull {
+                jsonValue = NSNull()
+            } else if let string = raw as? String {
+                jsonValue = string
+            } else if let integer = raw as? Int {
+                jsonValue = integer
+            } else {
+                return nil
+            }
         }
     }
 
