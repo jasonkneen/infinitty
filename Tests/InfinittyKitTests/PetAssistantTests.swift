@@ -464,6 +464,18 @@ final class PetAssistantTests: XCTestCase {
             presentation: .sidebar,
             config: AppConfig(),
             hasExternalNewChatAction: false)
+        panel.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
+        let window = NSWindow(
+            contentRect: panel.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = panel
+        window.orderFront(nil)
+        defer { window.close() }
+        window.layoutIfNeeded()
+        panel.layoutSubtreeIfNeeded()
         var newChatPresses = 0
         panel.onNewChat = { newChatPresses += 1 }
 
@@ -471,6 +483,12 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(
             panel.legacyNewChatAccessibilityLabelForTesting,
             "New Chat")
+        XCTAssertGreaterThanOrEqual(
+            panel.legacyNewChatFrameForTesting.height, 24)
+        XCTAssertTrue(
+            panel.bounds.contains(panel.legacyNewChatFrameForTesting),
+            "the legacy New Chat control must stay inside the sidebar")
+        XCTAssertTrue(panel.legacyNewChatIsHitTargetForTesting)
 
         panel.pressLegacyNewChatButtonForTesting()
 

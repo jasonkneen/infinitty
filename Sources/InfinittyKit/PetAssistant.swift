@@ -1084,7 +1084,16 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func headerConstraints() -> [NSLayoutConstraint] {
-        if presentation == .sidebar { return [] }
+        if presentation == .sidebar {
+            guard !hasExternalNewChatAction else { return [] }
+            return [
+                newChatButton.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+                newChatButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+                newChatButton.trailingAnchor.constraint(
+                    lessThanOrEqualTo: trailingAnchor, constant: -10),
+                newChatButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            ]
+        }
         let newChatTrailing = presentation == .popover
             ? newChatButton.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -8)
             : newChatButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -13)
@@ -1103,12 +1112,22 @@ final class PetAssistantPanelView: NSView {
     }
 
     private func bodyConstraints() -> [NSLayoutConstraint] {
-        let transcriptTop = presentation == .sidebar
-            ? transcriptScroll.topAnchor.constraint(equalTo: topAnchor)
-            : transcriptScroll.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 4)
-        let emptyTop = presentation == .sidebar
-            ? emptyStateLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2)
-            : emptyStateLabel.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 18)
+        let transcriptTop: NSLayoutConstraint
+        let emptyTop: NSLayoutConstraint
+        if presentation == .sidebar, !hasExternalNewChatAction {
+            transcriptTop = transcriptScroll.topAnchor.constraint(
+                equalTo: newChatButton.bottomAnchor, constant: 5)
+            emptyTop = emptyStateLabel.topAnchor.constraint(
+                equalTo: newChatButton.bottomAnchor, constant: 7)
+        } else if presentation == .sidebar {
+            transcriptTop = transcriptScroll.topAnchor.constraint(equalTo: topAnchor)
+            emptyTop = emptyStateLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2)
+        } else {
+            transcriptTop = transcriptScroll.topAnchor.constraint(
+                equalTo: separator.bottomAnchor, constant: 4)
+            emptyTop = emptyStateLabel.topAnchor.constraint(
+                equalTo: separator.bottomAnchor, constant: 18)
+        }
         queueHeightConstraint = queueScroll.heightAnchor.constraint(equalToConstant: 0)
         return [
             transcriptTop,
@@ -1902,6 +1921,14 @@ final class PetAssistantPanelView: NSView {
     }
     var legacyNewChatAccessibilityLabelForTesting: String {
         newChatButton.accessibilityLabel() ?? ""
+    }
+    var legacyNewChatFrameForTesting: NSRect { newChatButton.frame }
+    var legacyNewChatIsHitTargetForTesting: Bool {
+        guard !newChatButton.isHidden else { return false }
+        let center = convert(
+            NSPoint(x: newChatButton.bounds.midX, y: newChatButton.bounds.midY),
+            from: newChatButton)
+        return hitTest(center) === newChatButton
     }
     var showsCloseButtonForTesting: Bool { !closeButton.isHidden }
     var usesGlassSurfaceForTesting: Bool { presentation == .popover }
