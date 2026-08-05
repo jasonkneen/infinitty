@@ -593,7 +593,8 @@ final class PetAssistantPanelView: NSView {
         newChatButton.contentTintColor = .labelColor
         newChatButton.target = self
         newChatButton.action = #selector(newChatTapped)
-        newChatButton.isHidden = presentation == .sidebar
+        newChatButton.setAccessibilityLabel("New Chat")
+        newChatButton.isHidden = presentation == .sidebar && hasExternalNewChatAction
 
         closeButton.image = NSImage(
             systemSymbolName: "xmark", accessibilityDescription: "Close")
@@ -1899,6 +1900,9 @@ final class PetAssistantPanelView: NSView {
         if let shadcnPanel { return shadcnPanel.newChatActionCountForTesting }
         return newChatButton.isHidden ? 0 : 1
     }
+    var legacyNewChatAccessibilityLabelForTesting: String {
+        newChatButton.accessibilityLabel() ?? ""
+    }
     var showsCloseButtonForTesting: Bool { !closeButton.isHidden }
     var usesGlassSurfaceForTesting: Bool { presentation == .popover }
     var transcriptForTesting: String {
@@ -1944,6 +1948,9 @@ final class PetAssistantPanelView: NSView {
     }
     func stopForTesting() { shadcnPanel?.model.onStop?() }
     func newChatForTesting() { onNewChat?() }
+    func pressLegacyNewChatButtonForTesting() {
+        newChatButton.performClick(nil)
+    }
     func showFilesForTesting() { onShowFiles?() }
 
     // MARK: - Test seams for the model menu

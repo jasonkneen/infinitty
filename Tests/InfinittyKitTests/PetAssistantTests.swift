@@ -456,6 +456,27 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(popover.embeddedNewChatActionCountForTesting, 1)
     }
 
+    func testLegacyStandaloneSidebarOwnsAndActivatesNewChat() {
+        ShadcnChatFeature.overrideForTesting = false
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let panel = PetAssistantPanelView(
+            presentation: .sidebar,
+            config: AppConfig(),
+            hasExternalNewChatAction: false)
+        var newChatPresses = 0
+        panel.onNewChat = { newChatPresses += 1 }
+
+        XCTAssertEqual(panel.embeddedNewChatActionCountForTesting, 1)
+        XCTAssertEqual(
+            panel.legacyNewChatAccessibilityLabelForTesting,
+            "New Chat")
+
+        panel.pressLegacyNewChatButtonForTesting()
+
+        XCTAssertEqual(newChatPresses, 1)
+    }
+
     func testConnectedChatInjectsIdentityAndPublishesBothSidesOfTurn() throws {
         let endpointOne = CollaborationEndpoint(
             id: "instance/chat-1", kind: .chat, label: "Chat 1",
