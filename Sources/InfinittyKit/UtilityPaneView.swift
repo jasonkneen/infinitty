@@ -50,6 +50,15 @@ enum UtilityPanelKind: String, CaseIterable {
         }
     }
 
+    var paneHeaderSemanticKind: PaneHeaderSemanticKind {
+        switch self {
+        case .files: return .files
+        case .chat: return .chat
+        case .browser: return .browser
+        case .surface: return .surface
+        }
+    }
+
 }
 
 /// A non-terminal leaf in the same NSSplitView tree as terminal panes. It uses
@@ -105,6 +114,7 @@ final class UtilityPaneView: NSView {
         layer?.masksToBounds = true
         updateSurface(background: background, blurred: blurred)
 
+        paneHeader.semanticKind = kind.paneHeaderSemanticKind
         paneHeader.title = kind.title
         paneHeader.iconSymbol = kind.symbol
         paneHeader.onFocus = { [weak self] in
@@ -128,6 +138,7 @@ final class UtilityPaneView: NSView {
             newChatButton.target = self
             newChatButton.action = #selector(newChatPressed)
             newChatButton.toolTip = "New chat"
+            newChatButton.setAccessibilityLabel("New Chat")
             paneHeader.addSubview(newChatButton)
             newChatButton.autoresizingMask = [.minXMargin]
         }
@@ -214,4 +225,8 @@ final class UtilityPaneView: NSView {
     var showsNewChatInHeaderForTesting: Bool {
         kind == .chat && newChatButton.superview === paneHeader
     }
+    var newChatAccessibilityLabelForTesting: String {
+        newChatButton.accessibilityLabel() ?? ""
+    }
+    var newChatFrameForTesting: NSRect { newChatButton.frame }
 }

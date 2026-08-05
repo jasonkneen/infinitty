@@ -1049,6 +1049,14 @@ final class ChannelWireOverlay {
     deinit { close() }
 }
 
+enum PaneHeaderSemanticKind: String, Equatable {
+    case terminal = "Terminal"
+    case files = "Files"
+    case chat = "Chat"
+    case browser = "Browser"
+    case surface = "Surface"
+}
+
 final class PaneHeaderView: NSView {
     static let height: CGFloat = 32
     /// How far the title sits below the row's axis. `NSTextField` renders its
@@ -1102,11 +1110,17 @@ final class PaneHeaderView: NSView {
         didSet { updateIcon() }
     }
 
+    /// The pane type announced by VoiceOver. Terminal remains the default for
+    /// existing terminal call sites; utility panes set this before their title.
+    var semanticKind: PaneHeaderSemanticKind = .terminal {
+        didSet { updateAccessibilityLabel() }
+    }
+
     var title: String {
         get { titleLabel.stringValue }
         set {
             titleLabel.stringValue = newValue
-            setAccessibilityLabel("Terminal pane: \(newValue)")
+            updateAccessibilityLabel()
             needsLayout = true
         }
     }
@@ -1229,10 +1243,17 @@ final class PaneHeaderView: NSView {
         addSubview(bottomHairline)
 
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Terminal pane")
+        updateAccessibilityLabel()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private func updateAccessibilityLabel() {
+        let base = "\(semanticKind.rawValue) pane"
+        let title = titleLabel.stringValue.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        setAccessibilityLabel(title.isEmpty ? base : "\(base): \(title)")
+    }
 
     private func updateIcon() {
         guard !closeHoverActive else { return }

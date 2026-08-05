@@ -816,6 +816,19 @@ final class NavigationTests: XCTestCase {
             header.splitRightFrameForTesting.width)
     }
 
+    func testPaneHeaderAccessibilityUsesExplicitPaneKind() {
+        let terminal = PaneHeaderView()
+        terminal.title = "Shell"
+        XCTAssertEqual(terminal.semanticKind, .terminal)
+        XCTAssertEqual(terminal.accessibilityLabel(), "Terminal pane: Shell")
+
+        let chat = UtilityPaneView(
+            kind: .chat, contentView: NSView(), background: .black)
+        chat.paneHeader.title = "Chat 3"
+        XCTAssertEqual(chat.paneHeader.semanticKind, .chat)
+        XCTAssertEqual(chat.paneHeader.accessibilityLabel(), "Chat pane: Chat 3")
+    }
+
     func testPaneHeaderConnectorReflectsChannelMembership() {
         let header = PaneHeaderView(
             frame: NSRect(x: 0, y: 0, width: 500, height: PaneHeaderView.height))
@@ -905,12 +918,24 @@ final class NavigationTests: XCTestCase {
         XCTAssertGreaterThan(content.frame.height, 400)
         XCTAssertEqual(pane.accessibilityLabel(), "Files panel")
         XCTAssertTrue(pane.outlineIsAboveContentForTesting)
+        XCTAssertEqual(pane.paneHeader.frame.height, 32, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(pane.paneHeader.frame.minY, pane.bounds.minY)
+        XCTAssertLessThanOrEqual(pane.paneHeader.frame.maxY, pane.bounds.maxY)
     }
 
     func testChatPanePlacesNewChatActionInPaneHeader() {
         let pane = UtilityPaneView(
             kind: .chat, contentView: NSView(), background: NSColor.black)
+        pane.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
+        pane.layoutSubtreeIfNeeded()
         XCTAssertTrue(pane.showsNewChatInHeaderForTesting)
+        XCTAssertEqual(pane.newChatAccessibilityLabelForTesting, "New Chat")
+        XCTAssertGreaterThanOrEqual(pane.newChatFrameForTesting.minX, 0)
+        XCTAssertGreaterThanOrEqual(pane.newChatFrameForTesting.minY, 0)
+        XCTAssertLessThanOrEqual(
+            pane.newChatFrameForTesting.maxX, pane.paneHeader.bounds.maxX)
+        XCTAssertLessThanOrEqual(
+            pane.newChatFrameForTesting.maxY, pane.paneHeader.bounds.maxY)
     }
 
     func testUtilityPaneStaysTransparentOverSharedWindowSurface() {
