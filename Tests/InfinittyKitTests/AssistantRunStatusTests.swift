@@ -82,6 +82,25 @@ final class AssistantRunStatusTests: XCTestCase {
         XCTAssertEqual(AssistantRunStatusSnapshot(model: model).phase, .ready)
     }
 
+    func testBrokerApprovalOutranksStreamingAndToolActivity() {
+        let model = AIAssistantPanelModel()
+        let runState = AssistantRunPresentationState()
+        model.isThinking = true
+        model.streamingText = "partial answer"
+        model.applyTool(id: "tool", name: "search", state: .inputAvailable)
+        runState.approvalRequests = [AssistantApprovalRequest(
+            scopeID: "conversation",
+            provider: "Claude",
+            kind: .toolUse,
+            toolName: "Write")]
+
+        let status = AssistantRunStatusSnapshot(
+            model: model, runState: runState)
+
+        XCTAssertEqual(status.phase, .awaitingApproval)
+        XCTAssertEqual(status.activityLabel, "APPROVE Write")
+    }
+
     func testIncludesToolPayloadsAndAgentCounts() {
         let model = AIAssistantPanelModel()
         model.applyTool(

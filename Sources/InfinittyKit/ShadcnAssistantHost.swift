@@ -55,6 +55,7 @@ enum AssistantRunPhase: Equatable {
 @MainActor
 final class AssistantRunPresentationState: ObservableObject {
     @Published var lastRunFailed = false
+    @Published var approvalRequests: [AssistantApprovalRequest] = []
     @Published var usage: AssistantRunEvent.Usage?
     @Published var usageProvenance: AssistantRunEvent.Provenance?
     @Published var reasoningSummary: String?
@@ -110,12 +111,16 @@ struct AssistantRunStatusSnapshot: Equatable {
         let terminalTool = model.tools.last {
             $0.state == .outputError || $0.state == .outputDenied
         }
+        let approvalRequest = runState?.approvalRequests.last
         let approvalTool = model.tools.last { $0.state == .approvalRequested }
         let runningTool = model.tools.last {
             $0.state == .inputStreaming || $0.state == .inputAvailable
         }
 
-        if let approvalTool {
+        if let approvalRequest {
+            phase = .awaitingApproval
+            activityLabel = "APPROVE \(approvalRequest.toolName)"
+        } else if let approvalTool {
             phase = .awaitingApproval
             activityLabel = "APPROVE \(approvalTool.name)"
         } else if let runningTool {
@@ -267,8 +272,84 @@ struct AssistantRunDeck: View {
                     .padding(.vertical, Space.x2)
                 ShadcnSeparator()
             }
+            if !runState.approvalRequests.isEmpty {
+                AssistantApprovalDeck(requests: runState.approvalRequests)
+                ShadcnSeparator()
+            }
             AIAssistantPanel(model: model, showsHeader: false)
         }
+    }
+}
+
+private struct AssistantApprovalDeck: View {
+    let requests: [AssistantApprovalRequest]
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: requests.count > 1) {
+            LazyVStack(spacing: Space.x2) {
+                ForEach(requests) { request in
+                    AssistantApprovalCard(request: request)
+                }
+            }
+            .padding(.horizontal, Space.x3)
+            .padding(.vertical, Space.x2)
+        }
+        .frame(maxHeight: 300)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Pending agent approvals")
+    }
+}
+
+private struct AssistantApprovalCard: View {
+    let request: AssistantApprovalRequest
+
+    @Environment(\.shadcnPalette) private var palette
+    @Environment(\.shadcnTheme) private var theme
+
+    var body: some View {
+        AITool(
+            name: "\(request.provider) · \(request.toolName)",
+            state: .approvalRequested,
+            defaultOpen: true
+        ) {
+            if let input = request.input, !input.isEmpty {
+                AIToolInput(json: input)
+            }
+            VStack(alignment: .leading, spacing: Space.x2) {
+                Text(request.message)
+                    .font(theme.typography.sans(theme.typography.sm))
+                    .foregroundStyle(palette.foreground)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: Space.x2) {
+                    Spacer(minLength: 0)
+                    if request.availableDecisions.contains(.deny) {
+                        ShadcnButton("Deny", variant: .outline, size: .small) {
+                            resolve(.deny)
+                        }
+                    }
+                    if request.availableDecisions.contains(.allowSession) {
+                        ShadcnButton(
+                            "Allow for session", variant: .secondary, size: .small
+                        ) {
+                            resolve(.allowSession)
+                        }
+                    }
+                    if request.availableDecisions.contains(.allowOnce) {
+                        ShadcnButton("Allow once", size: .small) {
+                            resolve(.allowOnce)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Space.x3)
+            .padding(.vertical, Space.x2_5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func resolve(_ decision: AssistantApprovalDecision) {
+        _ = AssistantApprovalBroker.shared.resolve(
+            id: request.id, scopeID: request.scopeID, decision: decision)
     }
 }
 
@@ -403,6 +484,10 @@ final class ShadcnAssistantHost {
 
     func setRunTelemetry(_ telemetry: AssistantRunTelemetrySnapshot) {
         runState.setTelemetry(telemetry)
+    }
+
+    func setApprovalRequests(_ requests: [AssistantApprovalRequest]) {
+        runState.approvalRequests = requests
     }
 
     func setQueuedMessages(_ queued: [String]) { model.queued = queued }

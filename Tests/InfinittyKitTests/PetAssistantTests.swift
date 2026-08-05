@@ -2058,6 +2058,44 @@ final class PetAssistantTests: XCTestCase {
         XCTAssertEqual(panel.toolCardCountForTesting, 0)
     }
 
+    func testApprovalCardsAreScopedAndReloadPendingRequestsOnSwitch() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let panel = PetAssistant(config: AppConfig()).makeSidebarPanelView()
+        let scopeA = "approval-a-\(UUID().uuidString)"
+        let scopeB = "approval-b-\(UUID().uuidString)"
+        let requestA = AssistantApprovalRequest(
+            scopeID: scopeA, provider: "Claude", kind: .toolUse,
+            toolName: "Write")
+        let requestB = AssistantApprovalRequest(
+            scopeID: scopeB, provider: "Codex", kind: .commandExecution,
+            toolName: "shell")
+        defer {
+            AssistantApprovalBroker.shared.cancel(scopeID: scopeA)
+            AssistantApprovalBroker.shared.cancel(scopeID: scopeB)
+        }
+
+        panel.setApprovalEventScopeID(scopeA)
+        AssistantApprovalBroker.shared.request(requestA) { _ in }
+        XCTAssertEqual(panel.approvalRequestCountForTesting, 1)
+        XCTAssertEqual(panel.shadcnRunPhaseForTesting, .awaitingApproval)
+
+        panel.setApprovalEventScopeID(scopeB)
+        XCTAssertEqual(panel.approvalRequestCountForTesting, 0)
+        AssistantApprovalBroker.shared.request(requestB) { _ in }
+        XCTAssertEqual(panel.approvalRequestCountForTesting, 1)
+
+        XCTAssertTrue(AssistantApprovalBroker.shared.resolve(
+            id: requestA.id, scopeID: scopeA, decision: .deny))
+        XCTAssertEqual(panel.approvalRequestCountForTesting, 1)
+
+        panel.setApprovalEventScopeID(scopeA)
+        XCTAssertEqual(panel.approvalRequestCountForTesting, 0)
+        panel.setApprovalEventScopeID(scopeB)
+        XCTAssertEqual(panel.approvalRequestCountForTesting, 1)
+    }
+
     private func waitForFile(_ url: URL, timeout: TimeInterval = 2) {
         let appeared = expectation(description: "file appeared: \(url.lastPathComponent)")
         DispatchQueue.global(qos: .userInitiated).async {

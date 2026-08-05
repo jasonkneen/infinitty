@@ -1045,6 +1045,27 @@ final class PetAssistantPanelView: NSView {
         }
     }
 
+    /// Observe approval prompts for the exact same backend epoch as tool cards.
+    /// A fresh snapshot on every scope change preserves prompts while the user
+    /// switches between Chat threads.
+    func setApprovalEventScopeID(_ scopeID: String?) {
+        guard approvalEventScopeID != scopeID else { return }
+        approvalEventScopeID = scopeID
+        approvalEventSubscription?.cancel()
+        approvalEventSubscription = nil
+        shadcnPanel?.setApprovalRequests([])
+        guard let scopeID, let host = shadcnPanel else { return }
+        host.setApprovalRequests(
+            AssistantApprovalBroker.shared.pendingRequests(scopeID: scopeID))
+        approvalEventSubscription = AssistantApprovalEventBus.subscribe(
+            scopeID: scopeID
+        ) { [weak host] _ in
+            guard let host else { return }
+            host.setApprovalRequests(
+                AssistantApprovalBroker.shared.pendingRequests(scopeID: scopeID))
+        }
+    }
+
     func setRunTelemetry(_ telemetry: AssistantRunTelemetrySnapshot) {
         shadcnPanel?.setRunTelemetry(telemetry)
     }
@@ -1137,6 +1158,8 @@ final class PetAssistantPanelView: NSView {
     private var shadcnPanel: ShadcnAssistantHost?
     private var toolEventSubscription: AssistantToolEventBus.Subscription?
     private var toolEventScopeID: String?
+    private var approvalEventSubscription: AssistantApprovalEventBus.Subscription?
+    private var approvalEventScopeID: String?
 
     func setMessages(_ messages: [AssistantChatMessage]) {
         lastMessages = messages
@@ -1806,6 +1829,9 @@ final class PetAssistantPanelView: NSView {
     var toolCardCountForTesting: Int {
         shadcnPanel?.model.tools.count ?? 0
     }
+    var approvalRequestCountForTesting: Int {
+        shadcnPanel?.runState.approvalRequests.count ?? 0
+    }
     var legacyLayoutConstraintsAreInactiveForTesting: Bool {
         shadcnPanel != nil && legacyLayoutConstraints.allSatisfy { !$0.isActive }
     }
@@ -2402,6 +2428,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             presentation: presentation, config: config,
             choices: availableChoices)
         panel.setToolEventScopeID(backendConversationID(for: activeThreadId))
+        panel.setApprovalEventScopeID(backendConversationID(for: activeThreadId))
         panel.setRunTelemetry(
             activeThread?.runTelemetry ?? AssistantRunTelemetrySnapshot())
         panel.setMessages(sidebarMessages)
@@ -2641,6 +2668,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
             ?? backendConversationID(for: activeThreadId)
         for panel in allVisiblePanels {
             panel.setToolEventScopeID(activeBackendID)
+            panel.setApprovalEventScopeID(activeBackendID)
             panel.setRunTelemetry(
                 activeThread?.runTelemetry ?? AssistantRunTelemetrySnapshot())
             panel.setMessages(sidebarMessages)
@@ -4344,6 +4372,7 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
     }
 
     private func releaseRegisteredBackendConversation(_ conversationID: String) {
+        AssistantApprovalBroker.shared.cancel(scopeID: conversationID)
         registeredConversationIDs.remove(conversationID)
         if let conversationReleaser {
             conversationReleaser(conversationID)
