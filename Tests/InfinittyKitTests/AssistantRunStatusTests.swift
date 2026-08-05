@@ -223,9 +223,14 @@ final class AssistantRunStatusTests: XCTestCase {
 
         XCTAssertTrue(measured)
         XCTAssertEqual(host.frame.width, 320, accuracy: 0.5)
+        let compactStatusText = "512/16.4K ctx · USD 0.01 · 2 queued"
+        let minimumReadableStatusWidth =
+            (compactStatusText as NSString).size(withAttributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+            ]).width * 0.65 + 16
         XCTAssertGreaterThanOrEqual(
-            statusWidth, 125,
-            "the actual usage/cost/queue status must win width before the title")
+            statusWidth, minimumReadableStatusWidth,
+            "the actual usage/cost/queue status must fit at its allowed scale")
     }
 
     func testBrokerApprovalOutranksStreamingAndToolActivity() {
