@@ -86,6 +86,13 @@ final class AmpBridge: @unchecked Sendable {
                     guard let helper,
                           FileManager.default.isExecutableFile(
                             atPath: helper.path) else {
+                        let searched = helper?.path
+                            ?? "\(Bundle.main.bundlePath)/Contents/MacOS/infinitty-mcp"
+                        FileHandle.standardError.write(Data(
+                            ("infinitty: Amp permission helper not found at "
+                             + "\(searched); refusing to run Amp without "
+                             + "approvals. Set INFINITTY_AI_YOLO=1 to bypass.\n")
+                                .utf8))
                         cont.resume(throwing: AmpBridgeError.approvalUnavailable(
                             "Infinitty's bundled Amp permission helper is unavailable."))
                         return
@@ -96,6 +103,9 @@ final class AmpBridge: @unchecked Sendable {
                                 helperPath: helper.path,
                                 environment: baseEnvironment)
                     } catch {
+                        FileHandle.standardError.write(Data(
+                            ("infinitty: could not write Amp permission "
+                             + "settings: \(error.localizedDescription)\n").utf8))
                         cont.resume(throwing: AmpBridgeError.approvalUnavailable(
                             error.localizedDescription))
                         return
