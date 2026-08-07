@@ -1557,6 +1557,20 @@ final class NavigationTests: XCTestCase {
                 unsetenv("INFINITTY_AMP_EXECUTABLE")
             }
         }
+        // The scoped-approval path requires the bundled infinitty-mcp helper,
+        // which resolves against Bundle.main and is therefore unavailable under
+        // `swift test`. Bypass approvals here; the approval routing itself is
+        // covered by ProviderDiscoveryTests/ProviderPermissionPolicyTests.
+        let previousYolo = getenv("INFINITTY_AI_YOLO")
+            .map { String(cString: $0) }
+        setenv("INFINITTY_AI_YOLO", "1", 1)
+        defer {
+            if let previousYolo {
+                setenv("INFINITTY_AI_YOLO", previousYolo, 1)
+            } else {
+                unsetenv("INFINITTY_AI_YOLO")
+            }
+        }
 
         let delegate = AppDelegate()
         let window = NSWindow(
