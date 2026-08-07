@@ -3298,19 +3298,25 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 tokenCount: AssistantChatMessage.approximateTokenCount(for: answer),
                 author: author),
             to: request.threadId)
+        // `author` may be an Auto provenance label ("Claude · sonnet-4") rather
+        // than an identity. That belongs in the pane UI only. Channel emissions
+        // must carry a real ensemble-child identity or nothing: a non-nil
+        // agentName prefixes the bounded text and, for runtimeFailure, moves
+        // authorID off system:runtime onto the pane participant.
+        let emissionAgentName = request.agent?.displayName
         if isSuccessfulAgentResponse {
             collaborationMessagePublisher?(CollaborationChatEmission(
                 kind: .agentResponse,
                 text: answer,
                 threadID: request.threadId.uuidString.lowercased(),
-                agentName: author))
+                agentName: emissionAgentName))
             enqueuePeerFollowUps(mentionedIn: answer, after: request)
         } else {
             collaborationMessagePublisher?(CollaborationChatEmission(
                 kind: .runtimeFailure,
                 text: answer,
                 threadID: request.threadId.uuidString.lowercased(),
-                agentName: author))
+                agentName: emissionAgentName))
         }
         // Move completed thread to the top of the switcher.
         if let idx = threadIndex(request.threadId), idx > 0 {
