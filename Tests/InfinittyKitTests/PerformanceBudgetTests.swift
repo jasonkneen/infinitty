@@ -28,6 +28,66 @@ final class PerformanceBudgetTests: XCTestCase {
             "1 MiB printable ASCII should parse in under the gross CI budget")
     }
 
+    func testInputDoesNotStarveDuringOutputAndSnapshots() throws {
+        try requireIsolatedPerformanceRun()
+        let terminal = Terminal(cols: 160, rows: 60)
+        let line = String(repeating: "x", count: 159) + "\r\n"
+        let bytes = Array(String(repeating: line, count: 128).utf8)
+        let stateLock = NSLock()
+        var running = true
+        func isRunning() -> Bool {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return running
+        }
+
+        let feedQueue = DispatchQueue(
+            label: "infinitty.performance.feed", qos: .userInitiated)
+        let snapshotQueue = DispatchQueue(
+            label: "infinitty.performance.snapshot", qos: .userInteractive)
+        let group = DispatchGroup()
+        group.enter()
+        feedQueue.async {
+            while isRunning() {
+                bytes.withUnsafeBufferPointer {
+                    terminal.feed($0.baseAddress!, $0.count)
+                }
+            }
+            group.leave()
+        }
+        group.enter()
+        snapshotQueue.async {
+            var snapshot = TermSnapshot()
+            while isRunning() {
+                terminal.copySnapshot(into: &snapshot)
+                usleep(16_000)
+            }
+            group.leave()
+        }
+
+        var waits: [Double] = []
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            let started = ProcessInfo.processInfo.systemUptime
+            terminal.userDidInput()
+            waits.append((ProcessInfo.processInfo.systemUptime - started) * 1_000_000)
+            usleep(16_000)
+        }
+        stateLock.lock()
+        running = false
+        stateLock.unlock()
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+
+        waits.sort()
+        let p95 = waits[Int(Double(waits.count - 1) * 0.95)]
+        XCTAssertGreaterThan(
+            waits.count, 20,
+            "input should continue to acquire terminal state during a PTY flood")
+        XCTAssertLessThan(
+            p95, 250_000,
+            "input lock wait p95 should stay below 250 ms during output/snapshot pressure")
+    }
+
     func testThousandFullGridSnapshotsBudget() throws {
         try requireIsolatedPerformanceRun()
         let terminal = Terminal(cols: 160, rows: 60)

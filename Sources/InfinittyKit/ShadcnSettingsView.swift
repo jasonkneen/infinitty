@@ -33,6 +33,84 @@ struct ShadcnSettingsView: View {
         theme.palette(for: UISurfaceTheme.colorScheme(for: config)).mutedForeground
     }
 
+    private var interfaceFontFamilyOptions: [(value: String, label: String)] {
+        SystemFontCatalog.options(
+            defaultLabel: "System (default)",
+            configured: config.interfaceFontName,
+            monospacedOnly: false)
+    }
+
+    private var terminalFontFamilyOptions: [(value: String, label: String)] {
+        SystemFontCatalog.options(
+            defaultLabel: "SF Mono (default)",
+            configured: config.fontName,
+            monospacedOnly: true)
+    }
+
+    private var terminalFontStyleOptions: [(value: String, label: String)] {
+        var styles = ["Regular"]
+        if let family = config.fontName,
+           !family.isEmpty,
+           let members = NSFontManager.shared.availableMembers(ofFontFamily: family) {
+            styles.append(contentsOf: members.compactMap { member in
+                guard let style = member.count > 1 ? member[1] as? String : nil,
+                      !style.isEmpty,
+                      style.caseInsensitiveCompare("Regular") != .orderedSame
+                else { return nil }
+                return style
+            })
+        }
+        if let configured = config.fontStyle,
+           !configured.isEmpty,
+           !styles.contains(where: { $0.caseInsensitiveCompare(configured) == .orderedSame }) {
+            styles.append(configured)
+        }
+        return styles.map { style in
+            (style == "Regular" ? "" : style, style)
+        }
+    }
+
+    private var terminalFontFamilySelection: Binding<String?> {
+        Binding(
+            get: { config.fontName ?? "" },
+            set: { value in
+                let family = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                config.fontName = family.isEmpty ? nil : family
+                if let style = config.fontStyle,
+                   !terminalFontStyleOptions.contains(where: { $0.value == style }) {
+                    config.fontStyle = nil
+                }
+            }
+        )
+    }
+
+    private var interfaceFontFamilySelection: Binding<String?> {
+        Binding(
+            get: { config.interfaceFontName ?? "" },
+            set: { value in
+                let family = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                config.interfaceFontName = family.isEmpty ? nil : family
+            }
+        )
+    }
+
+    private var fontStyleSelection: Binding<String?> {
+        Binding(
+            get: {
+                guard let style = config.fontStyle,
+                      style.caseInsensitiveCompare("Regular") != .orderedSame
+                else { return "" }
+                return style
+            },
+            set: { value in
+                let style = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                config.fontStyle = style.isEmpty || style.caseInsensitiveCompare("Regular") == .orderedSame
+                    ? nil
+                    : style
+            }
+        )
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
@@ -83,6 +161,15 @@ struct ShadcnSettingsView: View {
     private var appearancePanel: some View {
         Group {
             SettingsSection("Interface") {
+                SettingsRow("Font") {
+                    ShadcnSelect(
+                        "System (default)",
+                        selection: interfaceFontFamilySelection,
+                        width: 240,
+                        maxVisibleRows: 8,
+                        options: interfaceFontFamilyOptions
+                    )
+                }
                 ShadcnSliderRow(
                     "Text size",
                     value: doubleBinding(\.interfaceFontSize),
@@ -97,24 +184,22 @@ struct ShadcnSettingsView: View {
 
             SettingsSection("Terminal font") {
                 SettingsRow("Family") {
-                    ShadcnTextField(
-                        "System",
-                        text: Binding(
-                            get: { config.fontName ?? "" },
-                            set: { config.fontName = $0.isEmpty ? nil : $0 }
-                        )
+                    ShadcnSelect(
+                        "SF Mono (default)",
+                        selection: terminalFontFamilySelection,
+                        width: 240,
+                        maxVisibleRows: 8,
+                        options: terminalFontFamilyOptions
                     )
-                    .frame(width: 240)
                 }
                 SettingsRow("Style") {
-                    ShadcnTextField(
+                    ShadcnSelect(
                         "Regular",
-                        text: Binding(
-                            get: { config.fontStyle ?? "" },
-                            set: { config.fontStyle = $0.isEmpty ? nil : $0 }
-                        )
+                        selection: fontStyleSelection,
+                        width: 240,
+                        maxVisibleRows: 8,
+                        options: terminalFontStyleOptions
                     )
-                    .frame(width: 240)
                 }
                 ShadcnSliderRow(
                     "Size",

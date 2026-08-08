@@ -1455,11 +1455,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         scheduleTrafficLightCentering(in: window)
     }
 
+    /// Native tab windows remain alive when another tab is selected. Keep the
+    /// selected tab's renderer active and park every hidden tab's display link;
+    /// otherwise background PTY output still drives full snapshots and Metal
+    /// frames, eventually starving the active tab and keyboard.
+    private func updateRendererVisibility(in window: NSWindow) {
+        guard window.tabbingIdentifier == "infinitty",
+              window !== quickTerminal.window else { return }
+        let tabs = window.tabbedWindows ?? [window]
+        let selected = window.tabGroup?.selectedWindow ?? window
+        for tab in tabs {
+            let enabled = tab === selected && !tab.isMiniaturized
+            for session in sessions(in: tab, rootedAt: nil) {
+                session.renderer.setRenderingEnabled(
+                    enabled && !session.view.isHiddenOrHasHiddenAncestor)
+            }
+        }
+    }
+
     public func windowDidBecomeKey(_ notification: Notification) {
         if let win = notification.object as? NSWindow,
            win.tabbingIdentifier == "infinitty" {
             centerTrafficLights(in: win)
             refreshTabStrips(in: win)
+            updateRendererVisibility(in: win)
         }
         guard showPaneShortcutHints else { return }
         refreshShortcutHints()
@@ -2234,6 +2253,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         window.makeKeyAndOrderFront(nil)
         if let launchCommand { queueLaunchCommand(launchCommand, for: session) }
         session.launch()
+        updateRendererVisibility(in: host)
         DispatchQueue.main.async {
             self.refreshPets()
             self.updateTitle(for: window)
@@ -2268,6 +2288,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         window.makeKeyAndOrderFront(nil)
         let t4 = CFAbsoluteTimeGetCurrent()
         session.launch()
+        updateRendererVisibility(in: key)
         let t5 = CFAbsoluteTimeGetCurrent()
         PaneLog.log(String(
             format: "NEWTAB cwd=%.0f make=%.0f addTab=%.0f key=%.0f launch=%.0f total=%.0f ms",
@@ -4971,6 +4992,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let target = tabs[index]
             win.tabGroup?.selectedWindow = target
             target.makeKeyAndOrderFront(nil)
+            self.updateRendererVisibility(in: win)
             self.refocusTerminal(in: target)
         }
         chrome.strip.onRename = { [weak self, weak win] index in
@@ -6822,6 +6844,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     in: window, reason: "tab-joined", origin: "app-control-new-tab")
                 // Do not select/key the new tab — keep the user's focus put.
                 session.launch()
+                self.updateRendererVisibility(in: host)
                 let t3 = CFAbsoluteTimeGetCurrent()
                 PaneLog.log(String(
                     format: "SOCKTAB make=%.0f addTab=%.0f launch=%.0f total=%.0f ms",

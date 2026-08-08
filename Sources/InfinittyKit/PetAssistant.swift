@@ -1546,12 +1546,90 @@ final class PetAssistantPanelView: NSView {
     /// Make a discovered model the live selection: register it in the hidden
     /// picker (the selection store), select it, and let the effort chip follow.
     private func selectChoice(_ choice: PetAssistant.AgentChoice) {
-        if !choices.contains(where: { $0.displayName == choice.displayName }) {
+        if !choices.contains(where: {
+            $0.kind == choice.kind && $0.modelID == choice.modelID
+                && $0.displayName == choice.displayName
+        }) {
             choices.append(choice)
-            populateModelPicker()
+            populateModelPicker(selecting: selectedChoice.displayName)
         }
-        modelPicker.selectItem(withTitle: choice.displayName)
+        if let modelID = choice.modelID,
+           let item = modelPicker.menu?.items.first(where: {
+               ($0.representedObject as? PetAssistant.AgentChoice)?.modelID == modelID
+           }) {
+            modelPicker.select(item)
+        } else {
+            modelPicker.selectItem(withTitle: choice.displayName)
+        }
         refreshModelChip()
+        syncShadcnComposerState()
+    }
+
+    /// Replace provider placeholders/stale seeded rows with the live catalog.
+    /// The hidden AppKit picker is the selection store for both UI surfaces, so
+    /// updating only the legacy submenu would leave the visible ShadKit picker
+    /// stuck on “Hermes”/“configured default”.
+    private func mergeDiscoveredModels(
+        _ models: [DiscoveredModel], for kind: PetAssistant.AgentChoice.Kind
+    ) {
+        var seenIDs = Set<String>()
+        let liveChoices = models.compactMap { model -> PetAssistant.AgentChoice? in
+            guard !model.id.isEmpty, seenIDs.insert(model.id).inserted else { return nil }
+            return PetAssistant.AgentChoice(model, kind: kind, symbolName: kind.symbolName)
+        }
+        guard !liveChoices.isEmpty else { return }
+
+        let previous = selectedChoice
+        let liveIDs = Set(liveChoices.compactMap(\.modelID))
+        // Keep user-recorded custom ids that are not in the provider's current
+        // catalog, but discard the provider placeholder and stale seed rows.
+        let customChoices = choices.filter { choice in
+            guard choice.kind == kind, let modelID = choice.modelID else { return false }
+            return !liveIDs.contains(modelID)
+        }
+        let providerChoices = liveChoices + customChoices
+
+        var rebuilt: [PetAssistant.AgentChoice] = []
+        var inserted = false
+        for choice in choices {
+            guard choice.kind == kind else {
+                rebuilt.append(choice)
+                continue
+            }
+            if !inserted {
+                rebuilt.append(contentsOf: providerChoices)
+                inserted = true
+            }
+        }
+        if !inserted { rebuilt.append(contentsOf: providerChoices) }
+        choices = rebuilt
+
+        let preferredModelID: String?
+        if previous.kind == kind, previous.modelID == nil {
+            preferredModelID = liveChoices.first(where: {
+                discoveredModelIsDefault($0, in: models)
+            })?.modelID ?? liveChoices.first?.modelID
+        } else {
+            preferredModelID = previous.modelID
+        }
+        populateModelPicker(selecting: previous.displayName, modelID: preferredModelID)
+        refreshModelChip()
+    }
+
+    private func discoveredModelIsDefault(
+        _ choice: PetAssistant.AgentChoice, in models: [DiscoveredModel]
+    ) -> Bool {
+        models.first { $0.id == choice.modelID }?.isDefault == true
+    }
+
+    private func applyProviderModels(
+        _ state: ProviderModels, for kind: PetAssistant.AgentChoice.Kind
+    ) {
+        discovered[kind] = state
+        if case .loaded(let models) = state {
+            mergeDiscoveredModels(models, for: kind)
+        }
+        refreshProviderSubmenu(kind)
         syncShadcnComposerState()
     }
 
@@ -1682,13 +1760,21 @@ final class PetAssistantPanelView: NSView {
     /// (Re)build the hidden model popup's items from `choices`. This popup is
     /// pure selection state — the "Custom…" rows live only in the visible
     /// chip menu (`makeModelMenu`) so the state titles stay exactly `choices`.
-    private func populateModelPicker() {
+    private func populateModelPicker(selecting title: String? = nil, modelID: String? = nil) {
         modelPicker.menu?.removeAllItems()
         for choice in choices {
             let item = NSMenuItem(title: choice.displayName, action: nil, keyEquivalent: "")
             item.representedObject = choice
             item.image = PetAssistantPanelView.providerImage(for: choice)
             modelPicker.menu?.addItem(item)
+        }
+        if let modelID,
+           let item = modelPicker.menu?.items.first(where: {
+               ($0.representedObject as? PetAssistant.AgentChoice)?.modelID == modelID
+           }) {
+            modelPicker.select(item)
+        } else if let title, modelPicker.menu?.items.contains(where: { $0.title == title }) == true {
+            modelPicker.selectItem(withTitle: title)
         }
     }
 
@@ -1698,12 +1784,11 @@ final class PetAssistantPanelView: NSView {
         _ kind: PetAssistant.AgentChoice.Kind, force: Bool = false
     ) {
         guard force || discovered[kind] == nil else { return }
-        discovered[kind] = .loading
+        applyProviderModels(.loading, for: kind)
         Task { @MainActor [weak self] in
             let models = await ModelDiscovery.shared.models(for: kind)
             guard let self else { return }
-            self.discovered[kind] = models
-            self.refreshProviderSubmenu(kind)
+            self.applyProviderModels(models, for: kind)
         }
     }
 
@@ -1803,6 +1888,15 @@ final class PetAssistantPanelView: NSView {
     }
     var selectedChoiceForTesting: PetAssistant.AgentChoice { selectedChoice }
     var modelItemTitlesForTesting: [String] { modelPicker.itemTitles }
+    var shadcnModelOptionLabelsForTesting: [String] {
+        shadcnPanel?.model.models.map { $0.label } ?? []
+    }
+    var shadcnModelOptionValuesForTesting: [String] {
+        shadcnPanel?.model.models.map { $0.value } ?? []
+    }
+    var shadcnRosterEntriesForTesting: [(name: String, detail: String)] {
+        shadcnPanel?.model.roster.map { (name: $0.name, detail: $0.detail) } ?? []
+    }
     var effortTitlesForTesting: [String] { effortPicker.itemTitles }
     var effortValueForTesting: String { effortPicker.titleOfSelectedItem ?? "" }
     var terminalModeAvailableForTesting: Bool {
@@ -2009,8 +2103,7 @@ final class PetAssistantPanelView: NSView {
     func setDiscoveredForTesting(
         _ state: ProviderModels, for kind: PetAssistant.AgentChoice.Kind
     ) {
-        discovered[kind] = state
-        refreshProviderSubmenu(kind)
+        applyProviderModels(state, for: kind)
     }
 
     private func submenuForTesting(_ kind: PetAssistant.AgentChoice.Kind) -> NSMenu? {
@@ -2284,8 +2377,17 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
         var choices: [AgentChoice] = [.auto]
         for (provider, kind, symbol) in interactive
         where ProviderDiscovery.isAvailable(provider, environment: environment) {
-            for model in ModelDiscovery.seedModels(for: kind) {
-                choices.append(AgentChoice(model, kind: kind, symbolName: symbol))
+            let seededModels = ModelDiscovery.seedModels(for: kind)
+            if seededModels.isEmpty {
+                // Keep the provider selectable while its ACP catalog is being
+                // resolved, but never present a fake “configured default” model.
+                choices.append(AgentChoice(
+                    kind: kind, modelID: nil, displayName: kind.providerLabel,
+                    symbolName: symbol))
+            } else {
+                for model in seededModels {
+                    choices.append(AgentChoice(model, kind: kind, symbolName: symbol))
+                }
             }
         }
         return choices
@@ -2866,8 +2968,9 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                 $0.alias == "\(base)-\(suffix)"
             }) { suffix += 1 }
             agent = ConfiguredChatAgent(
-                provider: agent.provider, modelTitle: agent.modelTitle,
-                effort: agent.effort, alias: "\(base)-\(suffix)")
+                provider: agent.provider, modelID: agent.modelID,
+                modelTitle: agent.modelTitle, effort: agent.effort,
+                alias: "\(base)-\(suffix)")
         }
         threads[index].ensembleAgents.append(agent)
         threads[index].agentBackendStates[agent.id] = ChatAgentBackendState()

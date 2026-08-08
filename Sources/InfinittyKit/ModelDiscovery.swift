@@ -55,8 +55,9 @@ struct DiscoveredModel: Equatable {
     /// nothing, in which case the effort chip keeps its fixed list.
     let efforts: [String]
     let defaultEffort: String?
-    /// Sub-provider parsed from a `prefix/Name` label. Only used to add a
-    /// grouping level when a provider returns too many models to list flat.
+    /// Sub-provider parsed from a provider-prefixed label (`prefix/Name` or
+    /// `Provider · Name`). Only used to add a grouping level when a provider
+    /// returns too many models to list flat.
     let group: String?
 }
 
@@ -206,8 +207,11 @@ actor ModelDiscovery {
     }
 
     /// ACP unstable path (hermes) — `session/new` → `models.availableModels[]`.
-    /// The active model is flagged only by a `• current` suffix on its
-    /// description; there is no boolean.
+    /// Hermes can advertise hundreds of models. Newer versions prefix the
+    /// human label with the upstream provider (`OpenRouter · ...`); preserve
+    /// that provider as a group so the menu stays navigable while retaining
+    /// every model id for routing. Older versions return bare names and remain
+    /// flat for compatibility.
     static func parseACPAvailableModels(_ result: [String: Any]) -> [DiscoveredModel] {
         guard let models = result["models"] as? [String: Any],
               let available = models["availableModels"] as? [[String: Any]]
@@ -215,14 +219,16 @@ actor ModelDiscovery {
         return available.compactMap { entry in
             guard let id = entry["modelId"] as? String else { return nil }
             let description = entry["description"] as? String
+            let label = (entry["name"] as? String) ?? id
+            let (group, name) = splitProviderLabel(label)
             return DiscoveredModel(
                 id: id,
-                name: (entry["name"] as? String) ?? id,
+                name: name,
                 description: description,
-                isDefault: description?.hasSuffix("• current") ?? false,
+                isDefault: description?.contains("• current") ?? false,
                 efforts: [],
                 defaultEffort: nil,
-                group: nil)
+                group: group)
         }
     }
 
@@ -239,6 +245,20 @@ actor ModelDiscovery {
         guard let slash = label.firstIndex(of: "/") else { return (nil, label) }
         let group = String(label[label.startIndex..<slash])
         let name = String(label[label.index(after: slash)...])
+        guard !group.isEmpty, !name.isEmpty else { return (nil, label) }
+        return (group, name)
+    }
+
+    /// Hermes labels use a middle dot rather than a slash for their provider
+    /// prefix (`OpenAI Codex · gpt-5.6-sol`).
+    private static func splitProviderLabel(
+        _ label: String
+    ) -> (group: String?, name: String) {
+        guard let separator = label.range(of: " · ") else { return (nil, label) }
+        let group = String(label[..<separator.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = String(label[separator.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !group.isEmpty, !name.isEmpty else { return (nil, label) }
         return (group, name)
     }
@@ -294,23 +314,25 @@ actor ModelDiscovery {
     }
 
     /// What the picker shows before any live query has answered: the last
-    /// cached list, else the static table, else a single row standing for the
-    /// agent's own configured default so the provider is still selectable.
+    /// cached list, else the static table. ACP providers without a cache return
+    /// no fabricated row; `resolveChoices` adds a provider-only selection while
+    /// the live catalog is loading.
     static func seedModels(
         for kind: PetAssistant.AgentChoice.Kind
     ) -> [DiscoveredModel] {
         if let cached = ModelCatalogCache.load(for: kind), !cached.isEmpty { return cached }
         let statics = staticModels(for: kind)
         if !statics.isEmpty { return statics }
-        return [DiscoveredModel(
-            id: "", name: "configured default", description: nil, isDefault: true,
-            efforts: [], defaultEffort: nil, group: nil)]
+        // ACP providers are queried when their submenu/agent is selected.
+        // Do not fabricate a model called “configured default”: it hides the
+        // real catalog and leaks into the visible ShadKit model selector.
+        return []
     }
 
     // MARK: - Grouping
 
-    /// Only opencode is big enough to need a third menu level today (123
-    /// models). Everything else reads better flat.
+    /// Large catalogs such as OpenCode and Hermes use a third menu level;
+    /// smaller provider lists remain flat.
     static let groupingThreshold = 20
 
     static func shouldGroup(_ models: [DiscoveredModel]) -> Bool {

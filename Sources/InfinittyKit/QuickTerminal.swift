@@ -843,6 +843,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         window.alphaValue = 0
         window.level = .popUpMenu
         window.orderFrontRegardless()
+        updateRenderingVisibility()
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = config.quickTerminalAnimationDuration
@@ -873,6 +874,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         visible = false
         transition &+= 1
         let currentTransition = transition
+        updateRenderingVisibility()
         let screen = window.screen ?? config.quickTerminalScreen.screen ?? NSScreen.main
         let visibleFrame = screen.map {
             QuickTerminalLayout.visibleFrame(on: $0, heightFraction: heightState.fraction)
@@ -1015,8 +1017,22 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private func showTab(at index: Int) {
         guard tabs.indices.contains(index), window != nil else { return }
         tabsView?.select(tabs[index].page)
+        updateRenderingVisibility()
         renderTabStrip()
         restoreActiveResponder()
+    }
+
+    /// Keep only the selected, visible quick-terminal page rendering. Hidden
+    /// pages intentionally stay attached so their PTYs and scrollback survive,
+    /// but their display links must not compete with the active tab.
+    private func updateRenderingVisibility() {
+        for (index, tab) in tabs.enumerated() {
+            let enabled = visible && index == selectedIndex
+            for session in sessionsInPage(tab.page) {
+                session.renderer.setRenderingEnabled(
+                    enabled && !session.view.isHiddenOrHasHiddenAncestor)
+            }
+        }
     }
 
     private func restoreActiveResponder() {

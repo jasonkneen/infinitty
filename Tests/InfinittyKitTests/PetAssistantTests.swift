@@ -2287,6 +2287,56 @@ final class PetAssistantTests: XCTestCase {
                        ["GPT-5.6-Sol  (default)", "GPT-5.5"])
     }
 
+    func testRosterEntriesShowGeneratedNameAndModel() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let panel = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto])
+            .makeSidebarPanelView()
+        panel.setRoster([ConfiguredChatAgent(
+            provider: "codex", modelID: "gpt-5.6-sol",
+            modelTitle: "Codex · GPT-5.6-Sol", effort: "High", alias: "sol")])
+
+        XCTAssertEqual(panel.shadcnRosterEntriesForTesting.map(\.name), ["sol"])
+        XCTAssertEqual(
+            panel.shadcnRosterEntriesForTesting.map(\.detail),
+            ["Model: Codex · GPT-5.6-Sol · Effort: High"])
+    }
+
+    func testDiscoveredHermesModelsReplaceProviderPlaceholderInShadcn() {
+        ShadcnChatFeature.overrideForTesting = true
+        defer { ShadcnChatFeature.overrideForTesting = nil }
+
+        let hermes = PetAssistant.AgentChoice(
+            kind: .hermes, modelID: nil, displayName: "Hermes", symbolName: "brain")
+        let panel = PetAssistant(
+            config: AppConfig(), availableChoices: [.auto, hermes])
+            .makeSidebarPanelView()
+        panel.setDiscoveredForTesting(.loaded([
+            DiscoveredModel(
+                id: "openai-codex:gpt-5.6-sol", name: "gpt-5.6-sol",
+                description: "Provider: OpenAI Codex • current", isDefault: true,
+                efforts: [], defaultEffort: nil, group: "OpenAI Codex"),
+            DiscoveredModel(
+                id: "openai-codex:gpt-5.6-terra", name: "gpt-5.6-terra",
+                description: "Provider: OpenAI Codex", isDefault: false,
+                efforts: [], defaultEffort: nil, group: "OpenAI Codex"),
+        ]), for: .hermes)
+
+        XCTAssertEqual(panel.shadcnModelOptionLabelsForTesting, [
+            "gpt-5.6-sol", "gpt-5.6-terra",
+        ])
+        XCTAssertEqual(panel.shadcnModelOptionValuesForTesting, [
+            "Hermes · gpt-5.6-sol", "Hermes · gpt-5.6-terra",
+        ])
+        XCTAssertEqual(panel.selectedChoiceForTesting.modelID, nil,
+                       "Auto remains selected while the catalog is merged")
+
+        panel.selectModelForTesting(1)
+        XCTAssertEqual(panel.selectedChoiceForTesting.modelID, "openai-codex:gpt-5.6-sol")
+    }
+
     func testProviderSubmenuExplainsItsOwnFailureAndOffersRetry() {
         let panel = panelWithProviders()
         panel.setDiscoveredForTesting(

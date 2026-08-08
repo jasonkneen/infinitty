@@ -24,7 +24,9 @@ enum UISurfaceTheme {
         // Both schemes get the same palette: the terminal theme already decides
         // whether the app reads light or dark, and a panel must not flip with
         // the system appearance while the terminal beside it stays put.
-        return ShadcnTheme(light: spec, dark: spec)
+        var theme = ShadcnTheme(light: spec, dark: spec)
+        theme.typography = ShadcnTypography(sansFamily: config.interfaceFontName)
+        return theme
     }
 
     /// Which scheme the hosts should render in, so shadows and other

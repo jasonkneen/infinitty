@@ -187,6 +187,9 @@ final class TerminalSession: NSObject {
             }
             return
         }
+        // `spawn` starts with zero pixel dimensions; force the complete
+        // geometry cached by the view before the child begins its first turn.
+        view.syncWinsizeAfterSpawn()
         // Foreground process tracking starts once the shell PID is alive.
         if pty.pid > 0 {
             let tracker = ForegroundProcessTracker(shellPid: pty.pid)

@@ -178,6 +178,35 @@ final class ModelDiscoveryTests: XCTestCase {
             ModelDiscovery.parseACPAvailableModels(try json(opencodeSessionNew)).isEmpty)
     }
 
+    func testHermesProviderLabelsBecomeGroupsWithoutDroppingModelIDs() throws {
+        let result = try json("""
+        {
+          "models": {
+            "availableModels": [
+              {
+                "modelId": "openrouter:anthropic/claude-sonnet-5",
+                "name": "OpenRouter · anthropic/claude-sonnet-5",
+                "description": "Provider: OpenRouter • current (active)"
+              },
+              {
+                "modelId": "openai-codex:gpt-5.6-sol",
+                "name": "OpenAI Codex · gpt-5.6-sol",
+                "description": "Provider: OpenAI Codex"
+              }
+            ]
+          }
+        }
+        """)
+        let models = ModelDiscovery.parseACPAvailableModels(result)
+
+        XCTAssertEqual(models.map(\.id), [
+            "openrouter:anthropic/claude-sonnet-5", "openai-codex:gpt-5.6-sol",
+        ])
+        XCTAssertEqual(models.map(\.name), ["anthropic/claude-sonnet-5", "gpt-5.6-sol"])
+        XCTAssertEqual(models.map(\.group), ["OpenRouter", "OpenAI Codex"])
+        XCTAssertTrue(models[0].isDefault, "current marker need not be the final suffix")
+    }
+
     // MARK: - Static providers
 
     func testClaudeModelsAreStaticAndNonEmpty() {

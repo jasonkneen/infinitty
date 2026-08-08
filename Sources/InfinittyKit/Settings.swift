@@ -52,6 +52,7 @@ final class SettingsWindowController: NSWindowController {
     private static let controlWidth = SettingsMetrics.controlWidth
 
     private let fontCombo = NSComboBox()
+    private let interfaceFontCombo = NSComboBox()
     private let stylePopup = NSPopUpButton()
     private let sizeSlider = NSSlider(value: 13, minValue: 9, maxValue: 24, target: nil, action: nil)
     private let sizeValue = NSTextField(labelWithString: "")
@@ -214,13 +215,22 @@ final class SettingsWindowController: NSWindowController {
     private func buildUI() {
         // Font pickers
         fontCombo.usesDataSource = false
-        fontCombo.completes = true
-        fontCombo.addItems(withObjectValues: NSFontManager.shared.availableFontFamilies)
+        fontCombo.isEditable = false
+        fontCombo.addItems(withObjectValues: SystemFontCatalog.monospacedFamilies)
         fontCombo.placeholderString = "SF Mono (default)"
         fontCombo.controlSize = .regular
         fontCombo.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
         fontCombo.target = self
         fontCombo.action = #selector(fontChanged(_:))
+
+        interfaceFontCombo.usesDataSource = false
+        interfaceFontCombo.isEditable = false
+        interfaceFontCombo.addItems(withObjectValues: SystemFontCatalog.allFamilies)
+        interfaceFontCombo.placeholderString = "System (default)"
+        interfaceFontCombo.controlSize = .regular
+        interfaceFontCombo.font = .systemFont(ofSize: SettingsMetrics.bodyFontSize)
+        interfaceFontCombo.target = self
+        interfaceFontCombo.action = #selector(controlChanged(_:))
 
         lightsPopup.addItems(withTitles: ["circle", "square", "rectangle", "diamond"])
         optionKeyPopup.addItems(withTitles: Self.optionAsAltTitles.dropLast())
@@ -345,6 +355,7 @@ final class SettingsWindowController: NSWindowController {
         panels = [
             "Appearance": panel([
                 section("Interface"),
+                row("Font", interfaceFontCombo),
                 sliderRow("Text size", interfaceSizeSlider, interfaceSizeValue),
                 section("Terminal font"),
                 row("Family", fontCombo),
@@ -486,6 +497,7 @@ final class SettingsWindowController: NSWindowController {
 
     private func populate() {
         fontCombo.stringValue = current.fontName ?? ""
+        interfaceFontCombo.stringValue = current.interfaceFontName ?? ""
         rebuildStyles(for: current.fontName)
         if let style = current.fontStyle { stylePopup.selectItem(withTitle: style) }
         sizeSlider.doubleValue = Double(current.fontSize)
@@ -589,6 +601,8 @@ final class SettingsWindowController: NSWindowController {
         var c = current
         let family = fontCombo.stringValue.trimmingCharacters(in: .whitespaces)
         c.fontName = family.isEmpty ? nil : family
+        let interfaceFamily = interfaceFontCombo.stringValue.trimmingCharacters(in: .whitespaces)
+        c.interfaceFontName = interfaceFamily.isEmpty ? nil : interfaceFamily
         let style = stylePopup.titleOfSelectedItem ?? "Regular"
         c.fontStyle = style == "Regular" ? nil : style
         c.fontSize = CGFloat(sizeSlider.doubleValue.rounded())

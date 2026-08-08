@@ -195,6 +195,36 @@ final class TerminalTests: XCTestCase {
         XCTAssertFalse(t.screenText().contains("alt-content"))
     }
 
+    func testPartialTopAnchoredScrollDoesNotEnterScrollback() {
+        let t = makeTerminal(cols: 10, rows: 4)
+        feed(t, "\u{1B}[1;2rA\r\nB\r\n")
+
+        XCTAssertFalse(t.historyText(lines: 10).contains("A"))
+    }
+
+    func testLastCommandOutputUsesMainBufferWhileAltScreenIsActive() {
+        let t = makeTerminal()
+        feed(t, "\u{1B}]133;C\u{07}output\u{1B}]133;D;0\u{07}")
+        feed(t, "\u{1B}[?1049h")
+
+        XCTAssertEqual(t.lastCommandOutput(), "output")
+    }
+
+    func testAltScreenShrinkPreservesMainScrollback() {
+        let t = makeTerminal(cols: 40, rows: 10)
+        for i in 0..<30 { feed(t, "MAINHIST\(i)\r\n") }
+        let before = t.historyText(lines: 500)
+            .components(separatedBy: "MAINHIST").count - 1
+
+        feed(t, "\u{1B}[?1049h")
+        t.resize(cols: 30, rows: 6)
+        feed(t, "\u{1B}[?1049l")
+
+        let after = t.historyText(lines: 500)
+            .components(separatedBy: "MAINHIST").count - 1
+        XCTAssertEqual(after, before)
+    }
+
     // MARK: selection
 
     func testSelectionWordAndText() {

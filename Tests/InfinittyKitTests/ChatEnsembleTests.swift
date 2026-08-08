@@ -22,6 +22,43 @@ final class ChatEnsembleTests: XCTestCase {
             .missingAgent)
     }
 
+    func testGeneratedAliasesUseModelIdentityInsteadOfProviderOrder() {
+        XCTAssertEqual(
+            ChatEnsemble.suggestedAlias(
+                provider: "codex", modelTitle: "Codex · GPT-5",
+                modelID: "gpt-5"),
+            "gpt-5")
+        XCTAssertEqual(
+            ChatEnsemble.suggestedAlias(
+                provider: "claude", modelTitle: "Claude · Claude Sonnet 5",
+                modelID: "claude-sonnet-5"),
+            "sonnet")
+        XCTAssertEqual(
+            ChatEnsemble.suggestedAlias(
+                provider: "codex", modelTitle: "Codex · GPT-5",
+                modelID: "gpt-5-codex"),
+            "codex")
+        XCTAssertEqual(
+            ConfiguredChatAgent(
+                provider: "claude", modelID: "claude-sonnet-5",
+                modelTitle: "Claude · Claude Sonnet 5", effort: "Auto",
+                alias: "!!!").alias,
+            "sonnet")
+        let first = ConfiguredChatAgent(
+            provider: "hermes", modelID: "openrouter:foo/model-a",
+            modelTitle: "Hermes · Model A", effort: "High", alias: "first")
+        let renamed = ConfiguredChatAgent(
+            provider: "hermes", modelID: "openrouter:foo/model-a",
+            modelTitle: "Hermes · Model A", effort: "High", alias: "second")
+        XCTAssertEqual(first.id, renamed.id, "aliases must not change backend identity")
+        XCTAssertNotEqual(
+            first.id,
+            ConfiguredChatAgent(
+                provider: "hermes", modelID: "openrouter:foo/model-b",
+                modelTitle: "Hermes · Model A", effort: "High", alias: "other").id,
+            "distinct exact model ids need distinct backend state")
+    }
+
     func testResolverSupportsProviderAndExactModelAliases() {
         let claude = ChatEnsemble.resolve("claude", choices: choices, effort: "Low")
         XCTAssertEqual(claude?.modelTitle, "Claude · Sonnet")

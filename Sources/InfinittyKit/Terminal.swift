@@ -67,9 +67,39 @@ private struct SavedCursor {
     var charsets: [Bool] = [false, false]
 }
 
+/// A small FIFO mutex for the terminal state. The parser can arrive in a
+/// tight loop while a PTY is producing output; an unfair lock lets that loop
+/// repeatedly reacquire the state lock ahead of AppKit input and renderer
+/// snapshots. Ticketing makes the next waiter win, so a key event waits for
+/// at most the current parser/snapshot critical section rather than an
+/// unbounded number of output chunks.
+private final class TerminalStateLock {
+    private let condition = NSCondition()
+    private var nextTicket: UInt64 = 0
+    private var servingTicket: UInt64 = 0
+
+    func lock() {
+        condition.lock()
+        let ticket = nextTicket
+        nextTicket &+= 1
+        while ticket != servingTicket {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+
+    func unlock() {
+        condition.lock()
+        servingTicket &+= 1
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
 /// The terminal engine: grid, scrollback, and a single-pass VT parser.
 /// `feed` is called from the PTY read thread with whole kernel-sized batches;
-/// the renderer takes snapshots. One unfair lock, held briefly by both sides.
+/// the renderer takes snapshots. State access is FIFO-serialized so a busy
+/// PTY cannot starve AppKit input.
 final class Terminal {
     static let maxScrollback = 10_000
     static let maxCSIParameters = 64
@@ -84,7 +114,7 @@ final class Terminal {
     var onChange: (() -> Void)? // fired after every mutating batch, outside the lock
     var onMarker: ((UInt8, Int) -> Void)? // OSC 133 events: (kind, exitCode)
 
-    private let lock = OSAllocatedUnfairLock()
+    private let lock = TerminalStateLock()
     private var generation: UInt64 = 1
 
     private(set) var cols: Int
@@ -466,7 +496,9 @@ final class Terminal {
         }
         guard nc != cols || nr != rows else { return }
 
-        func adjust(_ grid: inout [[Cell]], keepHistory: Bool) {
+        func adjust(
+            _ grid: inout [[Cell]], cursorRow: Int, keepHistory: Bool
+        ) {
             for i in 0..<grid.count {
                 if grid[i].count > nc {
                     grid[i].removeLast(grid[i].count - nc)
@@ -478,7 +510,7 @@ final class Terminal {
                 let excess = grid.count - nr
                 // Drop from the top when the cursor would fall off the bottom,
                 // preserving history; otherwise trim blank space at the bottom.
-                if cy >= nr {
+                if cursorRow >= nr {
                     for _ in 0..<excess {
                         let row = grid.removeFirst()
                         if keepHistory {
@@ -495,8 +527,12 @@ final class Terminal {
             }
         }
 
-        adjust(&screen, keepHistory: !usingAlt)
-        adjust(&inactiveScreen, keepHistory: false)
+        adjust(&screen, cursorRow: cy, keepHistory: !usingAlt)
+        let inactiveCursorRow = usingAlt ? savedMain.y : cy
+        adjust(
+            &inactiveScreen,
+            cursorRow: inactiveCursorRow,
+            keepHistory: usingAlt)
 
         if cy >= nr { cy = nr - 1 }
         cols = nc
@@ -892,7 +928,7 @@ final class Terminal {
         let count = min(n, bottom - top + 1)
         for _ in 0..<count {
             let row = screen.remove(at: top)
-            if top == 0 && !usingAlt {
+            if top == 0 && bottom == rows - 1 && !usingAlt {
                 scrollback.append(row)
                 sbAppended += 1
                 if viewOffset > 0 {
@@ -2154,7 +2190,8 @@ final class Terminal {
         if idx < scrollback.count { return scrollback[idx] }
         let screenIdx = idx - scrollback.count
         guard screenIdx < rows else { return nil }
-        return screen[screenIdx]
+        let visibleScreen = usingAlt ? inactiveScreen : screen
+        return visibleScreen[screenIdx]
     }
 
     private func textForLines(from: Int, to: Int) -> String {

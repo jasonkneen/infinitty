@@ -88,8 +88,17 @@ final class TerminalView: NSView {
 
     // Live-resize winsize coalescing: our grid reflows and repaints every
     // frame, but the child only gets SIGWINCH at ~12 Hz plus a final one.
+    private struct PtyWinsize: Equatable {
+        let cols: Int
+        let rows: Int
+        let pixelWidth: Int
+        let pixelHeight: Int
+    }
+
     private var winsizeTimer: Timer?
-    private var pendingWinsize: (cols: Int, rows: Int, pw: Int, ph: Int)?
+    private var pendingWinsize: PtyWinsize?
+    private var latestWinsize: PtyWinsize?
+    private var lastSentWinsize: PtyWinsize?
 
     // Agent-control glow (control-socket activity).
     private var glowView: AgentGlowView?
@@ -315,9 +324,20 @@ final class TerminalView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        renderer?.setRenderingEnabled(window != nil && !isHiddenOrHasHiddenAncestor)
         guard window != nil else { return }
         updateGeometry()
         window?.makeFirstResponder(self)
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        renderer?.setRenderingEnabled(false)
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        renderer?.setRenderingEnabled(window != nil && !isHiddenOrHasHiddenAncestor)
     }
 
     override func layout() {
@@ -376,6 +396,7 @@ final class TerminalView: NSView {
         winsizeTimer?.invalidate()
         winsizeTimer = nil
         flushPendingWinsize()
+        if let latestWinsize { sendWinsize(latestWinsize, force: true) }
         terminal.touch()
     }
 
@@ -407,35 +428,76 @@ final class TerminalView: NSView {
         let topPx = renderer.topInsetPoints * scale
         let cols = max(2, Int((pixelSize.width - insetPx * 2) / CGFloat(renderer.atlas.cellWidth)))
         let rows = max(2, Int((pixelSize.height - insetPx * 2 - topPx) / CGFloat(renderer.atlas.cellHeight)))
+        let size = PtyWinsize(
+            cols: cols, rows: rows,
+            pixelWidth: Int(pixelSize.width), pixelHeight: Int(pixelSize.height))
+        latestWinsize = size
         if cols != terminal.cols || rows != terminal.rows {
             terminal.resize(cols: cols, rows: rows)
-            let size = (cols, rows, Int(pixelSize.width), Int(pixelSize.height))
-            if inLiveResize {
-                // Flooding the child with SIGWINCH makes slow TUIs lag far
-                // behind the drag; coalesce to ~12 Hz (leading edge fires
-                // immediately so responsive apps track the drag).
-                if winsizeTimer == nil {
-                    pty.setSize(cols: size.0, rows: size.1, pixelWidth: size.2, pixelHeight: size.3)
-                    winsizeTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) {
-                        [weak self] _ in
-                        self?.winsizeTimer = nil
-                        self?.flushPendingWinsize()
-                    }
-                } else {
-                    pendingWinsize = size
-                }
-            } else {
-                pendingWinsize = nil
-                pty.setSize(cols: size.0, rows: size.1, pixelWidth: size.2, pixelHeight: size.3)
-            }
         }
+        scheduleWinsize(size)
         terminal.touch()
+    }
+
+    private func scheduleWinsize(_ size: PtyWinsize) {
+        if !inLiveResize {
+            winsizeTimer?.invalidate()
+            winsizeTimer = nil
+            pendingWinsize = nil
+            sendWinsize(size)
+            return
+        }
+
+        // A layout can repeat the leading value while AppKit is tracking. Do
+        // not create a timer or duplicate an ioctl for an unchanged size.
+        if size == lastSentWinsize {
+            winsizeTimer?.invalidate()
+            winsizeTimer = nil
+            pendingWinsize = nil
+            return
+        }
+        if winsizeTimer == nil {
+            // AppKit drives live resize in NSEventTrackingRunLoopMode. The
+            // default-mode timer can therefore wait until mouse-up; common
+            // modes keep the bounded coalescing active during the drag.
+            sendWinsize(size)
+            let timer = Timer(timeInterval: 0.08, repeats: false) { [weak self] _ in
+                self?.winsizeTimer = nil
+                self?.flushPendingWinsize()
+            }
+            winsizeTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        } else {
+            pendingWinsize = size
+        }
     }
 
     private func flushPendingWinsize() {
         guard let size = pendingWinsize else { return }
         pendingWinsize = nil
-        pty.setSize(cols: size.cols, rows: size.rows, pixelWidth: size.pw, pixelHeight: size.ph)
+        sendWinsize(size)
+    }
+
+    private func sendWinsize(_ size: PtyWinsize, force: Bool = false) {
+        guard force || size != lastSentWinsize else { return }
+        // Geometry is calculated before PTY spawn. Keep it cached, but do not
+        // mark it sent until a live master fd exists.
+        guard pty.fd >= 0 else { return }
+        pty.setSize(
+            cols: size.cols, rows: size.rows,
+            pixelWidth: size.pixelWidth, pixelHeight: size.pixelHeight)
+        lastSentWinsize = size
+    }
+
+    /// Force the latest geometry after `PTY.spawn`, which initializes pixel
+    /// dimensions to zero and may have happened after the first layout pass.
+    func syncWinsizeAfterSpawn() {
+        if latestWinsize == nil { updateGeometry() }
+        guard let latestWinsize else { return }
+        winsizeTimer?.invalidate()
+        winsizeTimer = nil
+        pendingWinsize = nil
+        sendWinsize(latestWinsize, force: true)
     }
 
     // MARK: - keyboard

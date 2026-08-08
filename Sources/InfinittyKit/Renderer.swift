@@ -125,8 +125,12 @@ final class Renderer: NSObject {
     private var displayLink: CADisplayLink?
     private var renderThread: Thread?
     private var renderRunLoop: CFRunLoop?
+    /// Hidden native/quick tabs keep their session alive, but must not keep a
+    /// display link and Metal encoder hot while another tab is visible.
+    private let renderingEnabled = OSAllocatedUnfairLock(initialState: true)
     private let linkPaused = OSAllocatedUnfairLock(initialState: false)
     private let resizeRenderPending = OSAllocatedUnfairLock(initialState: false)
+    private var forceFrame = false // protected by renderLock
 
     private(set) var config: AppConfig
     private(set) var usesSharedWindowSurface = false
@@ -336,6 +340,10 @@ final class Renderer: NSObject {
             guard let self else { return }
             self.renderRunLoop = CFRunLoopGetCurrent()
             link.add(to: RunLoop.current, forMode: .common)
+            if !self.renderingEnabled.withLock({ $0 }) {
+                self.linkPaused.withLock { $0 = true }
+                link.isPaused = true
+            }
             while !Thread.current.isCancelled {
                 _ = RunLoop.current.run(mode: .default, before: .distantFuture)
             }
@@ -348,6 +356,7 @@ final class Renderer: NSObject {
 
     /// Called from any thread when terminal content changes.
     func poke() {
+        guard renderingEnabled.withLock({ $0 }) else { return }
         let wasPaused = linkPaused.withLock { paused -> Bool in
             let was = paused
             paused = false
@@ -355,19 +364,59 @@ final class Renderer: NSObject {
         }
         guard wasPaused, let rl = renderRunLoop else { return }
         CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) { [weak self] in
-            self?.displayLink?.isPaused = false
-            self?.lastActivityTime = CACurrentMediaTime()
+            guard let self, self.renderingEnabled.withLock({ $0 }) else { return }
+            self.displayLink?.isPaused = false
+            self.lastActivityTime = CACurrentMediaTime()
+        }
+        CFRunLoopWakeUp(rl)
+    }
+
+    /// Enable rendering only while this pane is visible. Sessions remain alive
+    /// in hidden native/quick tabs, but rendering them would consume a full
+    /// parser/snapshot/Metal pipeline for every background tab.
+    func setRenderingEnabled(_ enabled: Bool) {
+        let changed = renderingEnabled.withLock { current -> Bool in
+            guard current != enabled else { return false }
+            current = enabled
+            return true
+        }
+        guard changed else { return }
+
+        guard let rl = renderRunLoop else {
+            if enabled {
+                renderLock.lock()
+                forceFrame = true
+                renderLock.unlock()
+            }
+            return
+        }
+        CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) { [weak self] in
+            guard let self else { return }
+            if enabled {
+                self.linkPaused.withLock { $0 = false }
+                self.renderLock.lock()
+                self.forceFrame = true
+                self.lastActivityTime = CACurrentMediaTime()
+                self.renderLock.unlock()
+                self.displayLink?.isPaused = false
+            } else {
+                self.linkPaused.withLock { $0 = true }
+                self.displayLink?.isPaused = true
+            }
         }
         CFRunLoopWakeUp(rl)
     }
 
     @objc private func tick(_ link: CADisplayLink) {
+        guard renderingEnabled.withLock({ $0 }) else { return }
         let gen = terminal.currentGeneration
         renderLock.lock()
         let petNeedsFrame = petDirty
+        let forceFrame = self.forceFrame
+        self.forceFrame = false
         let lastGen = self.lastGen // written under renderLock in render()
         renderLock.unlock()
-        if petNeedsFrame {
+        if forceFrame || petNeedsFrame {
             lastActivityTime = CACurrentMediaTime()
             render()
             return
@@ -400,7 +449,7 @@ final class Renderer: NSObject {
     /// waits on the GPU, so when another process saturates the GPU we drop
     /// resize frames instead of freezing keyboard/mouse input.
     func renderNow() {
-        guard let rl = renderRunLoop else { return }
+        guard renderingEnabled.withLock({ $0 }), let rl = renderRunLoop else { return }
         let shouldSchedule = resizeRenderPending.withLock { pending -> Bool in
             if pending { return false }
             pending = true
@@ -408,8 +457,10 @@ final class Renderer: NSObject {
         }
         guard shouldSchedule else { return }
         CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) { [weak self] in
-            self?.resizeRenderPending.withLock { $0 = false }
-            self?.render()
+            guard let self else { return }
+            self.resizeRenderPending.withLock { $0 = false }
+            guard self.renderingEnabled.withLock({ $0 }) else { return }
+            self.render()
         }
         CFRunLoopWakeUp(rl)
     }
@@ -424,6 +475,7 @@ final class Renderer: NSObject {
 
     /// Tear down the render thread and display link (pane/tab closed).
     func shutdown() {
+        renderingEnabled.withLock { $0 = false }
         guard let rl = renderRunLoop else { return }
         renderThread?.cancel()
         CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) { [displayLink] in
@@ -436,6 +488,7 @@ final class Renderer: NSObject {
     // MARK: - frame
 
     private func render() {
+        guard renderingEnabled.withLock({ $0 }) else { return }
         // Hold renderLock only long enough to grab a consistent set of CPU
         // pointers. Snapshot + glyph rasterization (CoreText) happen OUTSIDE
         // it so main-thread applyConfig / updateScale / petHitRect never wait

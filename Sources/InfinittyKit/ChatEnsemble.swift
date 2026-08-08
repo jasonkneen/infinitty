@@ -6,22 +6,30 @@ struct ConfiguredChatAgent: Equatable, Sendable, Identifiable {
     let id: String
     let alias: String
     let provider: String
+    let modelID: String?
     let modelTitle: String
     let effort: String
     var isEnabled: Bool
 
     init(
-        provider: String, modelTitle: String, effort: String,
+        provider: String, modelID: String? = nil, modelTitle: String, effort: String,
         alias: String? = nil, isEnabled: Bool = true
     ) {
         let providerKey = ChatEnsemble.normalizedAlias(provider)
-        let modelKey = ChatEnsemble.normalizedAlias(modelTitle)
+        let normalizedModelID = modelID?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        let canonicalModelID = normalizedModelID?.isEmpty == true ? nil : normalizedModelID
+        let modelKey = ChatEnsemble.normalizedAlias(canonicalModelID ?? modelTitle)
         self.provider = providerKey
+        self.modelID = canonicalModelID
         self.modelTitle = modelTitle
         self.effort = effort
-        self.alias = ChatEnsemble.normalizedAlias(
-            alias ?? ChatEnsemble.suggestedAlias(
-                provider: providerKey, modelTitle: modelTitle))
+        let generatedAlias = ChatEnsemble.suggestedAlias(
+            provider: providerKey, modelTitle: modelTitle, modelID: self.modelID)
+        let requestedAlias = ChatEnsemble.normalizedAlias(alias ?? generatedAlias)
+        self.alias = requestedAlias.isEmpty
+            ? ChatEnsemble.normalizedAlias(generatedAlias)
+            : requestedAlias
         self.isEnabled = isEnabled
         self.id = "\(providerKey)|\(modelKey)|\(effort.lowercased())"
     }
@@ -74,21 +82,44 @@ enum ChatEnsemble {
 
     /// Picks a short, mention-friendly name from the selected model. Provider
     /// and version noise are removed (`Claude Sonnet 5` → `sonnet`,
-    /// `GPT-5.6-Sol` → `sol`); callers add numeric suffixes on collisions.
-    static func suggestedAlias(provider: String, modelTitle: String) -> String {
+    /// `GPT-5.6-Sol` → `sol`). When a model only has a family/version name,
+    /// its exact id supplies a stable fallback instead of always naming the
+    /// first participant after a provider. Callers add numeric suffixes on
+    /// collisions.
+    static func suggestedAlias(
+        provider: String, modelTitle: String, modelID: String? = nil
+    ) -> String {
         let providerKey = normalizedAlias(provider)
-        let generic: Set<String> = [
-            providerKey, "auto", "claude", "codex", "gpt", "model",
-            "configured", "default",
-        ]
-        let meaningful = normalizedAlias(modelTitle)
-            .split(separator: "-")
-            .map(String.init)
+        let generic = Set([
+            "auto", "agent", "model", "configured", "default", "available",
+            "best", "latest", "current", "claude", "codex", "gpt", "openai",
+            "anthropic", "opencode", "hermes", "amp", "sourcegraph", "provider",
+            "openrouter", "fireworks", "accounts", "models",
+        ] + providerKey.split(separator: "-").map(String.init))
+
+        let meaningful = [modelTitle, modelID ?? ""]
+            .flatMap { normalizedAlias($0).split(separator: "-").map(String.init) }
             .filter { token in
                 !generic.contains(token)
                     && token.rangeOfCharacter(from: .letters) != nil
             }
-        return meaningful.last ?? providerKey
+        if let candidate = meaningful.last { return candidate }
+
+        // Keep a compact model-id suffix when the only useful distinction is a
+        // family/version (for example `gpt-5`), but never expose a provider
+        // routing prefix such as `openai-codex:` in the mention name.
+        if let modelID {
+            let suffix = modelID
+                .split(whereSeparator: { $0 == ":" || $0 == "/" })
+                .last.map(String.init) ?? modelID
+            let compact = normalizedAlias(suffix)
+            let idTokens = compact.split(separator: "-").map(String.init)
+            if !providerKey.isEmpty, idTokens.contains(providerKey) {
+                return providerKey
+            }
+            if !compact.isEmpty { return compact }
+        }
+        return providerKey.isEmpty ? "agent" : providerKey
     }
 
     /// Returns nil for an ordinary prompt and the command argument otherwise.
@@ -121,6 +152,7 @@ enum ChatEnsemble {
         guard let choice else { return nil }
         return ConfiguredChatAgent(
             provider: choice.configuredProvider,
+            modelID: choice.modelID,
             modelTitle: choice.displayName,
             effort: effort)
     }

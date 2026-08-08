@@ -591,9 +591,10 @@ final class ShadcnAssistantHost {
 
     func setRoster(_ agents: [ConfiguredChatAgent]) {
         model.roster = agents.map {
-            AIAssistantRosterEntry(
+            let model = $0.modelTitle.isEmpty ? $0.provider : $0.modelTitle
+            return AIAssistantRosterEntry(
                 id: $0.id, name: $0.alias,
-                detail: "\($0.modelTitle) · \($0.effort)",
+                detail: "Model: \(model) · Effort: \($0.effort)",
                 isEnabled: $0.isEnabled)
         }
     }

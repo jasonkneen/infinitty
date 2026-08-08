@@ -14,6 +14,7 @@ import Foundation
 /// Format: `key = value`, `#` comments. Native keys and their Ghostty
 /// aliases are both accepted:
 ///   font / font-family
+///   interface-font-family / ui-font-family / chat-font-family
 ///   font-size
 ///   margin / padding / window-padding-x / window-padding-y
 ///   line-spacing / line-height / adjust-cell-height  (1.1 | 10% | 3)
@@ -23,8 +24,9 @@ import Foundation
 /// adjust-cell-* accepts Ghostty forms: `10%` (relative) or a bare number
 /// (extra points added to the cell).
 ///
-/// Environment overrides: INFINITTY_FONT, INFINITTY_FONT_SIZE, INFINITTY_MARGIN,
-/// INFINITTY_LINE_SPACING, INFINITTY_KERNING.
+/// Environment overrides: INFINITTY_FONT, INFINITTY_INTERFACE_FONT,
+/// INFINITTY_FONT_SIZE, INFINITTY_MARGIN, INFINITTY_LINE_SPACING,
+/// INFINITTY_KERNING.
 struct AppConfig {
     var fontName: String?
     var fontStyle: String? // face style: Thin, Light, Medium, ... (font-style)
@@ -42,6 +44,9 @@ struct AppConfig {
     /// UI accent for chrome selection (active tab, file-row highlight, chat
     /// bubbles, send button, pinned-tab default). nil = built-in indigo.
     var accentColor: UInt32?
+    /// Font family for Chat and ShadKit interface chrome. nil keeps the
+    /// platform UI font; terminal glyphs continue to use `fontName`.
+    var interfaceFontName: String?
     /// Shared type size for Chat and ShadKit interface chrome. The complete
     /// typography ramp scales with it; terminal glyph size remains `fontSize`.
     var interfaceFontSize: CGFloat = 15
@@ -140,6 +145,7 @@ struct AppConfig {
             env["INFINITTY_\(key)"] ?? env["TITERM_\(key)"] // legacy fallback
         }
         if let v = envValue("FONT"), !v.isEmpty { c.fontName = v }
+        if let v = envValue("INTERFACE_FONT"), !v.isEmpty { c.interfaceFontName = v }
         if let v = envValue("FONT_SIZE").flatMap(Double.init) { c.fontSize = CGFloat(v) }
         if let v = envValue("MARGIN").flatMap(Double.init) { c.margin = CGFloat(v) }
         if let v = envValue("LINE_SPACING").flatMap(Double.init) { c.lineSpacing = CGFloat(v) }
@@ -184,6 +190,8 @@ struct AppConfig {
                     fontName = value
                     fontSet = true
                 }
+            case "interface-font", "interface-font-family", "ui-font", "ui-font-family", "chat-font", "chat-font-family":
+                interfaceFontName = value
             case "font-size", "fontsize", "size":
                 if let v = Double(value) { fontSize = CGFloat(v) }
             case "margin", "padding":
@@ -417,6 +425,9 @@ struct AppConfig {
             if petMode != "window" { out += "pet-mode = pane\n" }
         } else {
             out += "pet = none\n"
+        }
+        if let f = interfaceFontName, !f.isEmpty {
+            out += "interface-font-family = \(f)\n"
         }
         if interfaceFontSize != 15 {
             out += "interface-font-size = \(Double(interfaceFontSize))\n"

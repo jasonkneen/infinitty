@@ -7,19 +7,25 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(AppConfig().pet, "infinitty")
     }
 
-    func testInterfaceFontSizeParsesAndRoundTripsSeparatelyFromTerminalFont() {
+    func testInterfaceFontSettingsRoundTripSeparatelyFromTerminalFont() {
         var config = AppConfig()
         config.apply(fileContents: """
+            font = SF Mono
             font-size = 13
+            interface-font-family = Avenir Next
             interface-font-size = 19
             """)
+        XCTAssertEqual(config.fontName, "SF Mono")
         XCTAssertEqual(config.fontSize, 13)
+        XCTAssertEqual(config.interfaceFontName, "Avenir Next")
         XCTAssertEqual(config.interfaceFontSize, 19)
 
         var reparsed = AppConfig()
-        reparsed.apply(fileContents: config.serializeApp())
+        reparsed.apply(fileContents: config.serialize())
+        XCTAssertEqual(reparsed.fontName, "SF Mono")
+        XCTAssertEqual(reparsed.fontSize, 13)
+        XCTAssertEqual(reparsed.interfaceFontName, "Avenir Next")
         XCTAssertEqual(reparsed.interfaceFontSize, 19)
-        XCTAssertEqual(reparsed.fontSize, AppConfig().fontSize)
     }
 
     func testPetOptOutParsesAndSurvivesSerialization() {
@@ -89,6 +95,15 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.palette[9], 0xFF0000)
         XCTAssertEqual(config.palette.count, 3)
         XCTAssertEqual(config.foreground, 0xD7DAE0)
+    }
+
+    func testThemeUsesConfiguredInterfaceFontFamily() {
+        var config = AppConfig()
+        config.interfaceFontName = "Avenir Next"
+
+        XCTAssertEqual(
+            UISurfaceTheme.theme(for: config).typography.sansFamily,
+            "Avenir Next")
     }
 
     func testThemeAppliesPaletteOverrides() {

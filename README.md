@@ -395,11 +395,12 @@ Config file at `~/.config/infinitty/infinitty.conf` (or `~/.infinitty.conf`), se
 `infinitty.conf.example`:
 
 ```ini
-font         = Berkeley Mono   # any installed font (default: SF Mono)
+font         = Berkeley Mono   # installed monospace font (default: SF Mono)
 font-style   = Thin            # face style: Thin, Light, Medium, SemiBold, ...
 font-thicken = false           # ghostty-style stroke thickening
 font-size    = 13              # terminal glyphs, points
-# interface-font-size = 15     # Chat + ShadKit UI; also available in Settings
+# interface-font-family = Avenir Next # any installed UI font
+# interface-font-size   = 15           # Chat + ShadKit UI; also available in Settings
 margin       = 8               # window content margin, points
 line-spacing = 1.0             # line height multiplier
 kerning      = 1.0             # cell width multiplier (letter spacing)
@@ -416,9 +417,9 @@ within ~150 ms. Also ⌘R, or `printf 'reload\n' | nc -U "$INFINITTY_SOCKET"`.
 pixels, `font-thicken`), and if no infinitty config exists, the keys infinitty
 understands are read from `~/.config/ghostty/config` automatically.
 
-Environment variables override everything: `INFINITTY_FONT`, `INFINITTY_FONT_SIZE`,
-`INFINITTY_MARGIN`, `INFINITTY_LINE_SPACING`, `INFINITTY_KERNING`; `INFINITTY_CONFIG`
-points at an alternate config file.
+Environment variables override everything: `INFINITTY_FONT`, `INFINITTY_INTERFACE_FONT`,
+`INFINITTY_FONT_SIZE`, `INFINITTY_MARGIN`, `INFINITTY_LINE_SPACING`,
+`INFINITTY_KERNING`; `INFINITTY_CONFIG` points at an alternate config file.
 
 ### Nerd Fonts
 
