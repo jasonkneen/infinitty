@@ -277,8 +277,16 @@ final class AppControlServer {
             }
             let slots = clientSlots
             let thread = Thread { [weak self] in
-                self?.handle(client)
-                slots.signal()
+                var slotRelinquished = false
+                self?.handle(client, onRelinquishSlot: {
+                    if !slotRelinquished {
+                        slotRelinquished = true
+                        slots.signal()
+                    }
+                })
+                if !slotRelinquished {
+                    slots.signal()
+                }
             }
             thread.name = "infinitty-app-client"
             thread.qualityOfService = .utility
@@ -286,7 +294,7 @@ final class AppControlServer {
         }
     }
 
-    private func handle(_ fd: Int32) {
+    private func handle(_ fd: Int32, onRelinquishSlot: (() -> Void)? = nil) {
         let context = AppControlRequestContext(
             peerProcessID: Self.peerProcessID(for: fd))
         var tv = timeval(tv_sec: 5, tv_usec: 0)
@@ -314,6 +322,9 @@ final class AppControlServer {
         let request = String(decoding: line, as: UTF8.self)
 
         if request == "subscribe" {
+            // Relinquish RPC client slot so long-lived streaming subscribers
+            // never starve short-lived control requests.
+            onRelinquishSlot?()
             // Long-lived: millisecond send deadline so fanout on the main
             // thread stays bounded and a stalled reader gets pruned; no
             // receive deadline (we only write). Hold until client EOF.

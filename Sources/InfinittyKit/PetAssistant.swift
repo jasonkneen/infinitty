@@ -4490,7 +4490,17 @@ final class PetAssistant: NSObject, NSPopoverDelegate {
                     .generation == request.generation
         }
         if Thread.isMainThread { return check() }
-        return DispatchQueue.main.sync(execute: check)
+        // Never main.sync: the backend worker would freeze for as long as
+        // AppKit is in a tracking loop or Channel teardown. A timed-out
+        // check treats the start as stale and the turn is dropped.
+        var result = false
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            result = check()
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 0.25) == .success else { return false }
+        return result
     }
 
     private func scheduleBackendWork(_ work: @escaping () -> Void) {

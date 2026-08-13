@@ -3,7 +3,7 @@ import XCTest
 @testable import InfinittyKit
 
 final class RunCommandQueueTests: XCTestCase {
-    func testTimedOutHeadStaysCorrelatedUntilItsMarkerArrives() {
+    func testTimedOutHeadAdvancesQueueToNextCommand() {
         let queue = RunCommandQueue()
         let firstID = UUID()
         let secondID = UUID()
@@ -18,18 +18,15 @@ final class RunCommandQueueTests: XCTestCase {
             command: "fast",
             completion: { completions.append(("fast", $0, $1)) })))
 
-        XCTAssertFalse(queue.cancelTimedOut(id: firstID))
-        XCTAssertEqual(queue.count, 2)
-        XCTAssertEqual(
-            queue.completeHead(exitCode: 7, output: "slow output"),
-            "fast")
-        XCTAssertEqual(completions.map(\.0), ["slow"])
-        XCTAssertEqual(completions[0].1, 7)
-        XCTAssertEqual(completions[0].2, "slow output")
+        // Head times out: cancelTimedOut removes the timed out head and yields the next command
+        let next = queue.cancelTimedOut(id: firstID)
+        XCTAssertEqual(next, "fast")
+        XCTAssertEqual(queue.count, 1)
 
         XCTAssertNil(queue.completeHead(exitCode: 0, output: "fast output"))
-        XCTAssertEqual(completions.map(\.0), ["slow", "fast"])
-        XCTAssertEqual(completions[1].2, "fast output")
+        XCTAssertEqual(completions.map(\.0), ["fast"])
+        XCTAssertEqual(completions[0].1, 0)
+        XCTAssertEqual(completions[0].2, "fast output")
         XCTAssertTrue(queue.isEmpty)
     }
 
@@ -43,7 +40,8 @@ final class RunCommandQueueTests: XCTestCase {
         XCTAssertFalse(queue.enqueue(.init(
             id: secondID, command: "queued", completion: { _, _ in })))
 
-        XCTAssertTrue(queue.cancelTimedOut(id: secondID))
+        let next = queue.cancelTimedOut(id: secondID)
+        XCTAssertNil(next)
         XCTAssertEqual(queue.count, 1)
         XCTAssertNil(queue.completeHead(exitCode: 0, output: "done"))
     }

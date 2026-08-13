@@ -1,4 +1,6 @@
+import Darwin
 import XCTest
+
 @testable import InfinittyKit
 
 /// The spawned shell is where every agent, script, and SSH client starts, so
@@ -126,5 +128,39 @@ final class PTYEnvironmentTests: XCTestCase {
 
         wait(for: [output.satisfied], timeout: 15)
         XCTAssertTrue(output.text.contains("PANE [7]"), "pty output was:\n\(output.text)")
+    }
+
+    /// The app ignores SIGPIPE so a stalled socket cannot kill it. The child
+    /// must restore SIG_DFL or `yes | head` prints "Broken pipe".
+    func testChildRestoresDefaultSIGPIPE() {
+        signal(SIGPIPE, SIG_IGN)
+        defer { signal(SIGPIPE, SIG_DFL) }
+
+        let pty = PTY()
+        let output = reader(pty, waitingFor: "DONE_PIPE")
+        XCTAssertTrue(pty.spawn(cols: 80, rows: 24))
+        defer { endShell(pty); pty.invalidate() }
+
+        pty.write(Array("yes | head -1; printf 'DONE_PIPE\\n'\n".utf8))
+        wait(for: [output.satisfied], timeout: 15)
+        XCTAssertFalse(
+            output.text.contains("Broken pipe"),
+            "child inherited SIGPIPE=IGN; pty output was:\n\(output.text)")
+        XCTAssertTrue(
+            output.text.contains("DONE_PIPE"),
+            "pty output was:\n\(output.text)")
+    }
+
+    func testInvalidateClosesMasterWithoutWaitingForChildExit() {
+        let pty = PTY()
+        XCTAssertTrue(pty.spawn(cols: 80, rows: 24))
+        XCTAssertGreaterThanOrEqual(pty.fd, 0)
+        XCTAssertGreaterThan(pty.pid, 0)
+        pty.invalidate()
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, pty.fd >= 0 {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+        XCTAssertEqual(pty.fd, -1)
     }
 }

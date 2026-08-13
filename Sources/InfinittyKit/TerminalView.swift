@@ -327,7 +327,9 @@ final class TerminalView: NSView {
         renderer?.setRenderingEnabled(window != nil && !isHiddenOrHasHiddenAncestor)
         guard window != nil else { return }
         updateGeometry()
-        window?.makeFirstResponder(self)
+        // Never steal first responder here. Split/reparent fires this on
+        // every leaf; taking key would yank typing out of Chat, a sibling
+        // pane, or a rename field. Focus is set by click or explicit navigation.
     }
 
     override func viewDidHide() {
@@ -379,7 +381,7 @@ final class TerminalView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         guard let scale = window?.backingScaleFactor, scale > 0 else { return }
-        renderer.updateScale(scale)
+        renderer?.updateScale(scale)
         updateGeometry()
     }
 

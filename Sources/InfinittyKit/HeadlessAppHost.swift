@@ -1921,8 +1921,12 @@ private final class HeadlessTerminalSession: @unchecked Sendable {
 
         guard completion.wait(timeout: .now() + timeout) == .success else {
             runLock.lock()
-            _ = runQueue.cancelTimedOut(id: itemID)
+            let next = runQueue.cancelTimedOut(id: itemID)
             runLock.unlock()
+            if let nextCmd = next {
+                terminal.userDidInput()
+                pty.write(Array(nextCmd.utf8) + [0x0D])
+            }
             return .failure(.failed(
                 "timed out waiting for completion "
                     + "(is OSC 133 shell integration enabled?)"))
@@ -1976,7 +1980,7 @@ private final class HeadlessTerminalSession: @unchecked Sendable {
         runQueue.cancelAll()
         runLock.unlock()
         if terminateShell {
-            pty.terminateProcessGroup()
+            pty.invalidate()
         }
     }
 

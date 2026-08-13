@@ -32,15 +32,18 @@ final class RunCommandQueue {
         return items.first?.command
     }
 
-    /// Cancel a timed-out item only when it has not been sent. Returns true
-    /// when the item was removed. A false result for the head is intentional:
-    /// the queue remains correlated with the terminal's eventual marker.
+    /// Cancel a timed-out item. If the timed-out item was the in-flight head,
+    /// it is removed and the next command to send (if any) is returned so that
+    /// the queue never remains wedged behind a stalled or markerless command.
     @discardableResult
-    func cancelTimedOut(id: UUID) -> Bool {
-        guard let index = items.firstIndex(where: { $0.id == id }),
-              index > 0 else { return false }
+    func cancelTimedOut(id: UUID) -> String? {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return nil }
+        let wasHead = index == 0
         items.remove(at: index)
-        return true
+        if wasHead {
+            return items.first?.command
+        }
+        return nil
     }
 
     func cancelAll(exitCode: Int = -1) {

@@ -194,7 +194,7 @@ final class PixelPetSpeechBubble: NSView {
     var onClick: (() -> Void)?
 
     override var isFlipped: Bool { true }
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
 
     init(text: String) {
         super.init(frame: .zero)

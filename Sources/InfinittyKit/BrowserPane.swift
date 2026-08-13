@@ -2218,6 +2218,13 @@ final class BrowserPaneController: NSViewController, WKNavigationDelegate, WKUID
         finishNavigationFailure(navigation, error: error)
     }
 
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        cancelPendingNavigations(code: "process_terminated", message: "Web content process terminated unexpectedly.")
+        cancelPendingAutomation()
+        refreshChrome()
+        onEvent?(["event": "browser-load-state", "browserId": browserID, "loading": false, "error": "Web content process terminated"])
+    }
+
     private func finishNavigationFailure(_ navigation: WKNavigation?, error: Error) {
         if let navigation {
             completeNavigation(

@@ -2890,16 +2890,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let endpointID = "\(collaborationInstanceID)/"
             + paneLedgerTerminalID(session)
         let registration = session.channelRegistration
-        let label: String
-        if let registration {
-            label = registration.displayName
-        } else if Thread.isMainThread {
-            label = paneHeaderTitle(for: session)
-        } else {
-            label = DispatchQueue.main.sync {
-                self.paneHeaderTitle(for: session)
-            }
-        }
+        // Never hop to main here: Channel socket threads call this while
+        // holding operationLock. main.sync deadlocks against the fg-process
+        // observer, which takes that lock from main. A slightly stale title
+        // is fine for the endpoint label.
+        let label = registration?.displayName
+            ?? session.paneTitleOverride
+            ?? session.agentSessionName
+            ?? session.title
         return CollaborationEndpoint(
             id: endpointID,
             kind: .terminal,
@@ -3255,37 +3253,46 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             displayName: NSFullUserName().isEmpty
                 ? NSUserName()
                 : NSFullUserName())
-        let result: Result<CollaborationSnapshot?, Error> = collaborationQueue.sync {
-            guard collaborationCoordinator.snapshot()?.channels.contains(where: {
-                      $0.endpoints.contains(where: { $0.id == endpointID })
-                  }) == true
-            else { return .success(nil) }
-            let request = CollaborationControlRequest(
-                op: .leave,
-                actor: actor,
-                idempotencyKey:
-                    "pane-leave:\(endpointID):\(UUID().uuidString)",
-                endpointID: endpointID)
-            guard let encoded = CollaborationControlCodec.encode(request) else {
-                return .failure(CollaborationRoomError.invalidValue(
-                    field: "request", reason: "could not encode leave"))
+        // Leave is fire-and-forget on the Channel queue. Waiting here on
+        // main freezes every PTY in the window (and deadlocks if a pane
+        // socket is in main.sync under operationLock).
+        collaborationQueue.async { [weak self] in
+            guard let self else { return }
+            let result: Result<CollaborationSnapshot?, Error> = {
+                guard self.collaborationCoordinator.snapshot()?.channels.contains(where: {
+                          $0.endpoints.contains(where: { $0.id == endpointID })
+                      }) == true
+                else { return .success(nil) }
+                let request = CollaborationControlRequest(
+                    op: .leave,
+                    actor: actor,
+                    idempotencyKey:
+                        "pane-leave:\(endpointID):\(UUID().uuidString)",
+                    endpointID: endpointID)
+                guard let encoded = CollaborationControlCodec.encode(request) else {
+                    return .failure(CollaborationRoomError.invalidValue(
+                        field: "request", reason: "could not encode leave"))
+                }
+                let executed = self.collaborationCoordinator.execute(encoded)
+                guard let snapshot = executed.snapshot else {
+                    return .failure(CollaborationRoomError.invalidValue(
+                        field: "coordinator", reason: executed.response))
+                }
+                return .success(snapshot)
+            }()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                switch result {
+                case .success(let snapshot):
+                    if let snapshot { self.applyCollaborationProjection(snapshot) }
+                case .failure(let error):
+                    self.appControl.broadcast([
+                        "event": "channel-error",
+                        "endpointId": endpointID,
+                        "message": String(describing: error),
+                    ])
+                }
             }
-            let executed = collaborationCoordinator.execute(encoded)
-            guard let snapshot = executed.snapshot else {
-                return .failure(CollaborationRoomError.invalidValue(
-                    field: "coordinator", reason: executed.response))
-            }
-            return .success(snapshot)
-        }
-        switch result {
-        case .success(let snapshot):
-            if let snapshot { applyCollaborationProjection(snapshot) }
-        case .failure(let error):
-            appControl.broadcast([
-                "event": "channel-error",
-                "endpointId": endpointID,
-                "message": String(describing: error),
-            ])
         }
     }
 
@@ -7041,8 +7048,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard sem.wait(timeout: .now() + 120) == .success else {
                 _ = onMain {
                     if let queue = self.runQueues[s.id] {
-                        _ = queue.cancelTimedOut(id: itemID)
-                        if queue.isEmpty { self.runQueues[s.id] = nil }
+                        let next = queue.cancelTimedOut(id: itemID)
+                        if queue.isEmpty {
+                            self.runQueues[s.id] = nil
+                        } else if let nextCmd = next {
+                            s.pty.write(Array(nextCmd.utf8) + [0x0D])
+                        }
                     }
                 }
                 return "error: timed out waiting for completion (is OSC 133 shell integration enabled?)"

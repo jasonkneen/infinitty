@@ -839,7 +839,7 @@ final class ChannelConnectorView: NSView {
 
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
 
     func setChannel(name: String?, color: NSColor?, memberCount: Int) {
         channelName = name
@@ -912,9 +912,25 @@ final class ChannelConnectorView: NSView {
         let startScreenPoint = window.convertPoint(toScreen: startWindowPoint)
         var dragging = false
 
-        while let next = window.nextEvent(
-            matching: [.leftMouseDragged, .leftMouseUp, .keyDown])
-        {
+        var cancelled = false
+        let keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 {
+                cancelled = true
+                return nil
+            }
+            return event
+        }
+        defer {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while !cancelled, Date() < deadline {
+            guard let next = window.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp],
+                until: Date().addingTimeInterval(0.05),
+                inMode: .eventTracking,
+                dequeue: true)
+            else { continue }
             let screenPoint = window.convertPoint(toScreen: next.locationInWindow)
             switch next.type {
             case .leftMouseDragged:
@@ -936,13 +952,6 @@ final class ChannelConnectorView: NSView {
                     onDragEnded?(screenPoint, false)
                 } else {
                     onActivate?()
-                }
-                return
-            case .keyDown where next.keyCode == 53:
-                if dragging {
-                    isDragging = false
-                    needsDisplay = true
-                    onDragEnded?(screenPoint, true)
                 }
                 return
             default:
@@ -1421,7 +1430,25 @@ final class PaneHeaderView: NSView {
         guard let window else { return }
         let start = event.locationInWindow
         var dragging = false
-        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .keyDown]) {
+        var cancelled = false
+        let keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 {
+                cancelled = true
+                return nil
+            }
+            return event
+        }
+        defer {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while !cancelled, Date() < deadline {
+            guard let next = window.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp],
+                until: Date().addingTimeInterval(0.05),
+                inMode: .eventTracking,
+                dequeue: true)
+            else { continue }
             switch next.type {
             case .leftMouseDragged:
                 guard window.isKeyWindow else {
@@ -1436,9 +1463,6 @@ final class PaneHeaderView: NSView {
                 if dragging { onDragMoved?(point) }
             case .leftMouseUp:
                 if dragging { onDragEnded?(next.locationInWindow, !window.isKeyWindow) }
-                return
-            case .keyDown where next.keyCode == 53: // Escape
-                if dragging { onDragEnded?(next.locationInWindow, true) }
                 return
             default:
                 break

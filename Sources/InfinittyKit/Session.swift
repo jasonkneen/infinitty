@@ -20,7 +20,13 @@ final class TerminalSession: NSObject {
     /// Agent-published plan/todo list shown from the pane header's checklist
     /// icon. Set via the pane socket (`todos <json>`), the app socket
     /// (`todos <id> <json>`), or the infinitty_todos MCP tool.
-    private(set) var todos: [PaneTodo] = []
+    private let todosLock = NSLock()
+    private var storedTodos: [PaneTodo] = []
+    var todos: [PaneTodo] {
+        todosLock.lock()
+        defer { todosLock.unlock() }
+        return storedTodos
+    }
     private let channelRegistrationLock = NSLock()
     private var storedChannelRegistration: TerminalAgentRegistration?
     /// Broadcast hook for todo changes (wired by the app delegate).
@@ -40,9 +46,11 @@ final class TerminalSession: NSObject {
 
     /// Replace the pane's todo list and refresh the header UI (main-safe).
     func setTodos(_ todos: [PaneTodo]) {
+        todosLock.lock()
+        storedTodos = todos
+        todosLock.unlock()
         let apply = { [weak self] in
             guard let self else { return }
-            self.todos = todos
             self.view.setTodos(todos)
             self.onTodosChanged?(self)
         }
@@ -114,10 +122,7 @@ final class TerminalSession: NSObject {
             guard let self else { return "error: pane gone" }
             let trimmed = arg.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty {
-                // Socket threads must not read main-mutated state directly.
-                let current = Thread.isMainThread
-                    ? self.todos : DispatchQueue.main.sync { self.todos }
-                return PaneTodoParser.encode(current)
+                return PaneTodoParser.encode(self.todos)
             }
             guard let todos = PaneTodoParser.parse(trimmed) else {
                 return "error: todos expects a JSON array"
@@ -214,6 +219,8 @@ final class TerminalSession: NSObject {
         return workingDirectory
     }
 
+    deinit { shutdown() }
+
     /// Release threads and the socket. Idempotent.
     func shutdown() {
         guard !torndown else { return }
@@ -225,6 +232,6 @@ final class TerminalSession: NSObject {
         control.stop()
         terminal.setHintProvider(nil)
         renderer.shutdown()
-        pty.terminateProcessGroup()
+        pty.invalidate()
     }
 }

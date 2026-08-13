@@ -1,6 +1,7 @@
 #include "cpty.h"
 
 #include <crt_externs.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +98,11 @@ pid_t cpty_spawn_shell(int *amaster, const struct winsize *ws,
     struct winsize wsz = *ws;
     pid_t pid = forkpty(amaster, NULL, NULL, &wsz);
     if (pid == 0) {
+        /* The GUI process ignores SIGPIPE so a stalled control client cannot
+           kill it. POSIX keeps IGN across exec, which makes `yes | head`
+           print "Broken pipe" instead of exiting. Restore the default
+           before exec — signal() is async-signal-safe. */
+        signal(SIGPIPE, SIG_DFL);
         /* chdir is async-signal-safe; on failure keep the inherited cwd. */
         if (cwd && *cwd) {
             (void)chdir(cwd);

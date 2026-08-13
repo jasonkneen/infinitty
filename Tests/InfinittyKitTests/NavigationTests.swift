@@ -2081,12 +2081,14 @@ final class NavigationTests: XCTestCase {
             ["Chat 2", "Lead Agent"])
 
         XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat2, in: window))
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         XCTAssertEqual(chat1.paneHeader.channelBadgeTextForTesting, "Channel 1 · 2")
         XCTAssertEqual(
             delegate.collaborationContextForTesting(pane: chat1)?
                 .peers.map(\.displayName),
             ["Chat 3"])
         XCTAssertTrue(delegate.closeUtilityPaneForTesting(chat3, in: window))
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         XCTAssertEqual(chat1.paneHeader.channelBadgeTextForTesting, "Channel 1 · 1")
         XCTAssertEqual(
             delegate.collaborationContextForTesting(pane: chat1)?

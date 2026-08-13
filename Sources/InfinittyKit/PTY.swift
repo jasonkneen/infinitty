@@ -17,12 +17,18 @@ private func withCStringOrNull<R>(
 final class PTY {
     private let lock = NSLock()
     private var _fd: Int32 = -1
-    private(set) var pid: pid_t = -1
+    private var _pid: pid_t = -1
 
     var fd: Int32 {
         lock.lock()
         defer { lock.unlock() }
         return _fd
+    }
+
+    var pid: pid_t {
+        lock.lock()
+        defer { lock.unlock() }
+        return _pid
     }
 
     var onData: ((UnsafePointer<UInt8>, Int) -> Void)?
@@ -67,7 +73,7 @@ final class PTY {
         _ = fcntl(master, F_SETFD, FD_CLOEXEC)
         lock.lock()
         _fd = master
-        pid = child
+        _pid = child
         lock.unlock()
 
         let thread = Thread { [weak self] in self?.readLoop() }
@@ -77,6 +83,8 @@ final class PTY {
         thread.start()
         return true
     }
+
+    deinit { invalidate() }
 
     private func readLoop() {
         let bufSize = 1 << 18
@@ -95,20 +103,8 @@ final class PTY {
                 break
             }
         }
-        var status: Int32 = 0
-        if pid > 0 {
-            waitpid(pid, &status, 0)
-        }
-        // Close the master exactly once, via the write queue so no in-flight
-        // write can race the close.
-        lock.lock()
-        let master = _fd
-        _fd = -1
-        lock.unlock()
-
-        if master >= 0 {
-            writeQueue.async { close(master) }
-        }
+        reapChild()
+        closeMaster()
         onEOF?()
     }
 
@@ -121,6 +117,15 @@ final class PTY {
             bytes.withUnsafeBufferPointer { p in
                 var off = 0
                 while off < p.count {
+                    var pfd = pollfd(fd: targetFD, events: Int16(POLLOUT), revents: 0)
+                    let ready = poll(&pfd, 1, 500)
+                    if ready < 0 {
+                        if errno == EINTR { continue }
+                        break
+                    } else if ready == 0 {
+                        // Slave buffer full or child stopped; do not park writeQueue indefinitely.
+                        break
+                    }
                     let n = Darwin.write(targetFD, p.baseAddress! + off, p.count - off)
                     if n > 0 {
                         off += n
@@ -137,7 +142,14 @@ final class PTY {
     func setSize(cols: Int, rows: Int, pixelWidth: Int = 0, pixelHeight: Int = 0) {
         let targetFD = self.fd
         guard targetFD >= 0 else { return }
-        _ = cpty_set_winsize(targetFD, UInt16(rows), UInt16(cols), UInt16(pixelWidth), UInt16(pixelHeight))
+        // ioctl on the write queue so it cannot land on a reused fd after
+        // closeMaster() has retired this number.
+        writeQueue.async { [weak self] in
+            guard let self, self.fd == targetFD else { return }
+            _ = cpty_set_winsize(
+                targetFD, UInt16(rows), UInt16(cols),
+                UInt16(pixelWidth), UInt16(pixelHeight))
+        }
     }
 
     /// `forkpty` makes the child a session/process-group leader. Signal the
@@ -148,6 +160,43 @@ final class PTY {
         guard child > 0 else { return }
         if kill(-child, signalNumber) != 0 {
             _ = kill(child, signalNumber)
+        }
+    }
+
+    /// Drop the master immediately so a child that ignores SIGHUP cannot pin
+    /// the read thread. Safe to call more than once; later terminate/ioctl
+    /// see fd == -1 and a cleared pid so they cannot hit a reused id.
+    func invalidate() {
+        terminateProcessGroup()
+        closeMaster()
+    }
+
+    private func closeMaster() {
+        lock.lock()
+        let master = _fd
+        _fd = -1
+        lock.unlock()
+        guard master >= 0 else { return }
+        writeQueue.async {
+            _ = Darwin.shutdown(master, SHUT_RDWR)
+            close(master)
+        }
+    }
+
+    private func reapChild() {
+        lock.lock()
+        let child = _pid
+        _pid = -1
+        lock.unlock()
+        guard child > 0 else { return }
+        var status: Int32 = 0
+        if waitpid(child, &status, WNOHANG) == 0 {
+            _ = kill(-child, SIGTERM)
+            usleep(50_000)
+            if waitpid(child, &status, WNOHANG) == 0 {
+                _ = kill(-child, SIGKILL)
+                _ = waitpid(child, &status, 0)
+            }
         }
     }
 }

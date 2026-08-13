@@ -130,6 +130,9 @@ final class Renderer: NSObject {
     private let renderingEnabled = OSAllocatedUnfairLock(initialState: true)
     private let linkPaused = OSAllocatedUnfairLock(initialState: false)
     private let resizeRenderPending = OSAllocatedUnfairLock(initialState: false)
+    /// Set before the render thread stores `renderRunLoop` so a fast
+    /// open/close cannot leak the display link.
+    private let shutdownRequested = OSAllocatedUnfairLock(initialState: false)
     private var forceFrame = false // protected by renderLock
 
     private(set) var config: AppConfig
@@ -340,9 +343,15 @@ final class Renderer: NSObject {
             guard let self else { return }
             self.renderRunLoop = CFRunLoopGetCurrent()
             link.add(to: RunLoop.current, forMode: .common)
-            if !self.renderingEnabled.withLock({ $0 }) {
-                self.linkPaused.withLock { $0 = true }
+            if self.shutdownRequested.withLock({ $0 })
+                || !self.renderingEnabled.withLock({ $0 })
+            {
                 link.isPaused = true
+                if self.shutdownRequested.withLock({ $0 }) {
+                    link.invalidate()
+                    return
+                }
+                self.linkPaused.withLock { $0 = true }
             }
             while !Thread.current.isCancelled {
                 _ = RunLoop.current.run(mode: .default, before: .distantFuture)
@@ -475,8 +484,13 @@ final class Renderer: NSObject {
 
     /// Tear down the render thread and display link (pane/tab closed).
     func shutdown() {
+        shutdownRequested.withLock { $0 = true }
         renderingEnabled.withLock { $0 = false }
-        guard let rl = renderRunLoop else { return }
+        guard let rl = renderRunLoop else {
+            displayLink?.invalidate()
+            displayLink = nil
+            return
+        }
         renderThread?.cancel()
         CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) { [displayLink] in
             displayLink?.invalidate()

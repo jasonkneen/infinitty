@@ -17,3 +17,6 @@ notarize-*.zip
 pkg/
 /.fusion
 /.pi-subagents
+/.contract/
+/.plans/
+multi-model.md

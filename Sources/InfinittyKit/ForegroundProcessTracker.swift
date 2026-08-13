@@ -13,17 +13,31 @@ public struct ForegroundProcessInfo: Equatable {
     /// App bundle URL if this PID is part of a `.app`, else nil.
     public let bundleURL: URL?
 
+    private static let iconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 128
+        return cache
+    }()
+
     public func icon() -> NSImage? {
+        let key = ((bundleURL?.path ?? executablePath ?? rawName) as NSString)
+        if let cached = Self.iconCache.object(forKey: key) {
+            return cached
+        }
+        var image: NSImage?
         if let bundle = bundleURL {
             if let appIcon = NSWorkspace.shared.icon(forFile: bundle.path) as NSImage?,
                appIcon.size.width > 0 {
-                return appIcon
+                image = appIcon
             }
         }
-        if let path = executablePath {
-            return NSWorkspace.shared.icon(forFile: path)
+        if image == nil, let path = executablePath {
+            image = NSWorkspace.shared.icon(forFile: path)
         }
-        return nil
+        if let image {
+            Self.iconCache.setObject(image, forKey: key)
+        }
+        return image
     }
 
     /// A neutral tooltip describing the process.
@@ -47,29 +61,22 @@ public final class ForegroundProcessTracker {
     public static let cwdKey = "cwd"
 
     public let shellPid: pid_t
-    public private(set) var current: ForegroundProcessInfo? {
-        didSet {
-            if current != oldValue {
-                NotificationCenter.default.post(
-                    name: ForegroundProcessTracker.didChangeNotification,
-                    object: self,
-                    userInfo: [Self.infoKey: current as Any]
-                )
-            }
-        }
+    private let lock = NSLock()
+    private var storedCurrent: ForegroundProcessInfo?
+    private var storedCwd: String?
+
+    public var current: ForegroundProcessInfo? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCurrent
     }
+
     /// Live working directory of the foreground process (the shell itself when
     /// sitting at a prompt), refreshed on the same poll as `current`.
-    public private(set) var currentCwd: String? {
-        didSet {
-            if currentCwd != oldValue {
-                NotificationCenter.default.post(
-                    name: ForegroundProcessTracker.cwdDidChangeNotification,
-                    object: self,
-                    userInfo: [Self.cwdKey: currentCwd as Any]
-                )
-            }
-        }
+    public var currentCwd: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCwd
     }
 
     private var timer: DispatchSourceTimer?
@@ -96,8 +103,8 @@ public final class ForegroundProcessTracker {
     public func stop() {
         timer?.cancel(); timer = nil
         isRunning = false
-        current = nil
-        currentCwd = nil
+        publishCurrent(nil)
+        publishCwd(nil)
     }
 
     /// Force an immediate poll (e.g. right after a command starts/ends).
@@ -107,8 +114,34 @@ public final class ForegroundProcessTracker {
 
     private func tick() {
         let foreground = Self.probeForeground(of: shellPid)
-        current = foreground
-        currentCwd = foreground.flatMap { Self.directory(of: $0.pid) }
+        publishCurrent(foreground)
+        publishCwd(foreground.flatMap { Self.directory(of: $0.pid) })
+    }
+
+    private func publishCurrent(_ value: ForegroundProcessInfo?) {
+        lock.lock()
+        let changed = storedCurrent != value
+        storedCurrent = value
+        lock.unlock()
+        guard changed else { return }
+        NotificationCenter.default.post(
+            name: ForegroundProcessTracker.didChangeNotification,
+            object: self,
+            userInfo: [Self.infoKey: value as Any]
+        )
+    }
+
+    private func publishCwd(_ value: String?) {
+        lock.lock()
+        let changed = storedCwd != value
+        storedCwd = value
+        lock.unlock()
+        guard changed else { return }
+        NotificationCenter.default.post(
+            name: ForegroundProcessTracker.cwdDidChangeNotification,
+            object: self,
+            userInfo: [Self.cwdKey: value as Any]
+        )
     }
 
     // MARK: - probing
